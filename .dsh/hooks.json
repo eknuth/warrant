@@ -1,0 +1,36 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "F=\"$PWD/.dsh/hooks/block_secrets.py\"; if [ ! -f \"$F\" ]; then echo \"hook missing: $F\" >&2; exit 2; fi; python3 \"$F\"",
+          "timeout": 15
+        },
+        {
+          "type": "command",
+          "command": "F=\"$PWD/.dsh/hooks/block_double_emit.py\"; if [ ! -f \"$F\" ]; then echo \"hook missing: $F\" >&2; exit 2; fi; python3 \"$F\"",
+          "timeout": 15
+        },
+        {
+          "type": "command",
+          "command": "F=\"$PWD/.dsh/hooks/block_parked_column.py\"; if [ ! -f \"$F\" ]; then echo \"hook missing: $F\" >&2; exit 2; fi; python3 \"$F\"",
+          "timeout": 15
+        }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "F=\"$PWD/.dsh/hooks/lint_after_commit.py\"; if [ ! -f \"$F\" ]; then echo \"hook missing: $F\" >&2; exit 2; fi; python3 \"$F\"",
+          "timeout": 90
+        }
+      ]
+    }
+  ]
+}

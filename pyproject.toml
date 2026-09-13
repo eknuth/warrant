@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "warrant"
+version = "0.0.0"
+description = "Per-action authorization for agents, plus provenance evals."
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    # Exact version, not a floor. The harness is a developer preview that
+    # changes between prereleases, and docs/decisions/000-harness.md reports
+    # this as the pinned SDK.
+    "deepseek-harness-sdk==0.1.5rc1",
+]
+
+[tool.uv]
+# W0 ships scripts and tests, not an installable package. Without this, uv
+# tries to build a wheel named after the project and fails on an empty tree.
+package = false
+
+[tool.pytest.ini_options]
+# The whole tests tree, so W1's top-level tests are collected without having to
+# remember to widen this. Naming tests/hooks here would have made `make test`
+# report a green suite that never ran W1's tests.
+testpaths = ["tests"]

@@ -1,0 +1,92 @@
+# Warrant dsh profile rows (EDW-1438 W0).
+#
+# The rows every Warrant profile shares, installed into all three by
+# infra/dsh/install-profile.sh:
+#
+#   warrant            the Web UI               (base + web app)
+#   warrant-headless   one-shot jobs            (base + headless)
+#   warrant-sdk        the Python SDK runtime   (base + sdk app)
+#
+# The hook matrix has to be identical in all three, and a per-profile copy is
+# three chances for it to drift. Rows that only the browser surface needs live
+# in web.patch.yml, which is installed into `warrant` alone.
+#
+# This file is the source of truth. The live copies under $DSH_HOME are
+# generated: edit here and run `make dsh-profile`. Never run
+# `dsh --profile warrant --from-default-profile web` again; that overwrites the
+# live profile and drops every row below.
+#
+# DeepSeek cloud API only. No other vendor's CLI, no other vendor's API.
+
+# Own settings document, so the global ~/.dsh/settings.yaml (local model
+# default, other vendor routes) never reaches these profiles.
+- id: settings
+  config:
+    path: __DSH_HOME__/profiles/warrant/settings.yaml
+
+# The deepseek-official route. The key resolves per request from
+# DEEPSEEK_API_KEY: launch environment, then $DSH_HOME/.credentials.yaml,
+# then <cwd>/.env. Reasoning effort is the Linear effort label.
+- id: llm-deepseek
+  config:
+    apiKeyEnv: DEEPSEEK_API_KEY
+    reasoningEffort: high
+
+# Implementer children run on the same model at the standing effort.
+#
+# `modelSelectionSettings: true` would expose a per-call `reasoning_effort`, and
+# it cannot be set on this standing row: the plugin rejects it at load with
+# "standing `modelSelectionSettings` requires a scoped preset Context", which
+# fails the whole profile. That scoped Context comes from an agent preset, and
+# per-call effort belongs with the preset work rather than here. Until then the
+# effort is fixed per instance, which is why the reviewer below is its own row.
+- id: tool-subagent
+  config:
+    provider: spawn
+    toolName: subagent
+    backgroundMode: continuable
+    agentOptions:
+      reasoningEffort: high
+
+# The reviewer's row: the same delegation tool under its own name, pinned to the
+# top effort. `/review` calls this one, so the review always runs at `max`
+# without depending on a per-call field. It is a new row rather than a retarget,
+# so it has to be inserted: a bare `- id:` patch entry only rewrites a row some
+# bundle already composed, and an unknown id fails the profile at load with
+# `patch: entry "tool-subagent-review" not found`.
+- insert:
+    - id: tool-subagent-review
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent_review
+        backgroundMode: continuable
+        agentOptions:
+          reasoningEffort: max
+
+# Project hooks: the four checks in .dsh/hooks/ run as command hooks on the
+# events .dsh/hooks.json names. configPath and projectDir are absolute because a
+# relative path resolves against the directory that launched dsh, and a one-shot
+# from anywhere but this checkout would then silently run no hooks at all.
+- insert:
+    - id: hooks-claude-code
+      name: '@deepseek-ai/dsh-hooks-claude-code'
+      config:
+        configPath: __REPO_ROOT__/.dsh/hooks.json
+        projectDir: __REPO_ROOT__
+        defaultTimeoutMs: 90000
+
+# Linear MCP (hosted, Streamable HTTP). Tools appear as mcp__linear__*.
+# Optional overlay: the skills read issues with the linear CLI and never need
+# it. The key is read from LINEAR_API_KEY in the launching shell at boot; it
+# never lands in a file here.
+- insert:
+    - id: mcp-linear
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: linear
+        transport: streamable-http
+        url: https://mcp.linear.app/mcp
+        headers:
+          Authorization: !!js '`Bearer ${process.env.LINEAR_API_KEY}`'
+        toolCallTimeoutMs: 60000
