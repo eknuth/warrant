@@ -1,0 +1,18 @@
+# Warrant Web UI rows (EDW-1438 W0). Installed into the `warrant` profile only.
+#
+# This deployment is reached through a Tailscale Serve proxy, so browsers are
+# remote even though the server binds loopback. The auto picker resolves
+# "native" in that situation and opens the folder dialog on the unattended Mac;
+# compose the browse picker directly instead (the seam's documented swap point).
+#
+# Kept out of core.patch.yml because the headless and SDK profiles have no
+# directory picker to replace, and a patch entry that names a missing row is
+# noise in their boot log.
+
+- id: directory-picker
+  disabled: true
+- insert:
+    - id: directory-picker-browse
+      name: '@deepseek-ai/dsh-host-directory-picker-browse'
+    - id: directory-picker-browse-ui
+      name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'
