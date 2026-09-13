@@ -1,0 +1,11 @@
+# secrets
+.env
+.env.*
+!.env.example
+.linear.toml
+
+# local
+.venv/
+__pycache__/
+runs/
+.DS_Store
