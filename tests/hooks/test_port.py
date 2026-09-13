@@ -41,7 +41,11 @@ def random_key(*, lowercase: bool = True) -> str:
     the hook under test, and this file is committed, so every fixture of that
     shape is built here instead.
     """
-    alphabet = string.ascii_lowercase + string.digits if lowercase else string.ascii_uppercase + string.digits
+    alphabet = (
+        string.ascii_lowercase + string.digits
+        if lowercase
+        else string.ascii_uppercase + string.digits
+    )
     return "".join(random.choice(alphabet) for _ in range(24))
 
 
@@ -70,7 +74,9 @@ VENDOR_PREFIXES = (
 )
 
 
-def run_hook(hook: Path, payload: object, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def run_hook(
+    hook: Path, payload: object, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run one hook with `payload` on stdin, exactly as the bridge does."""
     stdin = payload if isinstance(payload, str) else json.dumps(payload)
     return subprocess.run(
@@ -96,9 +102,7 @@ def bash_payload(command: str, cwd: Path) -> dict[str, object]:
 
 
 def git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=30
-    )
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=30)
 
 
 def init_repo(path: Path) -> None:
@@ -576,7 +580,9 @@ def run_configured_command(
 
 def configured_commands() -> list[str]:
     config = load_hook_config()
-    return [str(h["command"]) for groups in config.values() for group in groups for h in group["hooks"]]
+    return [
+        str(h["command"]) for groups in config.values() for group in groups for h in group["hooks"]
+    ]
 
 
 def test_hook_config_runs_its_script_when_the_script_is_there() -> None:

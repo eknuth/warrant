@@ -45,7 +45,9 @@ KEY_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("an AWS access key id", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
     ("a Linear API key", re.compile(r"\blin_api_[A-Za-z0-9]{20,}")),
 ]
-ENV_ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD))\s*=\s*(\S*)")
+ENV_ASSIGNMENT = re.compile(
+    r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD))\s*=\s*(\S*)"
+)
 FORBIDDEN_NAMES = {".env", ".credentials.yaml"}
 SEPARATORS = set("&|;\n()")
 
