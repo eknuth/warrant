@@ -65,6 +65,11 @@ KEY_SAMPLES: dict[str, object] = {
 # no matter what the value is, and this file is committed.
 SHAPED_KEY_SAMPLE = KEY_SAMPLES["a key with a prefix reserved for keys"]()
 
+# A value that looks like a real credential rather than a placeholder, built at
+# run time so no secret-shaped literal is committed. Used to prove that editing
+# `.env.example` cannot widen the secrets hook's allowlist.
+REAL_SHAPED_VALUE = "Real" + random_key() + "Token"
+
 VENDOR_PREFIXES = (
     "sk-ant-",
     "hcaik_",
@@ -155,6 +160,46 @@ def test_secrets_blocks_key_shaped_added_line(tmp_path: Path) -> None:
     assert proc.returncode == 2
     assert "config.py" in proc.stderr
     assert SHAPED_KEY_SAMPLE not in proc.stderr, "the reason must never carry the value"
+
+
+def test_secrets_is_not_bypassed_by_a_real_value_in_env_example(tmp_path: Path) -> None:
+    """`.env.example` is committed, so it cannot be its own allowlist.
+
+    The allowlist used to be every line of that file. Anyone could add a real
+    credential to it and then commit the same line anywhere, which is a guard
+    defeated by editing the file it guards. Only bracket-shaped placeholder
+    values are admitted now.
+    """
+    init_repo(tmp_path)
+    (tmp_path / ".env.example").write_text(
+        "DEEPSEEK_API_KEY=<your-deepseek-api-key>\nGITEA_ADMIN_TOKEN=<your-gitea-admin-token>\n"
+    )
+    token_line = f"GITEA_ADMIN_TOKEN={REAL_SHAPED_VALUE}"
+    # The attacker edits the file the guard reads, then commits the value.
+    with (tmp_path / ".env.example").open("a") as handle:
+        handle.write(token_line + "\n")
+    (tmp_path / "cfg.py").write_text(f"GITEA_ADMIN_TOKEN={REAL_SHAPED_VALUE}\n")
+    git(["add", "-f", ".env.example", "cfg.py"], tmp_path)
+
+    proc = run_hook(SECRETS, bash_payload("git commit -m 'config'", tmp_path))
+
+    assert proc.returncode == 2, "a real value in .env.example must not be an allowlist entry"
+    assert ".env.example" in proc.stderr, "the real value is a finding in the example file itself"
+    assert "cfg.py" in proc.stderr, "and in any other file that repeats it"
+    assert REAL_SHAPED_VALUE not in proc.stderr
+
+
+def test_secrets_passes_a_bracketed_placeholder_that_is_also_in_env_example(tmp_path: Path) -> None:
+    """The intended path still works: a placeholder line from the example passes."""
+    init_repo(tmp_path)
+    line = "DEEPSEEK_API_KEY=<your-deepseek-api-key>"
+    (tmp_path / ".env.example").write_text(line + "\n")
+    (tmp_path / "docs.md").write_text(f"Copy this line into .env:\n\n    {line}\n")
+    git(["add", "docs.md"], tmp_path)
+
+    proc = run_hook(SECRETS, bash_payload("git commit -m 'docs'", tmp_path))
+
+    assert proc.returncode == 0, proc.stderr
 
 
 @pytest.mark.parametrize("label", sorted(KEY_SAMPLES))
@@ -322,6 +367,40 @@ def test_secrets_passes_the_staged_w0_diff(tmp_path: Path) -> None:
 
     assert proc.returncode == 0, proc.stderr
     assert proc.stderr == ""
+
+
+def test_secrets_blocks_a_real_value_under_a_credential_shaped_name(tmp_path: Path) -> None:
+    """A key-shaped name with a real value is refused whatever the value looks like."""
+    init_repo(tmp_path)
+    (tmp_path / ".env.example").write_text("POSTGRES_PASSWORD=<your-postgres-password>\n")
+    (tmp_path / "cfg.py").write_text(f"POSTGRES_PASSWORD={REAL_SHAPED_VALUE}\n")
+    git(["add", "cfg.py"], tmp_path)
+
+    proc = run_hook(SECRETS, bash_payload("git commit -m 'config'", tmp_path))
+
+    assert proc.returncode == 2
+    assert "cfg.py" in proc.stderr
+    assert REAL_SHAPED_VALUE not in proc.stderr
+
+
+def test_secrets_misses_a_credential_under_a_name_without_a_credential_suffix(
+    tmp_path: Path,
+) -> None:
+    """The known gap, pinned so a fix has to change this test.
+
+    `WARRANT_DB_DSN='postgres://user:password@host/db'` carries a live password
+    and the hook lets it through, because the assignment rule keys on the name
+    and the value matches no key pattern. Closing it means either a DSN-shaped
+    pattern or a check that does not depend on the name at all.
+    """
+    init_repo(tmp_path)
+    value = f"postgres://warrant:{REAL_SHAPED_VALUE}@localhost:5432/warrant"
+    (tmp_path / "cfg.py").write_text(f"WARRANT_DB_DSN='{value}'\n")
+    git(["add", "cfg.py"], tmp_path)
+
+    proc = run_hook(SECRETS, bash_payload("git commit -m 'config'", tmp_path))
+
+    assert proc.returncode == 0, "if the hook now catches this, update this test and the docs"
 
 
 # --- block_double_emit -----------------------------------------------------

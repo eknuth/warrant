@@ -39,7 +39,9 @@ services:
       timeout: 3s
       retries: 20
       start_period: 15s
-    restart: unless-stopped
+    # No restart policy. This is a local stack, so `docker compose stop` should
+    # leave it stopped; `unless-stopped` brings it back on the next Docker
+    # start, which reads as a service nobody asked to run.
 
 volumes:
   keycloak-data:

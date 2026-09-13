@@ -159,11 +159,36 @@ def project_root(directory: Path) -> Path:
     return directory
 
 
-def example_lines(project: Path) -> set[str]:
+def is_placeholder(value: str) -> bool:
+    """Whether `value` is written as a placeholder rather than a secret.
+
+    A bracketed or shell-substituted value is a promise to fill it in later.
+    Anything else is either the real thing or too close to it to wave through.
+    """
+    value = value.strip().strip("'\"")
+    bracketed = value.startswith("<") and value.endswith(">")
+    return bool(value) and (bracketed or value.startswith("$") or value.startswith("{{"))
+
+
+def placeholder_lines(project: Path) -> set[str]:
+    """The lines of `.env.example` whose values are placeholders.
+
+    This file is committed, so it is not a trust anchor. An allowlist taken from
+    it wholesale lets anyone add a real credential there and then commit that
+    same line anywhere, which is a guard bypassed by editing the file it guards.
+    Only bracket-shaped values are admitted, so a real value added to
+    `.env.example` is a finding wherever it appears, including in that file.
+    """
     path = project / ".env.example"
     if not path.is_file():
         return set()
-    return {line.strip() for line in path.read_text(errors="replace").splitlines()}
+    allowed = set()
+    for line in path.read_text(errors="replace").splitlines():
+        stripped = line.strip()
+        match = ENV_ASSIGNMENT.match(stripped)
+        if match and is_placeholder(match.group(2)):
+            allowed.add(stripped)
+    return allowed
 
 
 def _git_diff(cwd: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
@@ -206,9 +231,9 @@ def scan_diff(diff: str, allowed: set[str]) -> list[str]:
             if pattern.search(added):
                 findings.append(f"{current}: {label}")
         m = ENV_ASSIGNMENT.match(added)
-        if m and m.group(2) and not m.group(2).startswith(("<", "$", "{{")):
+        if m and m.group(2) and not is_placeholder(m.group(2)):
             if added.strip() not in allowed:
-                findings.append(f"{current}: {m.group(1)}= with a value not in .env.example")
+                findings.append(f"{current}: {m.group(1)}= with a value that is not a placeholder")
     return findings
 
 
@@ -231,7 +256,7 @@ def check(command: str, cwd: Path) -> str | None:
                 for a in args
             )
             diff = staged_diff(where, include_working_tree=all_tracked)
-            findings = scan_diff(diff, example_lines(project_root(where)))
+            findings = scan_diff(diff, placeholder_lines(project_root(where)))
             if findings:
                 listed = "; ".join(sorted(set(findings)))
                 return (
