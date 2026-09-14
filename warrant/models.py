@@ -153,6 +153,18 @@ class Provenance(BaseModel):
     def has_external(self) -> bool:
         return any(source.author_tier in (Tier.external, Tier.unknown) for source in self.sources)
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def has_customer(self) -> bool:
+        """True when any source's author is a customer.
+
+        Customer material is not external, so `has_external` does not cover it.
+        A policy that treats a customer's words as untrusted reads this beside
+        `has_external`; the two are separate because a customer is known to the
+        business while an external author is not.
+        """
+        return any(source.author_tier is Tier.customer for source in self.sources)
+
 
 class AuthzRequest(BaseModel):
     """One proposed tool call, with everything needed to decide it.
@@ -160,6 +172,15 @@ class AuthzRequest(BaseModel):
     `tool` is a tool id from the access graph, `resource` a resource id. The
     provenance must belong to the same task as the chain; a mismatch is a caller
     bug, not a request to evaluate.
+
+    The four taint and target fields at the end are computed by W11 from the
+    call's arguments and the task's named target. They are on the request so the
+    engine can put them in the Cedar context, and they default to the value that
+    claims nothing: no overlapping sources, no external overlap, no secret in
+    the args, and a write that stays on the task's target. W7's policy tests set
+    them directly. A deployment that never fills them gets the honest default,
+    which means the content and target rules cannot fire, which is why W11 has
+    to fill them for those rules to be worth shipping.
     """
 
     chain: Chain
@@ -169,6 +190,13 @@ class AuthzRequest(BaseModel):
     args_digest: str
     provenance: Provenance
     ts: AwareDatetime
+    # W11: the ids the args overlap, and whether any of them is external-tier.
+    overlap_sources: set[str] = Field(default_factory=set)
+    overlap_external: bool = False
+    # W11: a deterministic secret-shape scan of the write's arguments.
+    args_touch_secret: bool = False
+    # W11: the write leaves the target the task named.
+    target_outside_task: bool = False
 
     @model_validator(mode="after")
     def _provenance_belongs_to_the_task(self) -> AuthzRequest:

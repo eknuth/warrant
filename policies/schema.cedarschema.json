@@ -7,11 +7,29 @@
           "count": {
             "type": "Long"
           },
+          "hasCustomer": {
+            "type": "Boolean"
+          },
           "hasExternal": {
             "type": "Boolean"
           },
           "minTier": {
             "type": "String"
+          },
+          "overlapExternal": {
+            "type": "Boolean"
+          },
+          "overlapSources": {
+            "type": "Set",
+            "element": {
+              "type": "String"
+            }
+          },
+          "sourceIds": {
+            "type": "Set",
+            "element": {
+              "type": "String"
+            }
           },
           "systems": {
             "type": "Set",
@@ -30,6 +48,9 @@
           "argsDigest": {
             "type": "String"
           },
+          "argsTouchSecret": {
+            "type": "Boolean"
+          },
           "groups": {
             "type": "Set",
             "element": {
@@ -39,17 +60,24 @@
           "justificationValid": {
             "type": "Boolean"
           },
+          "onBehalfOf": {
+            "type": "Entity",
+            "name": "Human"
+          },
           "provenance": {
             "type": "ProvenanceSummary"
           },
-          "scopes": {
+          "targetOutsideTask": {
+            "type": "Boolean"
+          },
+          "taskId": {
+            "type": "String"
+          },
+          "taskScopes": {
             "type": "Set",
             "element": {
               "type": "String"
             }
-          },
-          "taskId": {
-            "type": "String"
           },
           "tokenExp": {
             "type": "Long"
@@ -65,6 +93,12 @@
         "shape": {
           "type": "Record",
           "attributes": {
+            "entitledTools": {
+              "type": "Set",
+              "element": {
+                "type": "String"
+              }
+            },
             "groups": {
               "type": "Set",
               "element": {
