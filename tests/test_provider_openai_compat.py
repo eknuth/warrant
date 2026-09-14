@@ -22,7 +22,7 @@ from typing import Any
 import httpx
 import pytest
 
-from agents.providers.base import ToolResultBlock, ToolSchema, Turn
+from agents.providers.base import ToolResultBlock, ToolSchema, ToolUse, Turn
 from agents.providers.openai_compat import OpenAICompatProvider
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "provider"
@@ -68,6 +68,36 @@ def provider_for_test(
     bodies: list[dict[str, Any]], effort: str = "off"
 ) -> tuple[OpenAICompatProvider, Transport]:
     transport = Transport(bodies)
+    provider = OpenAICompatProvider(
+        "https://endpoint.test",
+        "test-key-not-a-secret",
+        "test-model",
+        effort,
+        http_client=transport.http,
+    )
+    return provider, transport
+
+
+class FlakyTransport:
+    """Answers the first request with an error, then replays recorded replies."""
+
+    def __init__(self, error: dict[str, Any], bodies: list[dict[str, Any]]) -> None:
+        self._error = error
+        self._bodies = list(bodies)
+        self.requests: list[dict[str, Any]] = []
+        self.http = httpx.AsyncClient(transport=httpx.MockTransport(self._handle))
+
+    def _handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(json.loads(request.content))
+        if len(self.requests) == 1:
+            return httpx.Response(400, json=self._error)
+        return httpx.Response(200, json=self._bodies.pop(0))
+
+
+def flaky_provider_for_test(
+    error: dict[str, Any], bodies: list[dict[str, Any]], effort: str = "high"
+) -> tuple[OpenAICompatProvider, FlakyTransport]:
+    transport = FlakyTransport(error, bodies)
     provider = OpenAICompatProvider(
         "https://endpoint.test",
         "test-key-not-a-secret",
@@ -244,3 +274,63 @@ def test_an_unknown_effort_is_refused() -> None:
         OpenAICompatProvider(
             "https://endpoint.test", "test-key-not-a-secret", "test-model", "medium"
         )
+
+
+async def test_a_refused_omission_is_retried_once_with_the_reasoning_echoed() -> None:
+    """The vendor's documented requirement, answered instead of failed.
+
+    The endpoint accepts the omission today, and the vendor documents that a
+    request carrying tools must repeat `reasoning_content`. Omitting first and
+    answering a 400 that names the field keeps both true: the run survives a
+    change of mind, and the retry is bounded to one.
+    """
+    error = {
+        "error": {
+            "message": (
+                "Error code: 400 - The reasoning_content in the thinking mode "
+                "must be passed back to the API."
+            ),
+            "type": "invalid_request_error",
+        }
+    }
+    provider, transport = flaky_provider_for_test(error, [recorded("text_final")], effort="high")
+
+    reply = await provider.run(
+        [
+            Turn(role="user", text="Find the port."),
+            Turn(
+                role="assistant",
+                text=None,
+                reasoning="The README and the code disagree, so read both.",
+                tool_uses=[ToolUse(id="call-1", name="get_port", args={}, malformed=False)],
+            ),
+            Turn(
+                role="user",
+                tool_results=[ToolResultBlock(tool_use_id="call-1", content="8081")],
+            ),
+        ],
+        TOOLS,
+    )
+
+    assert reply.text
+    assert len(transport.requests) == 2, "the provider must retry exactly once"
+    first, second = transport.requests
+    assert not any("reasoning_content" in message for message in first["messages"])
+    echoed = [m for m in second["messages"] if m.get("role") == "assistant"]
+    assert echoed and echoed[0]["reasoning_content"], "the retry must echo the reasoning"
+
+
+async def test_an_error_that_does_not_name_the_reasoning_field_is_not_retried() -> None:
+    """Only the documented refusal is answered, so a real error still fails."""
+    error = {
+        "error": {
+            "message": "Error code: 400 - bad tool schema",
+            "type": "invalid_request_error",
+        }
+    }
+    provider, transport = flaky_provider_for_test(error, [], effort="high")
+
+    with pytest.raises(Exception):
+        await provider.run([Turn(role="user", text="Find the port.")], TOOLS)
+
+    assert len(transport.requests) == 1

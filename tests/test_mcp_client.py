@@ -13,10 +13,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from agents.mcp_client import (
     CallResult,
     Endpoint,
     MCPClient,
+    MCPError,
     append_jsonl,
     call_record,
     digest,
@@ -155,3 +158,60 @@ async def test_call_routes_to_the_session_and_logs_the_chain(tmp_path: Path) -> 
     assert record["task_id"] == "task-1"
     assert record["tool"] == "get_issue"
     assert record["source"] == SOURCE
+
+
+class RaisingSession(FakeSession):
+    """A session whose transport fails, as a timeout or a dropped connection does."""
+
+    async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
+        self.calls.append((name, arguments))
+        raise RuntimeError("connection reset")
+
+
+async def test_a_call_that_raises_still_writes_a_line(tmp_path: Path) -> None:
+    """A failed call is what an audit reader most wants to see.
+
+    The line used to be written only after a successful return, so a bad tool
+    name or a transport error killed the run and left the run directory with no
+    record of the attempt.
+    """
+    client = MCPClient(
+        Endpoint(url="http://127.0.0.1:9101/mcp", bearer="a-token", name="gitea-mcp"),
+        chain=CHAIN,
+        runs_dir=tmp_path,
+    )
+    session = RaisingSession()
+    client._sessions["gitea-mcp"] = session
+    await client.list_tools()
+
+    with pytest.raises(RuntimeError):
+        await client.call("get_issue", {"repo": "acme/widgets", "number": 1})
+
+    lines = (tmp_path / "task-1" / "calls.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1, "the failed call must be recorded"
+    record = json.loads(lines[0])
+    assert record["is_error"] is True
+    assert record["raised"] is True
+    assert record["tool"] == "get_issue"
+    assert record["sub"] == "alice"
+    assert record["task_id"] == "task-1"
+
+
+async def test_an_unknown_tool_that_raises_still_writes_a_line(tmp_path: Path) -> None:
+    """A name the server never offered is the other way a call fails."""
+    client = MCPClient(
+        Endpoint(url="http://127.0.0.1:9101/mcp", bearer="a-token", name="gitea-mcp"),
+        chain=CHAIN,
+        runs_dir=tmp_path,
+    )
+    client._sessions["gitea-mcp"] = FakeSession()
+    await client.list_tools()
+
+    with pytest.raises(MCPError):
+        await client.call("get_issu", {})
+
+    lines = (tmp_path / "task-1" / "calls.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["raised"] is True
+    assert record["tool"] == "get_issu"

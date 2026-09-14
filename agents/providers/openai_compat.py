@@ -76,13 +76,18 @@ def wire_tools(tools: list[ToolSchema]) -> list[dict[str, Any]]:
     ]
 
 
-def wire_messages(messages: list[Turn]) -> list[dict[str, Any]]:
+def wire_messages(messages: list[Turn], *, echo_reasoning: bool = False) -> list[dict[str, Any]]:
     """The `messages` array in the body.
 
     Tool results become one `tool` message each, keyed by the id the model used.
-    An assistant turn is rebuilt from `text` and `tool_uses`, which is exactly
-    what drops `reasoning_content`: the neutral turn keeps the reasoning for the
-    log and this function cannot emit it.
+    An assistant turn is rebuilt from `text` and `tool_uses`, which is what drops
+    `reasoning_content` by default: the neutral turn keeps the reasoning for the
+    log and this function does not emit it.
+
+    `echo_reasoning` emits it again on an assistant turn that carries tool calls.
+    That is the vendor's documented requirement, and the endpoint accepts either
+    form today, so the caller decides: omit first, and retry once with it echoed
+    if the endpoint refuses the omission.
     """
     wire: list[dict[str, Any]] = []
     for turn in messages:
@@ -102,6 +107,8 @@ def wire_messages(messages: list[Turn]) -> list[dict[str, Any]]:
                     }
                     for use in turn.tool_uses
                 ]
+                if echo_reasoning and turn.reasoning:
+                    message["reasoning_content"] = turn.reasoning
             wire.append(message)
         else:
             for block in turn.tool_results:
@@ -115,6 +122,17 @@ def wire_messages(messages: list[Turn]) -> list[dict[str, Any]]:
             if turn.text is not None:
                 wire.append({"role": "user", "content": turn.text})
     return wire
+
+
+def needs_reasoning_echo(error: BaseException) -> bool:
+    """Whether the endpoint refused a follow-up for a missing `reasoning_content`.
+
+    The vendor's documented error names the field, and external reports of it are
+    a 400 with that text. Matching on the message rather than on an exception
+    class is deliberate: this has to work through the SDK's own error type and
+    through a gateway that wraps it.
+    """
+    return "reasoning_content" in str(error)
 
 
 def usage_from(raw: Any) -> Usage | None:
@@ -210,15 +228,28 @@ class OpenAICompatProvider:
             kwargs["max_completion_tokens"] = self._max_tokens
         kwargs.update(fields)
 
-        response = await self._client.chat.completions.create(**kwargs)
+        try:
+            response = await self._client.chat.completions.create(**kwargs)
+        except Exception as error:
+            if not needs_reasoning_echo(error) or not any(turn.reasoning for turn in messages):
+                raise
+            # The endpoint refused the follow-up because an assistant turn with
+            # tool calls did not repeat its reasoning. The vendor documents that
+            # requirement and accepts the echo, so answer it once rather than
+            # failing the run. Only a second failure is fatal.
+            logger.warning(
+                "the endpoint required reasoning_content on the follow-up; retrying once "
+                "with it echoed"
+            )
+            kwargs["messages"] = wire_messages(messages, echo_reasoning=True)
+            response = await self._client.chat.completions.create(**kwargs)
         choice = response.choices[0]
         message = choice.message
 
         reasoning = getattr(message, "reasoning_content", None)
         if reasoning:
-            # Logged here and nowhere else on purpose. It is the model's own
-            # account of the turn, useful to a run reader, and it is not sent
-            # back on the next request.
+            # Logged here, and echoed on a later request only when the endpoint
+            # has demanded it above.
             logger.info("assistant reasoning: %s", reasoning)
 
         if choice.finish_reason == "length":
