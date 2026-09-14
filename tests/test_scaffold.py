@@ -21,6 +21,8 @@ REPO = Path(__file__).resolve().parents[1]
 
 ENV_NAMES = (
     "KEYCLOAK_ADMIN_PASSWORD",
+    "WARRANT_USER_PASSWORD",
+    "WARRANT_AGENT_CLIENT_SECRET",
     "GITEA_ADMIN_TOKEN",
     "POSTGRES_PASSWORD",
     "DEEPSEEK_API_KEY",
@@ -36,6 +38,8 @@ ENV_NAMES = (
 # tests/hooks/test_port.py pins the hook half of it.
 CREDENTIAL_NAMES = (
     "KEYCLOAK_ADMIN_PASSWORD",
+    "WARRANT_USER_PASSWORD",
+    "WARRANT_AGENT_CLIENT_SECRET",
     "GITEA_ADMIN_TOKEN",
     "POSTGRES_PASSWORD",
     "DEEPSEEK_API_KEY",

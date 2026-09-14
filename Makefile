@@ -19,8 +19,12 @@ test:
 # The local stack. compose.yml reads every credential from .env in this
 # directory, so a missing one stops `up` with the variable's name rather than
 # starting a service with the wrong password.
+#
+# `--wait` blocks until the healthcheck passes. Without it the command returns
+# while the JVM is still starting and the realm import has not finished, so
+# anything run straight after `make reset` races the import.
 up:
-	docker compose up -d
+	docker compose up -d --wait
 
 down:
 	docker compose down
@@ -29,7 +33,7 @@ down:
 # Keycloak realm store, and later an empty database and mailbox.
 reset:
 	docker compose down -v
-	docker compose up -d
+	docker compose up -d --wait
 
 # Install the dsh profiles from infra/dsh/ into $DSH_HOME (default ~/.dsh).
 # Reproducible and idempotent; see infra/dsh/install-profile.sh.
