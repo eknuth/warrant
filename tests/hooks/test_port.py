@@ -9,6 +9,7 @@ them, because the exit code and the stream split are the contract.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import random
@@ -18,6 +19,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -28,8 +30,9 @@ SECRETS = HOOKS / "block_secrets.py"
 DOUBLE = HOOKS / "block_double_emit.py"
 PARKED = HOOKS / "block_parked_column.py"
 LINT = HOOKS / "lint_after_commit.py"
+GUARD = HOOKS / "guard_merge.py"
 
-ALL_HOOKS = [SECRETS, DOUBLE, PARKED, LINT]
+ALL_HOOKS = [SECRETS, DOUBLE, PARKED, LINT, GUARD]
 
 HOOK_TIMEOUT_S = 30
 
@@ -104,6 +107,22 @@ def bash_payload(command: str, cwd: Path) -> dict[str, object]:
         "tool_input": {"command": command, "description": "test command"},
         "tool_use_id": "call-1",
     }
+
+
+def _load(hook: Path) -> Any:
+    """Import a hook module by path, for the tests that call a predicate directly.
+
+    The hooks are run as subprocesses everywhere else, because the exit code and
+    the stream split are the contract. The target-listing predicate is the one
+    case where reading the parsed result beats reading an exit code: the failure
+    it guards against is a listing whose layout changed, and that shows up as a
+    wrong answer to a question, not as a wrong exit code.
+    """
+    spec = importlib.util.spec_from_file_location(hook.stem, hook)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -578,6 +597,249 @@ def test_lint_hook_passes_a_non_commit_command(tmp_path: Path) -> None:
     assert proc.returncode == 0
 
 
+def test_lint_hook_reads_the_target_listing_this_make_prints() -> None:
+    """The lint hook must find this repository's `lint` target.
+
+    If the target listing is misread, the hook decides there is no lint target
+    and skips the check, which looks exactly like a passing lint. Asserting the
+    predicate directly is what tells "green" apart from "not checked".
+    """
+    lint_hook = _load(LINT)
+
+    assert lint_hook.lint_target_exists(REPO)
+
+
+# --- guard_merge -----------------------------------------------------------
+
+MERGE = "gh pr merge 9 --merge --delete-branch"
+GREEN_MAKEFILE = "test:\n\t@true\nlint:\n\t@true\n"
+
+
+def green_repo(path: Path, makefile: str = GREEN_MAKEFILE) -> None:
+    """A repository whose tip contains `origin/main` and whose tree is clean.
+
+    `origin/main` is a ref in this repository rather than a remote, because the
+    hook asks a question about refs (`merge-base --is-ancestor`), not about the
+    network. It points at the tip, after every commit here.
+    """
+    init_repo(path)
+    (path / "README.md").write_text("green\n")
+    (path / "Makefile").write_text(makefile)
+    git(["add", "README.md", "Makefile"], path)
+    git(["commit", "-q", "-m", "base"], path)
+    git(["update-ref", "refs/remotes/origin/main", "HEAD"], path)
+
+
+def test_guard_blocks_a_red_test_target(tmp_path: Path) -> None:
+    green_repo(tmp_path, "test:\n\t@echo 'two failed' >&2; exit 1\nlint:\n\t@true\n")
+
+    proc = run_hook(GUARD, bash_payload(MERGE, tmp_path))
+
+    assert proc.returncode == 2
+    assert "make test" in proc.stderr
+    assert "two failed" in proc.stderr, "the failing output is what tells the caller what broke"
+    assert proc.stdout == ""
+
+
+def test_guard_blocks_a_red_lint_target(tmp_path: Path) -> None:
+    green_repo(tmp_path, "test:\n\t@true\nlint:\n\t@echo 'ruff is red' >&2; exit 1\n")
+
+    proc = run_hook(GUARD, bash_payload(MERGE, tmp_path))
+
+    assert proc.returncode == 2
+    assert "make lint" in proc.stderr
+    assert "ruff is red" in proc.stderr
+
+
+def test_guard_blocks_when_the_test_target_is_missing(tmp_path: Path) -> None:
+    """A target it cannot run is not a pass. This is the fail-closed half."""
+    green_repo(tmp_path, "lint:\n\t@true\n")
+
+    proc = run_hook(GUARD, bash_payload(MERGE, tmp_path))
+
+    assert proc.returncode == 2
+    assert "there is no `test` target" in proc.stderr
+
+
+def test_guard_blocks_a_behind_branch(tmp_path: Path) -> None:
+    """`origin/main` not being an ancestor is the rebase-owed case.
+
+    A separate branch plays `main`: `origin/main` points at a commit this branch
+    does not contain, which is what a branch that owes a rebase looks like from
+    here. The tree stays clean, so the ancestry check is the only thing that can
+    refuse it.
+    """
+    green_repo(tmp_path)
+    here = git(["symbolic-ref", "--short", "HEAD"], tmp_path).stdout.strip()
+    git(["checkout", "-q", "-b", "remote-main"], tmp_path)
+    (tmp_path / "remote.txt").write_text("a commit on main this branch lacks\n")
+    git(["add", "remote.txt"], tmp_path)
+    git(["commit", "-q", "-m", "on main"], tmp_path)
+    git(["update-ref", "refs/remotes/origin/main", "HEAD"], tmp_path)
+    git(["checkout", "-q", here], tmp_path)
+    git(["branch", "-q", "-D", "remote-main"], tmp_path)
+
+    proc = run_hook(GUARD, bash_payload(MERGE, tmp_path))
+
+    assert proc.returncode == 2
+    assert "not an ancestor" in proc.stderr
+    assert "rebase" in proc.stderr
+
+
+def test_guard_blocks_when_there_is_no_origin_main(tmp_path: Path) -> None:
+    green_repo(tmp_path)
+    git(["update-ref", "-d", "refs/remotes/origin/main"], tmp_path)
+
+    proc = run_hook(GUARD, bash_payload(MERGE, tmp_path))
+
+    assert proc.returncode == 2
+    assert "no `origin/main`" in proc.stderr
+    assert "fetch" in proc.stderr
+
+
+def test_guard_blocks_a_dirty_tree(tmp_path: Path) -> None:
+    green_repo(tmp_path)
+    (tmp_path / "README.md").write_text("edited but not committed\n")
+
+    proc = run_hook(GUARD, bash_payload(MERGE, tmp_path))
+
+    assert proc.returncode == 2
+    assert "not clean" in proc.stderr
+    assert "README.md" in proc.stderr
+
+
+def test_guard_blocks_an_untracked_file(tmp_path: Path) -> None:
+    """`git status --porcelain` reports untracked files, so they count as dirty."""
+    green_repo(tmp_path)
+    (tmp_path / "notes.txt").write_text("scratch\n")
+
+    proc = run_hook(GUARD, bash_payload(MERGE, tmp_path))
+
+    assert proc.returncode == 2
+    assert "notes.txt" in proc.stderr
+
+
+def test_guard_blocks_when_the_directory_is_not_a_repository(tmp_path: Path) -> None:
+    proc = run_hook(GUARD, bash_payload(MERGE, tmp_path))
+
+    assert proc.returncode == 2
+    assert "no git repository" in proc.stderr
+
+
+def test_guard_passes_a_green_current_clean_branch(tmp_path: Path) -> None:
+    green_repo(tmp_path)
+
+    proc = run_hook(GUARD, bash_payload(MERGE, tmp_path))
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+    assert proc.stdout == ""
+
+
+def test_guard_follows_cd_to_the_repository_it_judges(tmp_path: Path) -> None:
+    """The checks belong to the repository the merge lands in, not the shell's."""
+    green_repo(tmp_path)
+    elsewhere = tmp_path.parent / f"{tmp_path.name}-elsewhere"
+    init_repo(elsewhere)
+
+    blocked = run_hook(GUARD, bash_payload(f"cd {tmp_path} && {MERGE}", elsewhere))
+    allowed = run_hook(GUARD, bash_payload(MERGE, elsewhere))
+
+    assert blocked.returncode == 0, blocked.stderr
+    assert allowed.returncode == 2, "the empty directory has nothing to merge"
+
+
+def test_guard_reads_the_target_listing_this_make_prints() -> None:
+    """The annotation is not always on its own line.
+
+    This make joins the target line with the first comment
+    (`test: #  Phony target ...`), so a fixed short window that starts after the
+    target line misses `File has been updated` and reports a target that exists
+    as missing. That would refuse every merge on this build. Asserting the
+    predicate directly, not just the end-to-end refusal, is what keeps a
+    formatting change from turning the guard into a wall.
+    """
+    guards = _load(GUARD)
+
+    assert guards.make_target_exists(REPO, "test")
+    assert guards.make_target_exists(REPO, "lint")
+    assert not guards.make_target_exists(REPO, "no-such-target-here")
+
+
+def test_guard_passes_commands_that_are_not_a_merge(tmp_path: Path) -> None:
+    """Viewing a pull request, or asking for help, lands nothing."""
+    green_repo(tmp_path)
+    for command in ("gh pr view 9", "gh pr merge --help", "git merge main", "gh pr list"):
+        proc = run_hook(GUARD, bash_payload(command, tmp_path))
+
+        assert proc.returncode == 0, f"{command}: {proc.stderr}"
+
+
+def test_guard_passes_a_merge_inside_a_heredoc(tmp_path: Path) -> None:
+    """A document is not a command, so a quoted example is not a merge."""
+    green_repo(tmp_path)
+
+    proc = run_hook(GUARD, bash_payload(f"cat <<'EOF' > notes.md\n{MERGE}\nEOF", tmp_path))
+
+    assert proc.returncode == 0, proc.stderr
+
+
+def clean_repo(path: Path) -> None:
+    """A one-commit repository whose tip is `origin/main` and whose tree is dry.
+
+    The stand-in tests need the ancestry and cleanliness checks to pass, and
+    they need a tree that is not this checkout, which carries the branch's own
+    uncommitted work while the tests run.
+    """
+    init_repo(path)
+    (path / "README.md").write_text("base\n")
+    git(["add", "README.md"], path)
+    git(["commit", "-q", "-m", "base"], path)
+    git(["update-ref", "refs/remotes/origin/main", "HEAD"], path)
+
+
+def stub_makefile(directory: Path, recipe: str) -> str:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "Makefile").write_text(recipe)
+    return str(directory / "Makefile")
+
+
+def test_guard_runs_both_targets_in_order(tmp_path: Path) -> None:
+    """The guard runs `make test` then `make lint`, through a real `make`.
+
+    The stand-in Makefile makes the second target fail unless the first one ran,
+    so a guard that skipped `test` or ran them in the other order fails here.
+    The repository is a one-commit scratch repo, so the ancestry and cleanliness
+    checks pass and the make step is the thing under test.
+    """
+    repo = tmp_path / "repo"
+    clean_repo(repo)
+    makefile = stub_makefile(
+        tmp_path / "stub",
+        "test:\n\t@printf ran-test > marker.txt\nlint:\n\t@grep -q ran-test marker.txt\n",
+    )
+    env = {**os.environ, "DSH_GUARD_MAKEFILE": makefile}
+
+    proc = run_hook(GUARD, bash_payload(MERGE, repo), env=env)
+
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_guard_reports_the_failing_target_from_the_stand_in(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    clean_repo(repo)
+    makefile = stub_makefile(
+        tmp_path / "stub", "test:\n\t@true\nlint:\n\t@echo 'lint is red' >&2; exit 1\n"
+    )
+    env = {**os.environ, "DSH_GUARD_MAKEFILE": makefile}
+
+    proc = run_hook(GUARD, bash_payload(MERGE, repo), env=env)
+
+    assert proc.returncode == 2
+    assert "make lint" in proc.stderr
+    assert "lint is red" in proc.stderr
+
+
 # --- every hook -----------------------------------------------------------
 
 
@@ -616,7 +878,13 @@ def test_hook_config_wires_every_hook_to_a_matcher() -> None:
 
     commands = [h["command"] for h in pre["hooks"]]
     commands += [h["command"] for h in post["hooks"]]
-    for name in ("block_secrets", "block_double_emit", "block_parked_column", "lint_after_commit"):
+    for name in (
+        "block_secrets",
+        "block_double_emit",
+        "block_parked_column",
+        "lint_after_commit",
+        "guard_merge",
+    ):
         assert any(name in command for command in commands), name
 
 
