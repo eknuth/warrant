@@ -10,7 +10,12 @@ from typing import Any
 import cedarpy
 import pytest
 
-from warrant.engine import DEFAULT_SCHEMA_PATH, CedarEngine, schema_for
+from warrant.engine import (
+    DEFAULT_SCHEMA_PATH,
+    CedarEngine,
+    ReservedActionIdError,
+    schema_for,
+)
 from warrant.graph import Graph
 from warrant.graph import load as load_graph
 from warrant.log import DecisionLog
@@ -576,11 +581,11 @@ def test_an_agent_the_graph_does_not_know_cannot_claim_ownership(
 def test_an_escalate_permit_for_another_tool_does_not_escalate_this_one(
     policy_dir: Any, make_request: Any, decision_log: DecisionLog
 ) -> None:
-    """The tool scope lives in `context.tool`, so it has to be pinned.
+    """The escalate pass is the one place the tool is data, so it has to be pinned.
 
-    The ticket's `Escalate::"<tool>"` does not parse, so the tool became a policy
-    clause. Without a test, a W7 author who forgets the clause gets an
-    all-tools escalate.
+    The real action is the tool, but the escalate action is a single synthetic
+    action and the tool travels in `context.tool`. Without this test, a W7 author
+    who forgets the clause gets an all-tools escalate.
     """
     directory = policy_dir(
         '@id("forbid-read")\nforbid(principal, action == Action::"gitea.search_code", resource);',
@@ -673,3 +678,44 @@ def test_the_committed_schema_is_the_one_the_graph_generates(graph_db: Graph) ->
     deployment that was given the graph, so the two are compared here instead.
     """
     assert json.loads(DEFAULT_SCHEMA_PATH.read_text()) == schema_for(graph_db)
+
+
+def test_a_tool_named_after_a_kind_is_refused_at_load(tmp_path: Path) -> None:
+    """A tool id that overwrites a kind action is a finding, not a surprise.
+
+    The generated schema writes `read`, `write`, `send`, and `escalate` itself.
+    Cedar refuses a schema where `Action::"read"` is its own ancestor, and a
+    collision with another kind builds but quietly stops `action in
+    Action::"write"` meaning "a write tool". Both are caught where they can be
+    fixed, and neither reaches a decision.
+    """
+    for tool_id, kind in (("read", "read"), ("write", "read"), ("send", "send")):
+        with load_graph(SEED, tmp_path / f"{tool_id}.db") as graph:
+            graph._conn.execute(
+                "INSERT INTO tools (id, server, name, action_kind, resource_kind) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (tool_id, "gitea", tool_id, kind, "repo"),
+            )
+            graph._conn.commit()
+
+            with pytest.raises(ReservedActionIdError, match="reserved action name"):
+                schema_for(graph)
+
+
+def test_an_escalate_permit_cannot_authorize_a_tool(tmp_path: Path) -> None:
+    """The other half of the same collision: `escalate` is reserved too.
+
+    With a tool named `escalate`, the permit written for the escalation pass
+    authorized a direct call to that tool, so a permit meant to ask a human would
+    instead have made the decision.
+    """
+    with load_graph(SEED, tmp_path / "w.db") as graph:
+        graph._conn.execute(
+            "INSERT INTO tools (id, server, name, action_kind, resource_kind) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("escalate", "gitea", "escalate", "write", "repo"),
+        )
+        graph._conn.commit()
+
+        with pytest.raises(ReservedActionIdError):
+            schema_for(graph)

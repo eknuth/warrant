@@ -119,6 +119,18 @@ def _entity_ref(entity_type: str, entity_id: str) -> dict[str, Any]:
     return {"__entity": {"type": entity_type, "id": entity_id}}
 
 
+# The action ids the generated schema writes itself: the three kinds, which are
+# also the membership groups, and the escalate action. A tool may not take one of
+# these names, because the generated action would overwrite the group or the
+# escalate action and the policy that reads `action in Action::"write"` would no
+# longer mean "a write tool".
+RESERVED_ACTION_IDS = (*ACTION_KINDS, ESCALATE_ACTION)
+
+
+class ReservedActionIdError(ValueError):
+    """A tool id that collides with an action the schema writes itself."""
+
+
 def schema_for(graph: Graph) -> dict[str, Any]:
     """The Cedar schema for the tools this graph holds.
 
@@ -129,6 +141,13 @@ def schema_for(graph: Graph) -> dict[str, Any]:
     policy name a tool: a static file would need an edit for every tool W8, W9,
     and W21 add, and a missing entry is not a policy error, it is a schema
     validation failure at load.
+
+    A tool id that is one of `RESERVED_ACTION_IDS` is refused here rather than
+    written. Cedar makes `Action::"read"` a member of itself a cycle and refuses
+    to build the schema at all; a collision with another kind or with `escalate`
+    is worse, because the schema builds and the group quietly stops meaning what
+    a policy reads it to mean. Both are findings at load, where they can be
+    fixed, rather than at a decision.
 
     The kind actions themselves carry the same `appliesTo` as the tools, so a
     rule scoped to a kind validates. `Action::"escalate"` is the second pass's
@@ -141,6 +160,11 @@ def schema_for(graph: Graph) -> dict[str, Any]:
     }
     actions: dict[str, Any] = {kind: {"appliesTo": applies_to} for kind in ACTION_KINDS}
     for tool in graph.tools():
+        if tool.id in RESERVED_ACTION_IDS:
+            raise ReservedActionIdError(
+                f"tool id {tool.id!r} is a reserved action name "
+                f"({', '.join(RESERVED_ACTION_IDS)}); rename the tool in the graph seed"
+            )
         actions[tool.id] = {
             "memberOf": [{"id": tool.action_kind}],
             "appliesTo": applies_to,
@@ -248,15 +272,20 @@ class CedarEngine:
         )
 
         # The schema comes from the graph when there is one, so the tool actions
-        # are exactly the tools this deployment has. `schema_path` is the
-        # override, and the committed file is the fallback for a caller with no
-        # graph: it is what the policies are written against.
-        self.schema_path = Path(schema_path) if schema_path is not None else DEFAULT_SCHEMA_PATH
+        # are exactly the tools this deployment has, and `schema_for` refuses a
+        # tool id that collides with an action the schema writes itself.
+        # `schema_path` is the override; its default is the committed file, and
+        # an explicit `None` means no schema at all, which is a test's affordance
+        # rather than a deployment's: nothing here validates that the action
+        # exists, so a caller that wants that has to give a graph or a path.
+        self.schema_path = Path(schema_path) if schema_path is not None else None
         if graph is not None:
             self._schema = cedarpy.Schema.from_json_str(json.dumps(schema_for(graph)))
+            # The graph's schema is what was loaded, so the path would be a lie.
+            self.schema_path = None
         elif schema_path is not None:
             self._schema = cedarpy.Schema.from_json_str(
-                self.schema_path.read_text(encoding="utf-8")
+                self.schema_path.read_text(encoding="utf-8")  # type: ignore[union-attr]
             )
         else:
             self._schema = None
@@ -380,7 +409,10 @@ class CedarEngine:
             # The deny that caused the escalation belongs in the record too: an
             # escalate line that names only the escalate permit cannot be read
             # back to why the action needed a human.
-            reasons = [f"real action denied: {req.action_kind.value}"]
+            # The tool is the real action now, so naming the kind here would name
+            # something the agent never called. The kind is still in the line
+            # beside it, and in `context.actionKind` for a policy.
+            reasons = [f"real action denied: {req.tool} ({req.action_kind.value})"]
             reasons.extend(f"real action denied by: {policy_id}" for policy_id in real.policy_ids)
             reasons.extend(_matched("escalate permit", escalate))
             return Decision(

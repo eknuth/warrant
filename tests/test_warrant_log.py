@@ -90,7 +90,7 @@ def test_no_decision_embeds_a_newline(
     tmp_path: Path,
 ) -> None:
     directory = policy_dir(
-        '@id("forbid-read")\nforbid(principal, action == Action::"read", resource);'
+        '@id("forbid-read")\nforbid(principal, action == Action::"gitea.search_code", resource);'
     )
     engine = make_engine(directory, decision_log)
 

@@ -164,9 +164,13 @@ forbid(principal, action == Action::"write", resource)
 when { context.tool == "gitea.create_issue_comment" };
 ```
 
-That spelling still works, because the kind actions remain in the schema as membership groups. The
-substitution was never recorded as an accepted change to the criterion, which is why the engine was
-changed instead.
+That spelling is inert now, and saying it "still works" would undo this change. The action is the
+tool, so `action == Action::"write"` is equality against an action id no request carries, and only
+`action in Action::"write"` traverses the membership. A rule about a kind has to be rewritten from
+`==` to `in`; a rule about one tool is now `action == Action::"<tool>"` and needs no `context.tool`
+condition at all. The escalate pass is the exception, and the one place `context.tool` still scopes
+a rule. The substitution was never recorded as an accepted change to the criterion, which is why the
+engine was changed instead.
 
 ## What was verified
 
