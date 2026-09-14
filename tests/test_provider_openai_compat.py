@@ -1,6 +1,6 @@
 """The OpenAI-compatible provider, against responses recorded from the endpoint.
 
-Every fixture under `tests/fixtures/provider/` is a real chat completion
+Every recording under `tests/data/provider/` is a real chat completion
 response recorded from the cloud endpoint, with nothing stripped because a
 completion carries no credential. The tests replay them through a mocked
 transport, so the adapter's translation and its request body are both checked
@@ -25,7 +25,7 @@ import pytest
 from agents.providers.base import ToolResultBlock, ToolSchema, ToolUse, Turn
 from agents.providers.openai_compat import OpenAICompatProvider
 
-FIXTURES = Path(__file__).resolve().parent / "fixtures" / "provider"
+FIXTURES = Path(__file__).resolve().parent / "data" / "provider"
 
 TOOLS = [
     ToolSchema(
