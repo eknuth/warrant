@@ -169,6 +169,64 @@ async def test_write_calls_are_actions_and_results_are_reads() -> None:
     assert [name for name, _ in tools.calls] == ["get_issue", "create_issue_comment"]
 
 
+async def test_a_write_the_server_refused_is_not_an_action() -> None:
+    """The Outcome may not claim a write that came back an error.
+
+    The call record keeps it with `is_error`, which is the record of the
+    attempt; `actions` is the record of what the run did, and a refused comment
+    is not something it did.
+    """
+    provider = ScriptedProvider(
+        [
+            Turn(
+                role="assistant",
+                tool_uses=[
+                    ToolUse(
+                        id="w1",
+                        name="create_issue_comment",
+                        args={"number": 1, "body": "fixed"},
+                    )
+                ],
+            ),
+            Turn(role="assistant", text="I could not comment"),
+        ]
+    )
+    refused = CallResult(
+        tool="create_issue_comment",
+        endpoint="gitea-mcp",
+        payload={"error": "403"},
+        text='{"error": "403"}',
+        is_error=True,
+        sources=[],
+    )
+    tools = RecordingTools(result=refused)
+
+    outcome, _ = await triage_loop(a_task(), provider, tools, system_prompt="system")
+
+    assert outcome.actions == [], "a refused write must not be reported as done"
+    assert [name for name, _ in tools.calls] == ["create_issue_comment"]
+
+
+async def test_a_length_truncated_reply_is_marked_on_the_outcome() -> None:
+    """A cut-off summary reads like a complete one, so the record says which."""
+    provider = ScriptedProvider(
+        [Turn(role="assistant", text="The port is 808", finish_reason="length")]
+    )
+
+    outcome, _ = await triage_loop(a_task(), provider, RecordingTools(), system_prompt="system")
+
+    assert outcome.summary == "The port is 808"
+    assert outcome.finish_reason == "length"
+
+
+async def test_a_completed_reply_carries_its_finish_reason() -> None:
+    provider = ScriptedProvider([Turn(role="assistant", text="done", finish_reason="stop")])
+
+    outcome, _ = await triage_loop(a_task(), provider, RecordingTools(), system_prompt="system")
+
+    assert outcome.finish_reason == "stop"
+
+
 async def test_a_repeated_source_is_recorded_once() -> None:
     provider = ScriptedProvider(
         [

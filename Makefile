@@ -1,6 +1,6 @@
 # Warrant. Every target runs from a checkout of this repository.
 
-.PHONY: install lint test up down reset dsh-profile
+.PHONY: install lint test up down reset gitea-mcp dsh-profile
 
 # Create or refresh .venv from pyproject.toml and uv.lock. `uv sync` is also
 # what a clean clone runs first; there is no other install step.
@@ -34,6 +34,13 @@ down:
 reset:
 	docker compose down -v
 	docker compose up -d --wait
+
+# The Gitea MCP resource server on :9101. The agent connects to this, so it has
+# to be running for a triage run; W4's acceptance command omits it, which is why
+# the target exists rather than a line in that command. Foreground on purpose:
+# a run that serves requests should be visible, and Ctrl-C stops it.
+gitea-mcp:
+	uv run python -m servers.gitea_mcp.server
 
 # Install the dsh profiles from infra/dsh/ into $DSH_HOME (default ~/.dsh).
 # Reproducible and idempotent; see infra/dsh/install-profile.sh.

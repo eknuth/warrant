@@ -242,11 +242,23 @@ class MCPClient:
         return schemas
 
     async def call(self, name: str, args: dict[str, Any]) -> CallResult:
-        """Call one tool and log the call, whatever the result."""
+        """Call one tool and log the call, whatever the result.
+
+        The log line is written for a call that raises too, because a failed call
+        is exactly what an audit reader wants to see. It used to be written only
+        after a successful return, so a bad tool name or a transport error killed
+        the run and left the run directory with no record of the attempt.
+        """
         if name not in self._tools:
+            await self._log_failure(name, args, endpoint="", error=f"unknown tool {name!r}")
             raise MCPError(f"unknown tool {name!r}; call list_tools first")
         endpoint_name, session = self._tools[name]
-        result = await session.call_tool(name, arguments=args)
+        try:
+            result = await session.call_tool(name, arguments=args)
+        except Exception as error:
+            reason = f"{type(error).__name__}: {error}"
+            await self._log_failure(name, args, endpoint=endpoint_name, error=reason)
+            raise
         call = self._result_from(name, endpoint_name, result)
         if self._log_path is not None:
             append_jsonl(
@@ -262,6 +274,29 @@ class MCPClient:
                 ),
             )
         return call
+
+    async def _log_failure(
+        self, name: str, args: dict[str, Any], *, endpoint: str, error: str
+    ) -> None:
+        """Record a call that raised, so a failed attempt is in the run record.
+
+        The line carries `is_error` and the error text in place of a result
+        digest, which is the difference between "this call returned an error"
+        and "this call never completed".
+        """
+        if self._log_path is None:
+            return
+        record = call_record(
+            chain=self.chain,
+            tool=name,
+            endpoint=endpoint,
+            args=args,
+            result_value={"error": error},
+            is_error=True,
+            sources=[],
+        )
+        record["raised"] = True
+        append_jsonl(self._log_path, record)
 
     def _result_from(self, name: str, endpoint_name: str, result: Any) -> CallResult:
         content = getattr(result, "content", None) or []

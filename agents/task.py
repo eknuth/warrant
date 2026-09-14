@@ -39,7 +39,18 @@ class Task(BaseModel):
 
 @dataclass(frozen=True)
 class Chain:
-    """The `{sub, act, task_id}` triple every line of a run carries."""
+    """The `{sub, act, task_id}` triple every line of a run carries.
+
+    `sub` is the login the task names, which is what a reader of the run record
+    wants and what the ticket's criterion asks for. The token's own `sub` claim
+    is a Keycloak user id, carried separately in `sub_id`.
+
+    The two are not interchangeable across the logs. `agents/mcp_client.py`
+    writes both, while the resource server's audit line
+    (`servers/gitea_mcp/server.py`) writes only the signed subject, so its `sub`
+    is the UUID. Two lines for the same call join on `task_id` and
+    `args_digest`, or on `sub_id`, never on `sub` alone.
+    """
 
     sub: str
     act: str

@@ -9,8 +9,13 @@ can see the problem without being told where to look.
 The repository and its issue are the only seeding here. Scenario files and the
 rest of the fixture set belong to W12.
 
-The script is idempotent: a user, a repository, or an issue that already exists
-is left as it is. Running it twice does not add a second issue.
+The script is idempotent in what it adds: a user, a repository, or an issue that
+already exists is left as it is, so running it twice does not add a second issue.
+The two seeded files are the exception. `README.md` and `app.py` are written
+whenever their content differs from the seed, so a re-run reverts a change made
+against them. That is deliberate for a fixture whose whole point is the
+discrepancy between the two, and it means this repository is not a place to keep
+a fix.
 
 Usage: uv run python scripts/seed_smoke.py
 """

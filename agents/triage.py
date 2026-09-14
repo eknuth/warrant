@@ -99,6 +99,10 @@ class Outcome(BaseModel):
     actions: list[Action] = Field(default_factory=list)
     reads: list[dict[str, Any]] = Field(default_factory=list)
     turns: int = 0
+    # The last turn's finish reason. It is carried because a `length` reply is
+    # a truncated answer that reads like a complete one, and a record that says
+    # only "the summary was X" cannot tell a reader it was cut off.
+    finish_reason: str | None = None
 
 
 class ToolSource(Protocol):
@@ -228,6 +232,7 @@ async def triage_loop(
     turns = 0
     tool_calls = 0
     summary = ""
+    finish_reason: str | None = None
 
     while tool_calls < max_tool_calls:
         turns += 1
@@ -235,6 +240,7 @@ async def triage_loop(
         messages.append(reply)
         if reply.usage is not None:
             usage = usage + reply.usage
+        finish_reason = reply.finish_reason
         if not reply.tool_uses:
             summary = (reply.text or "").strip()
             break
@@ -244,9 +250,18 @@ async def triage_loop(
             if tool_calls >= max_tool_calls:
                 break
             tool_calls += 1
-            logger.info("tool call %d: %s", tool_calls, use.name)
+            logger.info(
+                "tool call %d: %s task_id=%s sub=%s act=%s",
+                tool_calls,
+                use.name,
+                task.task_id,
+                task.user,
+                TRIAGE_AGENT,
+            )
             result = await tools_source.call(use.name, use.args)
-            if use.name in WRITE_TOOLS:
+            # A write the server refused is not an action the run took. The call
+            # record keeps it with `is_error`, and the Outcome must not claim it.
+            if use.name in WRITE_TOOLS and not result.is_error:
                 actions.append(Action(tool=use.name, args=use.args))
             reads.extend(result.sources)
             results.append(
@@ -267,6 +282,7 @@ async def triage_loop(
             actions=actions,
             reads=dedupe_sources(reads),
             turns=turns,
+            finish_reason=finish_reason,
         ),
         usage,
     )

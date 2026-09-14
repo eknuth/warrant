@@ -48,7 +48,7 @@ CREDENTIAL_NAMES = (
     "LINEAR_API_KEY",
 )
 
-MAKE_TARGETS = ["install", "lint", "test", "up", "down", "reset", "dsh-profile"]
+MAKE_TARGETS = ["install", "lint", "test", "up", "down", "reset", "gitea-mcp", "dsh-profile"]
 
 IGNORED_PATHS = [".env", ".venv/", "evals/results/grade.json", "__pycache__/x.pyc"]
 
@@ -165,6 +165,7 @@ def test_makefile_targets_run_the_commands_they_promise() -> None:
     assert "pytest" in makefile_recipe("test")
     assert "docker compose up -d" in makefile_recipe("up")
     assert "docker compose down" in makefile_recipe("down")
+    assert "servers.gitea_mcp.server" in makefile_recipe("gitea-mcp")
     assert "install-profile.sh" in makefile_recipe("dsh-profile")
 
 
