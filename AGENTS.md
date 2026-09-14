@@ -19,8 +19,10 @@ next step. `docs/decisions/` holds the decisions behind this setup.
 
 - Secrets come only from `.env`, which is gitignored. Never write a key into code, a commit, a
   fixture, a Linear comment, a profile patch, or any file under `runs/`. `.env.example` lists the
-  names with angle-bracket placeholders, nothing else. A hook blocks a commit that stages `.env` or
-  adds a key-shaped line; do not work around it, remove the line.
+  names: every credential is an angle-bracket placeholder, and a setting that is not a credential
+  carries its real default, because a placeholder there would be copied into `.env` and then used
+  as a value. A hook blocks a commit that stages `.env` or adds a key-shaped line; do not work
+  around it, remove the line.
 - One issue per branch, named `w<N>-<slug>` where N is the number in the issue title. Branch off
   `main` and nothing else. Commit as Edwin Knuth `<eknuth@gmail.com>`.
 - Do not tune the agent or the policies to a scenario. If the agent fails a scenario honestly, fix
@@ -87,7 +89,14 @@ The profile, the hooks, and the skills below are the project's own extension poi
 ```
 warrant/
   AGENTS.md          this file
-  Makefile           dsh-profile today; test and lint arrive with W1
+  Makefile           install, lint, test, up, down, reset, dsh-profile
+  compose.yml        the local stack: Keycloak today, gitea, postgres, and
+                     mailpit commented until the issues that add them
+  warrant/           the authorization service (W5, W6)
+  servers/           gitea_mcp, postgres_mcp, mail_mcp (W3, W8, W9)
+  agents/            providers, triage, support (W4, W10)
+  gen/               scenario schema, seeders, scenarios/*.yml (W12, W13)
+  evals/             runner, grader, report (W14, W15); results/ is gitignored
   infra/dsh/         profile sources: patches, the sdk manifest, the installer
   .dsh/              hooks.json and the four hook scripts
   .agents/skills/    project skills
@@ -96,8 +105,9 @@ warrant/
   runs/              gitignored run records, including runs/dsh/
 ```
 
-The product tree arrives with the later issues. W1 scaffolds the Python package, the test layout,
-and the `test` and `lint` targets.
+The product packages are placeholders until their issues land. `docs/decisions/001-scaffold.md`
+records what W1 chose, including why `.env.example` carries real defaults for the two model
+variables.
 
 ## Writing prose
 

@@ -1,0 +1,76 @@
+# Warrant's local stack.
+#
+# W1 ships Keycloak, the identity provider every later service authenticates
+# against. Gitea (W3), postgres (W8), and mailpit (W9) arrive with the issues
+# that need them; their blocks are commented at the bottom so the shape of the
+# stack is visible before the services are.
+#
+# `docker compose` reads `.env` from this directory for every value below, so
+# credentials live in `.env` and never in this file. `.env.example` lists the
+# names. A variable that is missing stops `make up` and says which one.
+
+services:
+  keycloak:
+    # Patch-pinned. A bump changes the auth surface, so it is its own change,
+    # with the realm import from W2 re-checked against it.
+    image: quay.io/keycloak/keycloak:26.7.3
+    # start-dev keeps state in the container's own store and serves plain
+    # HTTP, which is what a local stack wants. Nothing here faces a network.
+    command: ["start-dev"]
+    ports:
+      - "8080:8080"
+    environment:
+      # The username is not a secret, so it lives here. The password does not,
+      # and `:?` refuses to start without it.
+      # These are the 26.x names. KEYCLOAK_ADMIN and KEYCLOAK_ADMIN_PASSWORD,
+      # which most published snippets still show, are ignored from 26.0 on.
+      KC_BOOTSTRAP_ADMIN_USERNAME: "admin"
+      KC_BOOTSTRAP_ADMIN_PASSWORD: "${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD is not set: add it to .env}"
+    volumes:
+      # start-dev still writes its store under /opt/keycloak/data, so the
+      # realm survives `make down`. `make reset` removes the volume and the
+      # store with it.
+      - keycloak-data:/opt/keycloak/data
+    healthcheck:
+      # The image carries no curl, so the check is bash's own TCP redirect.
+      # It turns healthy once the HTTP listener accepts connections.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    # No restart policy. This is a local stack, so `docker compose stop` should
+    # leave it stopped; `unless-stopped` brings it back on the next Docker
+    # start, which reads as a service nobody asked to run.
+
+volumes:
+  keycloak-data:
+
+# --- later issues, commented until the issue that needs them ---------------
+# Each block is a complete service definition. Uncommenting it and adding the
+# volume it names is the whole change.
+#
+#  gitea:
+#    image: gitea/gitea:1
+#    ports:
+#      - "3000:3000"   # web
+#      - "2222:22"     # ssh
+#    environment:
+#      GITEA__security__INSTALL_LOCK: "true"
+#    volumes:
+#      - gitea-data:/data
+#
+#  postgres:
+#    image: postgres:17
+#    ports:
+#      - "5432:5432"
+#    environment:
+#      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set: add it to .env}"
+#    volumes:
+#      - postgres-data:/var/lib/postgresql/data
+#
+#  mailpit:
+#    image: axllent/mailpit
+#    ports:
+#      - "1025:1025"   # smtp
+#      - "8025:8025"   # web ui

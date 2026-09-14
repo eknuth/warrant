@@ -34,7 +34,7 @@ import os
 import shutil
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -169,12 +169,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if not Path(args.dsh_home).is_dir():
-        print(f"no harness home at {args.dsh_home}: boot dsh once before running this", file=sys.stderr)
+        print(
+            f"no harness home at {args.dsh_home}: boot dsh once before running this",
+            file=sys.stderr,
+        )
         return 2
 
-    session_id = args.session or f"dsh-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    session_id = args.session or f"dsh-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
     started = time.monotonic()
-    started_at = datetime.now(timezone.utc).isoformat()
+    started_at = datetime.now(UTC).isoformat()
     exit_code = 0
     final_response = ""
     finish_reason: str | None = None
@@ -217,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
         "dsh_home": args.dsh_home,
         "prompt": prompt,
         "started_at": started_at,
-        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": datetime.now(UTC).isoformat(),
         "wall_s": wall_s,
         "finish_reason": finish_reason,
         "exit_code": exit_code,
@@ -235,7 +238,9 @@ def main(argv: list[str] | None = None) -> int:
         print(final_response)
     if error:
         print(f"dsh_run: {session_id} failed: {error}", file=sys.stderr)
-    print(f"dsh_run: session={session_id} effort={args.effort} wall_s={wall_s} record={record_path}")
+    print(
+        f"dsh_run: session={session_id} effort={args.effort} wall_s={wall_s} record={record_path}"
+    )
     return exit_code
 
 

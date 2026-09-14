@@ -7,11 +7,30 @@ name = "warrant"
 version = "0.0.0"
 description = "Per-action authorization for agents, plus provenance evals."
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    # The authorization service decides with Cedar policies, evaluated in
+    # process through the Rust bindings (W5, W6).
+    "cedarpy",
+    "httpx",
+    # The MCP servers under servers/ and the agents that call them.
+    "mcp>=2,<3",
+    "openai",
+    # psycopg is the postgres MCP server's driver (W8); python-jose verifies
+    # the tokens Keycloak issues (W5).
+    "psycopg[binary]",
+    "pydantic",
+    "pydantic-settings",
+    "python-jose[cryptography]",
+    # Scenario files and the decision record are YAML.
+    "pyyaml",
+    "rich",
+]
 
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "pytest-asyncio",
+    "ruff",
     # Exact version, not a floor. The harness is a developer preview that
     # changes between prereleases, and docs/decisions/000-harness.md reports
     # this as the pinned SDK.
@@ -28,3 +47,21 @@ package = false
 # remember to widen this. Naming tests/hooks here would have made `make test`
 # report a green suite that never ran W1's tests.
 testpaths = ["tests"]
+# The agent loop and the MCP servers are async, so a test that forgets the
+# decorator still runs as one.
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+# `package = false` above means the project is not installed into the venv, so
+# `warrant`, `agents`, `servers`, `gen`, and `evals` are importable only if the
+# repository root is on sys.path. This is what puts it there.
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# Code fences in the docs quote Python, and a quoted fragment is not a file to
+# lint.
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
