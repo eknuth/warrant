@@ -15,9 +15,9 @@ The verified claims are attached to the request and logged so a later decision
 has provenance, but nothing here decides.
 
 Construction is behind `build_server` and `build_app` rather than at module
-import, so importing this module starts nothing and reads no secret. `.env` is
-read only when a settings object is constructed, and `GITEA_ADMIN_TOKEN` only
-when a forge is.
+import, so importing this module starts nothing and reads no file. `.env` is
+read when a settings object is constructed, and `GITEA_ADMIN_TOKEN` is required
+only when a forge is built, which is what keeps a unit test free of the stack.
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ def args_digest(args: dict[str, Any]) -> str:
 
 def audit_record(
     tool: str,
-    claims: Claims,
+    claims: Claims | None,
     digest: str,
     status: str,
     *,
@@ -143,21 +143,25 @@ def audit_record(
 
     The keys are fixed: `ts`, `tool`, `sub`, `act`, `task_id`, `args_digest`,
     `status`. `sub` is the human the token is about, `act` is the agent client
-    the realm configured, and `status` is `ok` or `error`.
+    the realm configured, and `status` is `ok`, `error`, or `refused`.
+
+    `claims` is `None` for a call refused before any claim was verified, which
+    is the one case where the caller fields are null rather than absent: the
+    line still records that the tool was called and what it was asked to do.
     """
     moment = now or datetime.now(UTC)
     return {
         "ts": moment.isoformat().replace("+00:00", "Z"),
         "tool": tool,
-        "sub": claims.sub,
-        "act": claims.act.sub,
-        "task_id": claims.task_id,
+        "sub": claims.sub if claims else None,
+        "act": claims.act.sub if claims else None,
+        "task_id": claims.task_id if claims else None,
         "args_digest": digest,
         "status": status,
     }
 
 
-def _log_audit(tool: str, claims: Claims, digest: str, status: str) -> None:
+def _log_audit(tool: str, claims: Claims | None, digest: str, status: str) -> None:
     AUDIT_LOGGER.info(json.dumps(audit_record(tool, claims, digest, status), sort_keys=True))
 
 
@@ -206,9 +210,19 @@ async def _audited(
     policy: BearerPolicy,
     call: Callable[[], Awaitable[Any]],
 ) -> Any:
-    """Run one tool body and log its outcome in the fixed audit shape."""
-    claims = _claims_for(ctx, policy, tool)
+    """Run one tool body and log its outcome in the fixed audit shape.
+
+    Resolving the claims is inside the `try`, because a call refused at that
+    stage is still a tool call and the audit log is the record of what was
+    attempted. Resolving it first meant a refused call left no line at all,
+    which is the one line an audit reader would most want.
+    """
     digest = args_digest(args)
+    try:
+        claims = _claims_for(ctx, policy, tool)
+    except Exception:
+        _log_audit(tool, None, digest, "refused")
+        raise
     try:
         result = await call()
     except Exception:

@@ -91,6 +91,23 @@ def verify_authorization(
     return verify(parse_bearer(authorization), audience, key=key, issuer=issuer)
 
 
+def _first_value(headers: Any, name: str) -> str | None:
+    """The first value of a header, matching `header_value`.
+
+    The middleware used to build a dict of headers, which keeps the LAST
+    duplicate; `header_value` keeps the first. Two paths that verify the same
+    request should not disagree about which token it presented, so both use
+    this.
+    """
+    wanted = name.lower()
+    for key, value in headers:
+        text = key.decode("latin-1") if isinstance(key, bytes) else str(key)
+        if text.lower() == wanted:
+            raw = value.decode("latin-1") if isinstance(value, bytes) else str(value)
+            return raw
+    return None
+
+
 class BearerAuthMiddleware:
     """ASGI middleware that refuses a request without a verifiable bearer.
 
@@ -117,13 +134,9 @@ class BearerAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        headers = {
-            name.decode("latin-1").lower(): value.decode("latin-1")
-            for name, value in scope.get("headers", [])
-        }
         try:
             claims = verify_authorization(
-                headers.get("authorization"),
+                _first_value(scope.get("headers", []), "authorization"),
                 audience=self.audience,
                 issuer=self.issuer,
                 key=self.key,
@@ -177,12 +190,9 @@ def header_value(headers: Mapping[str, str] | None, name: str) -> str | None:
 
     The MCP transport hands handlers a `Mapping[str, str]` whose key case is
     not guaranteed, so a handler that verifies from the request's own headers
-    uses this rather than `headers.get`.
+    uses this rather than `headers.get`. It keeps the first duplicate, the same
+    as the middleware, so the two verification paths agree.
     """
     if not headers:
         return None
-    wanted = name.lower()
-    for key, value in headers.items():
-        if key.lower() == wanted:
-            return value
-    return None
+    return _first_value(headers.items(), name)

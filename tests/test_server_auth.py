@@ -199,6 +199,28 @@ def test_the_audit_record_has_exactly_the_named_keys(
     assert record["args_digest"] == args_digest({"repo": "acme/demo", "number": 1})
 
 
+def test_a_refused_call_still_records_an_audit_line() -> None:
+    """A call refused before any claim was verified is still a tool call.
+
+    The line exists so the log answers "what was attempted", and the caller
+    fields are null rather than absent because there was no verified caller.
+    """
+    record = audit_record(
+        "set_repo_visibility",
+        None,
+        args_digest({"repo": "acme/demo", "visibility": "private"}),
+        "refused",
+        now=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+    )
+
+    assert list(record) == ["ts", "tool", "sub", "act", "task_id", "args_digest", "status"]
+    assert record["status"] == "refused"
+    assert record["sub"] is None
+    assert record["act"] is None
+    assert record["task_id"] is None
+    assert record["args_digest"] == args_digest({"repo": "acme/demo", "visibility": "private"})
+
+
 def test_importing_the_shared_middleware_needs_no_secret_or_server() -> None:
     """`import servers.common.auth` must not read a token or start anything.
 

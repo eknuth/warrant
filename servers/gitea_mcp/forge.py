@@ -226,8 +226,13 @@ class GiteaForge:
     # -- reads -------------------------------------------------------------
 
     async def list_repos(self, org: str) -> list[Repo]:
+        # One page of 50, and `X-Total-Count` is not read, so a larger org would
+        # be reported as the first 50 with nothing saying so. Same for the issue
+        # and comment reads below. Paging belongs with the seeding work, where
+        # the number of repos a scenario needs is known.
+        roster = await self._roster(org)
         data = await self._get_json(f"/orgs/{org}/repos", params={"limit": 50}) or []
-        return [self._repo_from(item) for item in data]
+        return [self._repo_from(item, roster) for item in data]
 
     async def list_issues(self, repo: str, state: str = "open") -> list[Issue]:
         owner, _ = split_repo(repo)
@@ -412,11 +417,12 @@ class GiteaForge:
             f"/repos/{repo}",
             json={"private": visibility == "private"},
         )
-        return self._repo_from(item)
+        owner, _ = split_repo(repo)
+        return self._repo_from(item, await self._roster(owner, repo))
 
     # -- shaping -----------------------------------------------------------
 
-    def _repo_from(self, item: dict[str, Any]) -> Repo:
+    def _repo_from(self, item: dict[str, Any], roster: _Roster) -> Repo:
         full_name = item.get("full_name", item.get("name", ""))
         owner = (item.get("owner") or {}).get("login", "")
         return Repo(
@@ -426,10 +432,12 @@ class GiteaForge:
             private=bool(item.get("private")),
             default_branch=item.get("default_branch") or "main",
             html_url=item.get("html_url") or "",
-            # The author of a repo is its owner, and the owner owns it by
-            # definition, so the tier is `owner` rather than a membership
-            # lookup against the org the repo happens to sit in.
-            source=self._source("repo", full_name, owner, "owner"),
+            # The author of a repo is its owner, and its tier is that login's
+            # tier in the org, the same rule the other records use. It is not
+            # hardcoded to `owner`: an org-owned repo has the org as its owner,
+            # and an org is not a member of its own owner team, so the honest
+            # answer there is `unknown` rather than a tier nothing granted.
+            source=self._source("repo", full_name, owner, roster.tier(owner)),
         )
 
     def _issue_from(self, item: dict[str, Any], repo: str, roster: _Roster) -> Issue:
