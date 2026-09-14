@@ -122,15 +122,28 @@ def _health_ok(base_url: str, timeout: float = 2.0) -> bool:
 
 @pytest.fixture(scope="session")
 def gitea(settings: ServerSettings) -> ServerSettings:
-    """Skip unless a bootstrapped Gitea is reachable."""
+    """Skip unless a bootstrapped Gitea is reachable.
+
+    Only an absent stack skips. A Gitea that answers and refuses the token is a
+    failure, not a skip: a set-but-wrong `GITEA_ADMIN_TOKEN` used to be reported
+    as a missing org, which deleted every integration test silently while
+    `make test` stayed green.
+    """
     if not settings.gitea_admin_token:
         pytest.skip("GITEA_ADMIN_TOKEN is not set; run scripts/gitea_bootstrap.py")
     if not _health_ok(settings.gitea_url):
         pytest.skip(f"no Gitea at {settings.gitea_url}; run `make up`")
     headers = {"Authorization": f"token {settings.gitea_admin_token}"}
     response = httpx.get(f"{settings.gitea_url}/api/v1/orgs/acme", headers=headers, timeout=5.0)
+    if response.status_code in (401, 403):
+        pytest.fail(
+            f"Gitea at {settings.gitea_url} refused GITEA_ADMIN_TOKEN with "
+            f"HTTP {response.status_code}; run scripts/gitea_bootstrap.py"
+        )
+    if response.status_code == 404:
+        pytest.fail("org acme is missing; run scripts/gitea_bootstrap.py")
     if response.status_code != 200:
-        pytest.skip("org acme is missing; run scripts/gitea_bootstrap.py")
+        pytest.fail(f"Gitea answered HTTP {response.status_code} for org acme")
     return settings
 
 
@@ -172,8 +185,15 @@ def mint_obo() -> Any:
                 )
         except httpx.HTTPError as error:
             pytest.skip(f"no Keycloak at {dev.keycloak_url}: {error}")
+        # A reachable Keycloak that refuses the exchange is a failure. Skipping
+        # here meant a wrong or rotated WARRANT_AGENT_CLIENT_SECRET, or a realm
+        # regression, left the suite green with the real-token criteria never
+        # exercised.
         if response.status_code != 200:
-            pytest.skip(f"token exchange failed: HTTP {response.status_code} {response.text[:200]}")
+            pytest.fail(
+                f"Keycloak at {dev.keycloak_url} refused the token exchange with "
+                f"HTTP {response.status_code}: {response.text[:300]}"
+            )
         return response.json()["access_token"]
 
     return mint
