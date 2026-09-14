@@ -1,6 +1,6 @@
 # Warrant. Every target runs from a checkout of this repository.
 
-.PHONY: install lint test up down reset gitea-mcp dsh-profile
+.PHONY: install lint test up down reset gitea-mcp dsh-profile worktree worktree-clean
 
 # Create or refresh .venv from pyproject.toml and uv.lock. `uv sync` is also
 # what a clean clone runs first; there is no other install step.
@@ -46,6 +46,37 @@ gitea-mcp:
 # Reproducible and idempotent; see infra/dsh/install-profile.sh.
 dsh-profile:
 	bash infra/dsh/install-profile.sh
+
+# A second checkout for verifying a pull request, for an eval run pinned to a
+# commit, or for the recording. Not for building a second issue in parallel:
+# one issue branch is open at a time (AGENTS.md, Rules).
+#
+# It goes inside this checkout, under `.worktrees/`, because that is the one
+# place the session's write sandbox allows. `.env` and `.linear.toml` are
+# symlinked from the main checkout rather than copied, so a worktree cannot
+# drift from its credentials and neither file exists twice. `scripts/repo_root.sh`
+# is what finds the main checkout when this runs from inside a worktree.
+worktree:
+	@if [ -z "$(NAME)" ] || [ -z "$(REF)" ]; then \
+		echo "usage: make worktree REF=<ref> NAME=<name>" >&2; exit 2; fi
+	@test ! -e ".worktrees/$(NAME)" || { echo "already exists: .worktrees/$(NAME)" >&2; exit 2; }
+	@root=$$(bash scripts/repo_root.sh); \
+		test -f "$$root/.env" || { echo "no .env in $$root; copy .env.example and fill it in" >&2; exit 1; }
+	git worktree add ".worktrees/$(NAME)" "$(REF)"
+	@root=$$(bash scripts/repo_root.sh); \
+		ln -sfn "$$root/.env" ".worktrees/$(NAME)/.env"; \
+		ln -sfn "$$root/.linear.toml" ".worktrees/$(NAME)/.linear.toml"
+	cd ".worktrees/$(NAME)" && uv sync
+	@echo "worktree ready: .worktrees/$(NAME) on $(REF)"
+
+# Remove one worktree and forget it. `git worktree remove` refuses a worktree
+# with uncommitted changes, which is the answer that keeps a verification run
+# from being deleted by accident; `--force` is a deliberate second step.
+worktree-clean:
+	@if [ -z "$(NAME)" ]; then echo "usage: make worktree-clean NAME=<name>" >&2; exit 2; fi
+	git worktree remove ".worktrees/$(NAME)"
+	git worktree prune
+	@echo "removed: .worktrees/$(NAME)"
 
 # --- later issues, commented until the issue that needs them ----------------
 # Each block names the target that issue will add, so its purpose is visible

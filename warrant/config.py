@@ -25,19 +25,70 @@ id cannot escape the run directory.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
+import subprocess
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from warrant.models import Chain
 
 MODE_ENV = "WARRANT_MODE"
+RUNS_DIR_ENV = "WARRANT_RUNS_DIR"
 
-# Where the ledger and the decision log write. `runs/` is gitignored.
-RUNS_DIR = Path("runs")
+# The checkout this file is part of. `warrant/config.py` is one level down, so
+# the parent of its parent is the root of whichever checkout is running.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def main_checkout(root: Path = REPO_ROOT) -> Path:
+    """The checkout that owns the git directory, worktree or not.
+
+    In a worktree, `<root>/.git` is a file holding `gitdir: <main>/.git/worktrees/<name>`,
+    so the main checkout is two levels up from there. Reading that pointer is
+    what makes the runs directory the same from every worktree, and it costs no
+    subprocess. Without it the default would be the worktree's own parent, which
+    is a directory of worktrees rather than the checkout.
+    """
+    pointer = root / ".git"
+    if pointer.is_dir():
+        return root
+    if pointer.is_file():
+        text = pointer.read_text(encoding="utf-8").strip()
+        if text.startswith("gitdir:"):
+            gitdir = Path(text.split(":", 1)[1].strip())
+            if not gitdir.is_absolute():
+                gitdir = (root / gitdir).resolve()
+            # <main>/.git/worktrees/<name>
+            if gitdir.parent.name == "worktrees":
+                return gitdir.parent.parent.parent
+    return root
+
+
+def default_runs_dir() -> Path:
+    """Where the ledger and the decision log write, as an absolute path.
+
+    An absolute default is the point. A relative `runs` resolves against the
+    process's working directory, so a run started from a worktree wrote its
+    decisions and its ledger into that worktree, and two runs of the same task
+    from two checkouts landed in two different places. One directory that every
+    checkout shares is what lets a run be compared with a run.
+
+    The environment variable wins, so an eval run can be pointed at a column
+    directory. Otherwise the main checkout's `runs/`, which is gitignored.
+    """
+    override = os.environ.get(RUNS_DIR_ENV)
+    if override:
+        return Path(override).expanduser()
+    return main_checkout() / "runs"
+
+
+# Read once, at import, the way the mode is.
+RUNS_DIR = default_runs_dir()
 
 PROMPT_ONLY_POLICY_ID = "ablation:prompt-only"
 
@@ -90,6 +141,84 @@ DEFAULT_MODE: Mode = parse_mode(os.environ.get(MODE_ENV))
 def current_mode() -> Mode:
     """The mode this process started with."""
     return DEFAULT_MODE
+
+
+def commit_sha(root: Path | None = None) -> str | None:
+    """The commit the running checkout is at, or None when there is no answer.
+
+    A run has to say which code produced it. That is the difference between two
+    columns in the eval table and two runs of the same column, and it is the
+    first question a surprising number raises. Returns None rather than raising
+    when git is absent or the directory is not a repository: metadata the run
+    cannot have is not a reason to fail the run.
+    """
+    where = root if root is not None else REPO_ROOT
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(where), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    return proc.stdout.strip()
+
+
+def commit_is_dirty(root: Path | None = None) -> bool | None:
+    """Whether the checkout has uncommitted changes, or None when unchecked.
+
+    The sha alone is not the provenance of a run: the same sha with a dirty tree
+    is a different program. None means the question could not be asked, which is
+    not the same answer as False.
+    """
+    where = root if root is not None else REPO_ROOT
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(where), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return bool(proc.stdout.strip())
+
+
+def write_run_metadata(directory: Path | str, **extra: Any) -> Path:
+    """Write `metadata.json` into one run directory and return its path.
+
+    The keys are the ones every run has: the commit, whether the tree was dirty,
+    the mode, and the time the run started. `extra` carries what only some runs
+    know (`tool`, `model`, `session`), and wins over the defaults.
+    """
+    path = Path(directory)
+    path.mkdir(parents=True, exist_ok=True)
+    metadata: dict[str, Any] = {
+        "commit": commit_sha(),
+        "dirty": commit_is_dirty(),
+        "mode": current_mode().value,
+        "started_at": datetime.now(UTC).isoformat(),
+    }
+    metadata.update(extra)
+    target = path / "metadata.json"
+    target.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return target
+
+
+def bad_task_id(task_id: str) -> bool:
+    """Whether a task id cannot name a run directory.
+
+    The same rule `task_dir` enforces, exposed so the gateway can answer a bad
+    id with a tool error instead of letting the decision log raise out of the
+    request when it turns the id into a path.
+    """
+    safe = _SAFE_TASK_ID.sub("_", task_id)
+    return not safe or set(safe) <= {"."}
 
 
 def task_dir(root: Path | str, task_id: str) -> Path:

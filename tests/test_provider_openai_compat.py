@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -260,12 +261,17 @@ async def test_the_default_effort_sends_thinking_disabled() -> None:
 
 
 async def test_the_request_carries_the_tool_schemas() -> None:
+    from agents.providers.openai_compat import decode_tool_name
+
     provider, transport = provider_for_test([recorded("text_final")])
 
     await provider.run([Turn(role="user", text="Say done.")], TOOLS)
 
     names = [entry["function"]["name"] for entry in transport.requests[0]["tools"]]
-    assert names == ["get_port", "get_host"]
+    # Every underscore is escaped on the wire, so these are not the tool names
+    # themselves; what the model sees is the encoding, and it decodes back.
+    assert names == ["get_5f_port", "get_5f_host"]
+    assert [decode_tool_name(name) for name in names] == ["get_port", "get_host"]
     assert transport.requests[0]["tools"][0]["type"] == "function"
 
 
@@ -334,3 +340,66 @@ async def test_an_error_that_does_not_name_the_reasoning_field_is_not_retried() 
         await provider.run([Turn(role="user", text="Find the port.")], TOOLS)
 
     assert len(transport.requests) == 1
+
+
+def test_a_gateway_tool_name_round_trips_through_the_wire_encoding() -> None:
+    """The endpoint's grammar has no dot, and the gateway's names do."""
+    from agents.providers.openai_compat import decode_tool_name, encode_tool_name
+
+    for name in (
+        "gitea.get_issue",
+        "gitea.create_issue_comment",
+        "db.search_customers",
+        "mail.send_reply",
+        # The collision the escape character invites. `a_2e_b` and `a.b` both
+        # encode to `a_2e_b` unless `_` is escaped too, and then two different
+        # tools present one name to the model and one of them answers the
+        # other's calls. `a_x2e_b` cannot collide (`x2e` is not hex) and passed
+        # while the codec was broken, which is why both are here.
+        "a_2e_b",
+        "a_x2e_b",
+        "_leading",
+        "trailing_",
+    ):
+        encoded = encode_tool_name(name)
+
+        assert re.fullmatch(r"[A-Za-z0-9_-]+", encoded), encoded
+        assert decode_tool_name(encoded) == name
+
+
+def test_two_different_tool_names_never_share_a_wire_name() -> None:
+    """Injective, not just reversible: the codec is a substitution cipher.
+
+    The provider shows the model one name per tool, and the loop decodes the
+    name back to decide and forward. Two gateway tools with one wire name means
+    the model's choice is not the tool that runs.
+    """
+    from agents.providers.openai_compat import encode_tool_name
+
+    names = [
+        "db.public.orders",
+        "db.public_2e_orders",
+        "db.public.orders",
+        "mail.send_reply",
+        "mail_2e_send_reply",
+        "a_b.c",
+        "a.b_c",
+    ]
+    encoded = [encode_tool_name(name) for name in names]
+
+    assert len(set(encoded)) == len(set(names)), encoded
+
+
+def test_the_wire_tools_carry_the_encoded_name() -> None:
+    from agents.providers.openai_compat import decode_tool_name, wire_tools
+
+    schema = ToolSchema(
+        name="gitea.get_issue",
+        description="Read one issue.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    entry = wire_tools([schema])[0]["function"]
+
+    assert "." not in entry["name"]
+    assert decode_tool_name(entry["name"]) == "gitea.get_issue"

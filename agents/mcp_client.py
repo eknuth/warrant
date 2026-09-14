@@ -30,6 +30,7 @@ from typing import Any
 import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from agents.providers.base import ToolSchema
 from agents.task import Chain
@@ -41,6 +42,9 @@ logger = logging.getLogger(__name__)
 SOURCE_KEYS = frozenset({"system", "kind", "id", "author", "author_tier"})
 
 DEFAULT_TIMEOUT = 60.0
+
+# The gateway every agent reaches. `WARRANT_URL` in `.env` overrides it.
+DEFAULT_WARRANT_URL = "http://localhost:9100/mcp"
 
 
 class MCPError(RuntimeError):
@@ -54,6 +58,24 @@ class Endpoint:
     url: str
     bearer: str
     name: str = "mcp"
+
+
+class GatewaySettings(BaseSettings):
+    """The gateway URL, read from `.env` the way every other setting is."""
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    warrant_url: str = DEFAULT_WARRANT_URL
+
+
+def warrant_endpoint(bearer: str, *, url: str | None = None, name: str = "warrant") -> Endpoint:
+    """The one endpoint an agent is configured to reach.
+
+    An agent holds an on-behalf-of token for `warrant` and nothing else; the
+    per-upstream tokens are the gateway's to mint. `url` overrides the
+    environment, which is what a test or the CLI flag uses.
+    """
+    return Endpoint(url=url or GatewaySettings().warrant_url, bearer=bearer, name=name)
 
 
 @dataclass

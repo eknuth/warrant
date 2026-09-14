@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -35,6 +36,61 @@ from .base import ToolSchema, ToolUse, Turn, Usage
 logger = logging.getLogger(__name__)
 
 EFFORTS = ("off", "low", "high", "max")
+
+# The function-name grammar the chat-completions endpoint enforces. A name with
+# any other character is refused with a 400 before the request is considered.
+# The gateway re-exports tools as `gitea.get_issue`, so the dot has to be
+# encoded before it goes on the wire and decoded when the model asks for it.
+#
+# `_` is deliberately not in this class. It is the escape character, so leaving
+# it literal makes the codec non-injective: with `_` safe, `db.public.orders`
+# and a second tool literally named `db.public_2e_orders` both encode to
+# `db_2e_public_2e_orders`, one of them becomes unreachable, and the other
+# answers calls the model aimed at it. Escaping `_` is what makes every escape
+# unambiguous.
+WIRE_SAFE = re.compile(r"[A-Za-z0-9-]")
+
+
+def encode_tool_name(name: str) -> str:
+    """An endpoint-safe spelling of a tool name, injective on any name.
+
+    A character outside the endpoint's grammar becomes `_<hex codepoint>_`, and
+    `_` is outside it too, so every escape starts at an underscore and ends at
+    the next one. Two different names never share a wire name.
+    """
+    encoded: list[str] = []
+    for char in name:
+        encoded.append(char if WIRE_SAFE.fullmatch(char) else f"_{ord(char):x}_")
+    return "".join(encoded)
+
+
+def decode_tool_name(name: str) -> str:
+    """The inverse of `encode_tool_name`, with unrecognized text kept as it is.
+
+    A name the model made up is not one this provider offered, so it decodes to
+    something the gateway refuses as an unknown tool rather than to a tool the
+    model was never shown.
+    """
+    decoded: list[str] = []
+    index = 0
+    while index < len(name):
+        char = name[index]
+        if char != "_":
+            decoded.append(char)
+            index += 1
+            continue
+        end = name.find("_", index + 1)
+        if end == -1:
+            decoded.append(char)
+            index += 1
+            continue
+        try:
+            decoded.append(chr(int(name[index + 1 : end], 16)))
+        except ValueError:
+            decoded.append(name[index : end + 1])
+        index = end + 1
+    return "".join(decoded)
+
 
 # The vendor's mapping table accepts more names than the project uses, and
 # collapses several of them onto two real levels. Warrant names the four levels
@@ -62,12 +118,16 @@ def request_fields(effort: str) -> dict[str, Any]:
 
 
 def wire_tools(tools: list[ToolSchema]) -> list[dict[str, Any]]:
-    """The `tools` array in the body, one function entry per tool."""
+    """The `tools` array in the body, one function entry per tool.
+
+    The name is encoded for the wire; the model's answers come back through
+    `decode_tool_name`, so the loop still sees the gateway's own name.
+    """
     return [
         {
             "type": "function",
             "function": {
-                "name": tool.name,
+                "name": encode_tool_name(tool.name),
                 "description": tool.description,
                 "parameters": tool.input_schema,
             },
@@ -101,7 +161,7 @@ def wire_messages(messages: list[Turn], *, echo_reasoning: bool = False) -> list
                         "id": use.id,
                         "type": "function",
                         "function": {
-                            "name": use.name,
+                            "name": encode_tool_name(use.name),
                             "arguments": json.dumps(use.args, separators=(",", ":")),
                         },
                     }
@@ -179,7 +239,14 @@ def parse_tool_uses(message: Any) -> list[ToolUse]:
                 error,
             )
             args, malformed = {}, True
-        uses.append(ToolUse(id=call.id, name=call.function.name, args=args, malformed=malformed))
+        uses.append(
+            ToolUse(
+                id=call.id,
+                name=decode_tool_name(call.function.name),
+                args=args,
+                malformed=malformed,
+            )
+        )
     return uses
 
 

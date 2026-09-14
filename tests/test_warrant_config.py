@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -183,3 +184,73 @@ def test_two_distinct_task_ids_never_share_a_run_directory() -> None:
 
     assert len(directories) == len(ids), directories
     assert config.task_dir("/runs", "a_b").name == "a_b", "a safe id keeps its name"
+
+
+def test_the_chain_task_id_rule_matches_the_run_layout() -> None:
+    """Two modules, one rule: `models.Chain` and `config.bad_task_id` agree.
+
+    `warrant.models` cannot import `warrant.config` (the import would run the
+    other way), so the all-dots rule is written twice. This is what keeps the
+    copies from drifting: every id either both accept or both refuse.
+    """
+    from warrant.models import Chain
+
+    for task_id in ("task-1", "a_b", "../escape", ".", "..", "...", "...."):
+        refused_by_config = config.bad_task_id(task_id)
+        try:
+            Chain(
+                sub="h-alice",
+                act="triage-agent",
+                task_id=task_id,
+                token_exp=datetime.now(UTC),
+            )
+        except ValueError:
+            refused_by_chain = True
+        else:
+            refused_by_chain = False
+
+        assert refused_by_config == refused_by_chain, task_id
+
+
+def test_the_runs_dir_is_absolute_and_env_overridable(tmp_path: Path) -> None:
+    """A relative default writes a worktree's run into the worktree.
+
+    The default is the main checkout's `runs/`, resolved from this file's own
+    location rather than the process's working directory, and the environment
+    variable wins so an eval run can be pointed at a column directory.
+    """
+    assert config.default_runs_dir().is_absolute()
+    assert config.default_runs_dir().name == "runs"
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("WARRANT_RUNS_DIR", str(tmp_path / "column"))
+        assert config.default_runs_dir() == tmp_path / "column"
+
+
+def test_a_worktree_defaults_to_the_main_checkouts_runs_dir(tmp_path: Path) -> None:
+    """`.git` is a file in a worktree, and it points at the main checkout.
+
+    Reading that pointer is what makes two checkouts share one run directory
+    without asking git, which would be a subprocess at import.
+    """
+    main = tmp_path / "warrant"
+    (main / ".git" / "worktrees" / "w6").mkdir(parents=True)
+    worktree = tmp_path / "warrant-wt" / "w6"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {main}/.git/worktrees/w6\n")
+
+    assert config.main_checkout(worktree) == main
+    assert config.main_checkout(main) == main
+
+
+def test_write_run_metadata_records_the_commit(tmp_path: Path) -> None:
+    """The sha is the first question a surprising number raises."""
+    written = config.write_run_metadata(tmp_path / "task-1", tool="agents.triage")
+
+    record = json.loads(written.read_text())
+    assert written == tmp_path / "task-1" / "metadata.json"
+    assert record["tool"] == "agents.triage"
+    assert record["commit"] == config.commit_sha()
+    assert isinstance(record["dirty"], bool)
+    assert record["mode"] in {mode.value for mode in Mode}
+    assert record["started_at"]

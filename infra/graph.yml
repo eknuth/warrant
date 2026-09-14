@@ -3,6 +3,12 @@
 #
 # Every credential-shaped value belongs in .env, never here. Nothing in this
 # file is a secret: ids, logins, group names, and resource names only.
+#
+# An agent id is the identity provider's client id, and a tool id is the MCP
+# gateway's re-exported name (`<server prefix>.<upstream tool name>`). Both are
+# load-bearing in W6: the gateway looks an actor up by the token's `act.sub`
+# and a tool up by the name the agent called, so a mismatch is an unknown agent
+# or an unknown tool rather than a silent pass.
 
 humans:
   - id: h-alice
@@ -16,31 +22,53 @@ humans:
     groups: [engineering, reviewers]
 
 agents:
-  - id: agent-triage
-    client_id: warrant-triage
+  - id: triage-agent
+    client_id: triage-agent
     owner_human_id: h-alice
     justification: read the issue queue to triage it
     justification_expires_at: null
-    allowed_tools: [gitea.search, gitea.get_file, gitea.create_issue]
-  - id: agent-support
-    client_id: warrant-support
+    # Reads plus the writes a triage pass needs. `gitea.set_repo_visibility` is
+    # deliberately absent: the resource server's admin token can do it, and the
+    # graph is where the agent's narrower authority is written down.
+    allowed_tools:
+      - gitea.list_repos
+      - gitea.list_issues
+      - gitea.get_issue
+      - gitea.get_file
+      - gitea.search_code
+      - gitea.create_issue_comment
+      - gitea.create_branch
+      - gitea.commit_file
+      - gitea.open_pull_request
+  - id: support-agent
+    client_id: support-agent
     owner_human_id: h-bob
     justification: answer the support mailbox
     justification_expires_at: "2027-01-01T00:00:00Z"
-    allowed_tools: [mail.search, mail.send, postgres.query]
+    allowed_tools: [mail.search, mail.send, db.query]
   # Empty justification on purpose: an agent an owner stood up without saying
   # why. `justification_valid` is false for it, which is the deny-safe case.
-  - id: agent-audit
-    client_id: warrant-audit
+  - id: orphan-agent
+    client_id: orphan-agent
     owner_human_id: h-carol
     justification: ""
     justification_expires_at: null
-    allowed_tools: [postgres.query, gitea.search]
+    allowed_tools: [db.query, gitea.search_code]
 
 tools:
-  - id: gitea.search
+  - id: gitea.list_repos
     server: gitea
-    name: search
+    name: list_repos
+    action_kind: read
+    resource_kind: repo
+  - id: gitea.list_issues
+    server: gitea
+    name: list_issues
+    action_kind: read
+    resource_kind: repo
+  - id: gitea.get_issue
+    server: gitea
+    name: get_issue
     action_kind: read
     resource_kind: repo
   - id: gitea.get_file
@@ -48,18 +76,43 @@ tools:
     name: get_file
     action_kind: read
     resource_kind: repo
-  - id: gitea.create_issue
+  - id: gitea.search_code
     server: gitea
-    name: create_issue
+    name: search_code
+    action_kind: read
+    resource_kind: repo
+  - id: gitea.create_issue_comment
+    server: gitea
+    name: create_issue_comment
     action_kind: write
     resource_kind: repo
-  - id: postgres.query
-    server: postgres
+  - id: gitea.create_branch
+    server: gitea
+    name: create_branch
+    action_kind: write
+    resource_kind: repo
+  - id: gitea.commit_file
+    server: gitea
+    name: commit_file
+    action_kind: write
+    resource_kind: repo
+  - id: gitea.open_pull_request
+    server: gitea
+    name: open_pull_request
+    action_kind: write
+    resource_kind: repo
+  - id: gitea.set_repo_visibility
+    server: gitea
+    name: set_repo_visibility
+    action_kind: write
+    resource_kind: repo
+  - id: db.query
+    server: db
     name: query
     action_kind: read
     resource_kind: db_table
-  - id: postgres.execute
-    server: postgres
+  - id: db.execute
+    server: db
     name: execute
     action_kind: write
     resource_kind: db_table
@@ -85,6 +138,11 @@ resources:
     name: acme/web
     owner_human_id: h-carol
     sensitivity: public
+  - id: repo-acme-widgets
+    kind: repo
+    name: acme/widgets
+    owner_human_id: h-alice
+    sensitivity: internal
   - id: table-orders
     kind: db_table
     name: public.orders

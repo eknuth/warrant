@@ -22,22 +22,22 @@ def loaded(tmp_path: Path) -> graph.Graph:
 def test_the_shipped_fixture_has_three_humans_and_three_agents(loaded: graph.Graph) -> None:
     assert [human.id for human in loaded.humans()] == ["h-alice", "h-bob", "h-carol"]
     assert [agent.id for agent in loaded.agents()] == [
-        "agent-audit",
-        "agent-support",
-        "agent-triage",
+        "orphan-agent",
+        "support-agent",
+        "triage-agent",
     ]
 
 
 def test_an_agent_row_round_trips_through_sqlite(loaded: graph.Graph) -> None:
-    agent = loaded.agent("agent-support")
+    agent = loaded.agent("support-agent")
 
     assert agent is not None
-    assert agent.client_id == "warrant-support"
+    assert agent.client_id == "support-agent"
     assert agent.owner_human_id == "h-bob"
     assert agent.justification == "answer the support mailbox"
     assert agent.justification_expires_at is not None
     assert agent.justification_expires_at.year == 2027
-    assert agent.allowed_tools == ["mail.search", "mail.send", "postgres.query"]
+    assert agent.allowed_tools == ["mail.search", "mail.send", "db.query"]
 
 
 def test_a_human_row_round_trips_through_sqlite(loaded: graph.Graph) -> None:
@@ -66,6 +66,15 @@ def test_tool_and_resource_rows_round_trip(loaded: graph.Graph) -> None:
         "h-alice",
         "confidential",
     )
+
+
+def test_a_resource_resolves_from_the_name_a_tool_call_carries(loaded: graph.Graph) -> None:
+    found = loaded.resource_named("acme/widgets", "repo")
+
+    assert found is not None
+    assert found.id == "repo-acme-widgets"
+    assert loaded.resource_named("acme/widgets", "db_table") is None
+    assert loaded.resource_named("nobody's-repo") is None
 
 
 def test_an_unknown_id_is_none_not_an_error(loaded: graph.Graph) -> None:
@@ -108,8 +117,8 @@ def test_loading_twice_leaves_the_same_graph(tmp_path: Path) -> None:
     with graph.load(SEED, database) as second:
         assert len(second.humans()) == 3
         assert len(second.agents()) == 3
-        assert len(second.tools()) == 7
-        assert len(second.resources()) == 4
+        assert len(second.tools()) == 14
+        assert len(second.resources()) == 5
 
 
 def test_an_agent_with_an_unknown_owner_is_refused(tmp_path: Path) -> None:

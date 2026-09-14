@@ -172,7 +172,7 @@ def test_the_escalate_pass_uses_the_tool_from_the_context(
 ) -> None:
     directory = policy_dir(
         '@id("escalate-search")\npermit(principal, action == Action::"Escalate", resource)\n'
-        'when { context.tool == "gitea.search" };'
+        'when { context.tool == "gitea.search_code" };'
     )
 
     decision = engine_for(directory, decision_log, schema_path=None).decide(make_request())
@@ -204,7 +204,7 @@ def test_a_deny_with_an_escalate_permit_escalates(
     directory = policy_dir(
         '@id("forbid-read")\nforbid(principal, action == Action::"read", resource);',
         '@id("escalate-search")\npermit(principal, action == Action::"Escalate", resource)\n'
-        'when { context.tool == "gitea.search" };',
+        'when { context.tool == "gitea.search_code" };',
     )
     engine = engine_for(directory, decision_log, schema_path=None)
     actions = count_cedar_actions(monkeypatch)
@@ -262,7 +262,7 @@ def test_the_agent_maps_to_principal_with_owner_and_on_behalf_of(
     )
     chain = Chain(
         sub="h-bob",
-        act="agent-triage",
+        act="triage-agent",
         task_id="task-1",
         scopes=["read"],
         groups=["support"],
@@ -285,7 +285,7 @@ def test_on_behalf_of_is_not_the_owner(
     )
     chain = Chain(
         sub="h-bob",
-        act="agent-triage",
+        act="triage-agent",
         task_id="task-1",
         scopes=["read"],
         groups=["support"],
@@ -324,7 +324,7 @@ def test_a_missing_justification_is_not_valid(
     )
     chain = Chain(
         sub="h-carol",
-        act="agent-audit",
+        act="orphan-agent",
         task_id="task-1",
         scopes=["read"],
         groups=["engineering"],
@@ -347,7 +347,7 @@ def test_an_expired_justification_is_not_valid(
     )
     chain = Chain(
         sub="h-bob",
-        act="agent-support",
+        act="support-agent",
         task_id="task-1",
         scopes=["read"],
         groups=["support"],
@@ -487,7 +487,7 @@ def test_an_error_is_recorded_even_when_a_permit_matched(
     """
     directory = policy_dir(
         '@id("ok")\npermit(principal, action == Action::"read", resource)\n'
-        'when { context.tool == "gitea.search" };',
+        'when { context.tool == "gitea.search_code" };',
         '@id("broken")\npermit(principal, action == Action::"read", resource)\n'
         "when { context.provenance.minTier > 3 };",
     )
@@ -505,7 +505,7 @@ def test_a_write_tool_cannot_be_authorized_as_a_read(
     """The action kind comes from the graph, not from the caller.
 
     A tool labelled with a cheaper kind would otherwise be authorized by that
-    kind's permits. `gitea.create_issue` is a write in the seed and the request
+    kind's permits. `gitea.create_issue_comment` is a write in the seed and the request
     here asks for a read.
     """
     directory = policy_dir(
@@ -513,8 +513,10 @@ def test_a_write_tool_cannot_be_authorized_as_a_read(
     )
     engine = engine_for(directory, decision_log, schema_path=None, graph=Graph(graph_db.path))
 
-    # `gitea.create_issue` is a write in the seed; the request claims it is a read.
-    decision = engine.decide(make_request(tool="gitea.create_issue", action_kind=ActionKind.read))
+    # `gitea.create_issue_comment` is a write in the seed; the request claims it is a read.
+    decision = engine.decide(
+        make_request(tool="gitea.create_issue_comment", action_kind=ActionKind.read)
+    )
 
     assert decision.verdict is Verdict.deny, "a write must not be authorized by a read permit"
     assert "graph" in " ".join(decision.reasons)

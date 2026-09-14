@@ -61,6 +61,19 @@ next step. `docs/decisions/` holds the decisions behind this setup.
 - After resolving any conflict, diff the result against both branch tips and account for every line
   that went in. A hasty resolution has silently dropped the other side's work more than once: a
   merge once deleted W5's core, and a scripted replay dropped a file's worth of tests.
+- A worktree is for verifying a pull request, for an eval run pinned to a commit, and for the
+  recording. It is not a way to build a second issue in parallel; one open issue branch at a time
+  still holds. Worktrees live under `.worktrees/<name>` inside this checkout and are created with
+  `make worktree REF=<ref> NAME=<name>`, which symlinks `.env` and `.linear.toml` from the checkout
+  root and runs `uv sync` there. `make worktree-clean NAME=<name>` removes one. Never under `/tmp`
+  and never outside the project: the session's write sandbox allows writes only under the checkout,
+  and that is also what keeps a verification run's uncommitted state from being mistaken for the
+  main checkout's.
+- Every run writes its record to one absolute `WARRANT_RUNS_DIR`, the main checkout's `runs/` by
+  default, with the commit sha in each run's `metadata.json`. A run started from a worktree
+  therefore lands beside every other run rather than in its own tree, and a surprising number can
+  be traced to the code that produced it. `compose.yml` carries a top-level `name: warrant`, so a
+  worktree's `make up` finds the same stack the main checkout started.
 
 ## Model and effort
 
@@ -116,20 +129,23 @@ The profile, the hooks, and the skills below are the project's own extension poi
 ```
 warrant/
   AGENTS.md          this file
-  Makefile           install, lint, test, up, down, reset, dsh-profile
-  compose.yml        the local stack: Keycloak today, gitea, postgres, and
-                     mailpit commented until the issues that add them
+  Makefile           install, lint, test, up, down, reset, gitea-mcp, dsh-profile,
+                     worktree, worktree-clean
+  compose.yml        the local stack: Keycloak, gitea, and the W6 gateway with
+                     its upstream; postgres and mailpit commented until the
+                     issues that add them
   warrant/           the authorization service (W5, W6)
   servers/           gitea_mcp, postgres_mcp, mail_mcp (W3, W8, W9)
   agents/            providers, triage, support (W4, W10)
   gen/               scenario schema, seeders, scenarios/*.yml (W12, W13)
   evals/             runner, grader, report (W14, W15); results/ is gitignored
   infra/dsh/         profile sources: patches, the sdk manifest, the installer
-  .dsh/              hooks.json and the four hook scripts
+  .dsh/              hooks.json and the five hook scripts
   .agents/skills/    project skills
   scripts/           dsh_run.py, the headless runner
   docs/decisions/    what was decided and why
   runs/              gitignored run records, including runs/dsh/
+  .worktrees/        gitignored verification checkouts, one per name
 ```
 
 The product packages are placeholders until their issues land. `docs/decisions/001-scaffold.md`

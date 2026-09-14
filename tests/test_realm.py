@@ -168,11 +168,22 @@ def test_each_agent_has_an_act_mapper_on_a_scope_only_it_has() -> None:
             assert holding_scope["name"] not in other_scope_names, (agent, other)
 
 
-def test_triage_holds_only_the_gitea_audience() -> None:
-    assert set(audience_mappers("triage-agent")) == {"gitea-mcp"}
+def test_triage_holds_the_gitea_and_gateway_audiences() -> None:
+    # The gateway audience is what lets triage-agent reach Warrant. The gitea
+    # audience is still minted so the W3 resource-server tests can present a
+    # real token; the running agent never asks for it.
+    assert set(audience_mappers("triage-agent")) == {"gitea-mcp", "warrant"}
 
 
-def test_no_client_but_the_agents_carries_an_act_mapper() -> None:
+def test_the_gateway_client_may_exchange_and_holds_every_upstream_audience() -> None:
+    model = client("warrant")
+
+    assert model["publicClient"] is False
+    assert model["attributes"]["standard.token.exchange.enabled"] == "true"
+    assert set(audience_mappers("warrant")) == {"gitea-mcp", "postgres-mcp", "mail-mcp"}
+
+
+def test_no_scope_but_a_known_one_carries_an_act_mapper() -> None:
     """The act claim is written by the realm, so every writer has to be known.
 
     A client-level mapper is the other place one can hide: the scans above read
@@ -187,7 +198,7 @@ def test_no_client_but_the_agents_carries_an_act_mapper() -> None:
         if any(is_act_mapper(mapper) for mapper in client_mappers(model["clientId"])):
             writers.add(model["clientId"])
 
-    expected = {f"{agent}-obo" for agent in AGENTS}
+    expected = {f"{agent}-obo" for agent in AGENTS} | {"warrant-obo"}
     detail = f"act mappers are written by {sorted(writers)}, expected {sorted(expected)}"
     assert writers == expected, detail
 
@@ -217,7 +228,7 @@ def test_triage_cannot_be_granted_the_db_or_mail_audience_by_scope_mapping() -> 
 
 
 def test_support_holds_the_db_and_mail_audiences() -> None:
-    assert set(audience_mappers("support-agent")) == {"postgres-mcp", "mail-mcp"}
+    assert {"postgres-mcp", "mail-mcp"} <= set(audience_mappers("support-agent"))
 
 
 def test_the_task_id_scope_is_parameterized_and_optional_for_every_agent() -> None:

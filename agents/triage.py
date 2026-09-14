@@ -41,22 +41,20 @@ from agents.auth import (
     lifetime_seconds,
     login_user,
 )
-from agents.mcp_client import CallResult, Endpoint, MCPClient
+from agents.mcp_client import CallResult, MCPClient, warrant_endpoint
 from agents.providers import Provider, ToolSchema, Turn, provider_for
 from agents.providers.base import ToolResultBlock, Usage
 from agents.task import Chain, Task
+from warrant.config import RUNS_DIR as DEFAULT_RUNS_DIR
+from warrant.config import task_dir, write_run_metadata
 
 logger = logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_RUNS_DIR = REPO_ROOT / "runs"
-DEFAULT_MCP_URL = "http://127.0.0.1:9101/mcp"
 PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "triage.md"
 
-# The audience the triage exchange asks for, and the realm client that serves
-# it. A scenario where the agent is handed a token for another resource server
-# is not this role.
-TRIAGE_AUDIENCE = "gitea-mcp"
+# The audience the triage exchange asks for. The agent reaches the gateway and
+# nothing upstream; the gateway mints the per-server tokens itself.
+TRIAGE_AUDIENCE = "warrant"
 
 # The loop's ceiling. Twenty calls is enough to read an issue, read a few files,
 # search once, and write a comment or a branch and a pull request, with room for
@@ -69,14 +67,15 @@ MAX_TOKEN_LIFETIME_SECONDS = 300
 
 # Tools that change the repository. Everything else is read as provenance. The
 # list is explicit rather than derived from a verb, because a misclassified
-# write would quietly leave an action out of the Outcome.
+# write would quietly leave an action out of the Outcome. The names are the
+# gateway's re-exports, not the upstream tool names.
 WRITE_TOOLS = frozenset(
     {
-        "create_issue_comment",
-        "create_branch",
-        "commit_file",
-        "open_pull_request",
-        "set_repo_visibility",
+        "gitea.create_issue_comment",
+        "gitea.create_branch",
+        "gitea.commit_file",
+        "gitea.open_pull_request",
+        "gitea.set_repo_visibility",
     }
 )
 
@@ -143,7 +142,7 @@ def dedupe_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def check_obo_claims(claims: dict[str, Any], task: Task, audience: str) -> None:
     """Refuse a token that is not the one this task asked for.
 
-    The checks are the ones the run record claims: the token names the Gitea MCP
+    The checks are the ones the run record claims: the token names the gateway
     audience and only it, the actor is the triage client, the task id is this
     task's, and the lifetime is the realm's five minutes or less. A token that
     fails any of them stops the run before its first tool call.
@@ -318,7 +317,7 @@ async def run(
     provider: Provider | None = None,
     settings: DevSettings | None = None,
     runs_dir: Path | None = None,
-    mcp_url: str = DEFAULT_MCP_URL,
+    mcp_url: str | None = None,
 ) -> Outcome:
     """Triage one task end to end and return what it did."""
     if task.kind != "triage":
@@ -335,6 +334,14 @@ async def run(
     decoded = decode_claims(obo_token)
     check_obo_claims(decoded["claims"], task, TRIAGE_AUDIENCE)
     token_path = write_token_record(runs_dir, task, decoded, TRIAGE_AUDIENCE)
+    # Which commit produced this run, beside the run. A column in the eval table
+    # is only worth reading if it says which code it is a column of.
+    write_run_metadata(
+        task_dir(runs_dir, task.task_id),
+        tool="agents.triage",
+        model=provider.model,
+        task_id=task.task_id,
+    )
     logger.info(
         "token for task %s: audience=%s lifetime=%ss actor=%s (record: %s)",
         task.task_id,
@@ -350,7 +357,7 @@ async def run(
         task_id=task.task_id,
         sub_id=str(decoded["claims"].get("sub") or "") or None,
     )
-    endpoint = Endpoint(url=mcp_url, bearer=obo_token, name="gitea-mcp")
+    endpoint = warrant_endpoint(obo_token, url=mcp_url)
     async with MCPClient([endpoint], chain=chain, runs_dir=runs_dir) as mcp:
         outcome, usage = await triage_loop(task, provider, mcp, system_prompt=system_prompt)
     write_run_record(runs_dir, task, outcome, usage)
@@ -372,7 +379,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--repo", required=True, help="repository as owner/name")
     parser.add_argument("--issue", required=True, type=int, help="issue number")
     parser.add_argument("--user", default="alice", help="the human the token is for")
-    parser.add_argument("--mcp-url", default=DEFAULT_MCP_URL, help="Gitea MCP endpoint")
+    parser.add_argument(
+        "--mcp-url", default=None, help="gateway MCP endpoint; defaults to WARRANT_URL"
+    )
     return parser.parse_args(argv)
 
 
