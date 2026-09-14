@@ -719,3 +719,25 @@ def test_an_escalate_permit_cannot_authorize_a_tool(tmp_path: Path) -> None:
 
         with pytest.raises(ReservedActionIdError):
             schema_for(graph)
+
+
+def test_the_escalate_reason_names_the_tool_that_was_denied(
+    policy_dir: Any, make_request: Any, decision_log: DecisionLog
+) -> None:
+    """The reason an agent reads has to name what it asked for.
+
+    The real action is the tool, so a reason that named only the kind would name
+    something the agent never called. The kind is kept beside it, because the
+    line is also read by a person working out which rule refused.
+    """
+    directory = policy_dir(
+        '@id("forbid-write")\nforbid(principal, action in Action::"write", resource);',
+        '@id("escalate-ask")\npermit(principal, action == Action::"escalate", resource);',
+    )
+    engine = engine_for(directory, decision_log, schema_path=None)
+
+    decision = engine.decide(make_request(tool="gitea.commit_file", action_kind=ActionKind.write))
+
+    assert decision.verdict is Verdict.escalate
+    assert "escalate-ask" in decision.policy_ids
+    assert decision.reasons[0] == "real action denied: gitea.commit_file (write)"

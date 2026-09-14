@@ -170,7 +170,7 @@ def make_gateway(
         graph=graph,
         engine=engine,
         ledger=Ledger(runs),
-        decision_log=engine.decision_log,  # type: ignore[attr-defined]
+        decision_log=engine.decision_log,
         servers=servers or [GITEA],
         settings=settings,
         upstream=upstream,
@@ -935,3 +935,39 @@ def test_a_resource_id_of_another_kind_does_not_become_that_resource(graph_db: G
 
     assert graph_db.resource(resolved) is None, "it must not resolve to a known row"
     assert resolved != "table-orders", "and it must not be the id that does"
+
+
+async def test_a_per_tool_forbid_refuses_under_the_graph_schema(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """The criterion's policy shape, through the real engine and the graph schema.
+
+    Every other gateway test uses `FakeEngine`, so nothing here has run a policy
+    through Cedar with the schema generated from the graph. This one does: the
+    permit is a kind rule, the forbid names one tool, and the call is the
+    gateway's own tool id.
+    """
+    from warrant.engine import CedarEngine
+
+    policies = tmp_path / "policies"
+    policies.mkdir()
+    (policies / "00_test.cedar").write_text(
+        '@id("permit-write")\npermit(principal, action in Action::"write", resource);\n'
+        '@id("forbid-comment")\nforbid(principal, action == '
+        'Action::"gitea.create_issue_comment", resource);\n'
+    )
+    log = DecisionLog(tmp_path / "runs")
+    engine = CedarEngine(policies_dir=policies, graph=graph_db, decision_log=log)
+    gateway = make_gateway(tmp_path, graph_db, engine, upstream=FakeUpstream())
+
+    denied = await gateway.call_tool(
+        "gitea.create_issue_comment",
+        {"repo": "acme/widgets", "number": 1, "body": "hi"},
+        claims=claims_for(),
+        token="",
+    )
+    decided = log.read("task-1")
+
+    assert denied.is_error is True
+    assert decided[0].verdict is Verdict.deny
+    assert decided[0].policy_ids == ["forbid-comment"], "the forbid fired, not the default deny"

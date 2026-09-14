@@ -296,6 +296,11 @@ class CedarEngine:
 
     # The two methods a caller gets.
 
+    @property
+    def decision_log(self) -> DecisionLog:
+        """The log this engine appends to, for a caller that writes beside it."""
+        return self._log
+
     def decide(self, req: AuthzRequest) -> Decision:
         """Evaluate the request and append the decision to the log."""
         decision = self._evaluate(req)
