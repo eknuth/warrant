@@ -784,24 +784,60 @@ def test_guard_passes_a_merge_inside_a_heredoc(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
 
 
-def test_guard_passes_this_repository_when_both_targets_are_green() -> None:
-    """The real checkout, through the real `make test` and `make lint`.
+def clean_repo(path: Path) -> None:
+    """A one-commit repository whose tip is `origin/main` and whose tree is dry.
 
-    The stub-Makefile tests above are fast and deterministic, but they are
-    stubs. This one runs the two commands the rule names, on the tree the hook
-    will actually guard, and so also pins the wall-clock cost of the guard.
+    The stand-in tests need the ancestry and cleanliness checks to pass, and
+    they need a tree that is not this checkout, which carries the branch's own
+    uncommitted work while the tests run.
     """
-    with tempfile.TemporaryDirectory() as raw:
-        tree = Path(raw) / "green"
-        git(["worktree", "add", "--detach", str(tree), "HEAD"], REPO)
-        git(["update-ref", "refs/remotes/origin/main", "HEAD"], tree)
-        try:
-            proc = run_hook(GUARD, bash_payload(MERGE, tree))
-        finally:
-            git(["worktree", "remove", "--force", str(tree)], REPO)
-            git(["worktree", "prune"], REPO)
+    init_repo(path)
+    (path / "README.md").write_text("base\n")
+    git(["add", "README.md"], path)
+    git(["commit", "-q", "-m", "base"], path)
+    git(["update-ref", "refs/remotes/origin/main", "HEAD"], path)
+
+
+def stub_makefile(directory: Path, recipe: str) -> str:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "Makefile").write_text(recipe)
+    return str(directory / "Makefile")
+
+
+def test_guard_runs_both_targets_in_order(tmp_path: Path) -> None:
+    """The guard runs `make test` then `make lint`, through a real `make`.
+
+    The stand-in Makefile makes the second target fail unless the first one ran,
+    so a guard that skipped `test` or ran them in the other order fails here.
+    The repository is a one-commit scratch repo, so the ancestry and cleanliness
+    checks pass and the make step is the thing under test.
+    """
+    repo = tmp_path / "repo"
+    clean_repo(repo)
+    makefile = stub_makefile(
+        tmp_path / "stub",
+        "test:\n\t@printf ran-test > marker.txt\nlint:\n\t@grep -q ran-test marker.txt\n",
+    )
+    env = {**os.environ, "DSH_GUARD_MAKEFILE": makefile}
+
+    proc = run_hook(GUARD, bash_payload(MERGE, repo), env=env)
 
     assert proc.returncode == 0, proc.stderr
+
+
+def test_guard_reports_the_failing_target_from_the_stand_in(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    clean_repo(repo)
+    makefile = stub_makefile(
+        tmp_path / "stub", "test:\n\t@true\nlint:\n\t@echo 'lint is red' >&2; exit 1\n"
+    )
+    env = {**os.environ, "DSH_GUARD_MAKEFILE": makefile}
+
+    proc = run_hook(GUARD, bash_payload(MERGE, repo), env=env)
+
+    assert proc.returncode == 2
+    assert "make lint" in proc.stderr
+    assert "lint is red" in proc.stderr
 
 
 # --- every hook -----------------------------------------------------------

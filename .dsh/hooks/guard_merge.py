@@ -42,6 +42,12 @@ GH_FLAG_WITH_VALUE = {"-R", "--repo", "--hostname"}
 GIT_TIMEOUT_S = 10
 MAKE_TIMEOUT_S = 75
 TAIL_LINES = 12
+# The Makefile the `test` and `lint` targets come from. The guard is the only
+# thing that runs a full suite before an action, so pointing it at a stand-in
+# Makefile is what lets its own tests exercise a real `make` without running
+# pytest inside pytest. Unset in normal use, where the project's own Makefile
+# is the only right answer.
+MAKEFILE_ENV = "DSH_GUARD_MAKEFILE"
 
 
 def segments(command: str) -> list[list[str]]:
@@ -178,6 +184,18 @@ def clean_tree(project: Path) -> tuple[bool, str]:
     return True, ""
 
 
+def make_directory(project: Path) -> Path:
+    """Where `make` runs, and which Makefile it reads.
+
+    The project's own directory and its own Makefile in normal use. The
+    `DSH_GUARD_MAKEFILE` override exists so this hook's tests can drive a real
+    `make` against a stand-in Makefile: running the project's `test` target
+    from inside a test would run pytest inside pytest.
+    """
+    override = os.environ.get(MAKEFILE_ENV)
+    return Path(override).parent if override else project
+
+
 def make_target_exists(project: Path, target: str) -> bool:
     """Whether `make` has this target here.
 
@@ -191,10 +209,11 @@ def make_target_exists(project: Path, target: str) -> bool:
     target that exists as missing, which would refuse every merge on such a
     build.
     """
+    directory = make_directory(project)
     try:
         proc = subprocess.run(
             ["make", "-p", "-n", target],
-            cwd=project,
+            cwd=directory,
             capture_output=True,
             text=True,
             timeout=GIT_TIMEOUT_S,
@@ -214,7 +233,7 @@ def run_make(project: Path, target: str) -> tuple[bool, str]:
     try:
         proc = subprocess.run(
             ["make", target],
-            cwd=project,
+            cwd=make_directory(project),
             capture_output=True,
             text=True,
             timeout=MAKE_TIMEOUT_S,
