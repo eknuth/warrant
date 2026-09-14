@@ -1,0 +1,97 @@
+# The Warrant access graph. `warrant.graph.load` upserts these rows into
+# warrant.db; a later source of truth replaces the seed, not this shape.
+#
+# Every credential-shaped value belongs in .env, never here. Nothing in this
+# file is a secret: ids, logins, group names, and resource names only.
+
+humans:
+  - id: h-alice
+    login: alice
+    groups: [engineering]
+  - id: h-bob
+    login: bob
+    groups: [support]
+  - id: h-carol
+    login: carol
+    groups: [engineering, reviewers]
+
+agents:
+  - id: agent-triage
+    client_id: warrant-triage
+    owner_human_id: h-alice
+    justification: read the issue queue to triage it
+    justification_expires_at: null
+    allowed_tools: [gitea.search, gitea.get_file, gitea.create_issue]
+  - id: agent-support
+    client_id: warrant-support
+    owner_human_id: h-bob
+    justification: answer the support mailbox
+    justification_expires_at: "2027-01-01T00:00:00Z"
+    allowed_tools: [mail.search, mail.send, postgres.query]
+  # Empty justification on purpose: an agent an owner stood up without saying
+  # why. `justification_valid` is false for it, which is the deny-safe case.
+  - id: agent-audit
+    client_id: warrant-audit
+    owner_human_id: h-carol
+    justification: ""
+    justification_expires_at: null
+    allowed_tools: [postgres.query, gitea.search]
+
+tools:
+  - id: gitea.search
+    server: gitea
+    name: search
+    action_kind: read
+    resource_kind: repo
+  - id: gitea.get_file
+    server: gitea
+    name: get_file
+    action_kind: read
+    resource_kind: repo
+  - id: gitea.create_issue
+    server: gitea
+    name: create_issue
+    action_kind: write
+    resource_kind: repo
+  - id: postgres.query
+    server: postgres
+    name: query
+    action_kind: read
+    resource_kind: db_table
+  - id: postgres.execute
+    server: postgres
+    name: execute
+    action_kind: write
+    resource_kind: db_table
+  - id: mail.search
+    server: mail
+    name: search
+    action_kind: read
+    resource_kind: mailbox
+  - id: mail.send
+    server: mail
+    name: send
+    action_kind: send
+    resource_kind: mailbox
+
+resources:
+  - id: repo-acme-api
+    kind: repo
+    name: acme/api
+    owner_human_id: h-alice
+    sensitivity: internal
+  - id: repo-acme-web
+    kind: repo
+    name: acme/web
+    owner_human_id: h-carol
+    sensitivity: public
+  - id: table-orders
+    kind: db_table
+    name: public.orders
+    owner_human_id: h-alice
+    sensitivity: confidential
+  - id: mailbox-support
+    kind: mailbox
+    name: support@acme.example
+    owner_human_id: h-bob
+    sensitivity: internal

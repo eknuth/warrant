@@ -10,6 +10,9 @@ __pycache__/
 runs/
 .DS_Store
 
+# the access graph, rebuilt from infra/graph.yml by `python -m warrant.graph load`
+warrant.db
+
 # tool caches
 .pytest_cache/
 .ruff_cache/

@@ -1,9 +1,10 @@
 # Warrant's local stack.
 #
 # W1 ships Keycloak, the identity provider every later service authenticates
-# against. Gitea (W3), postgres (W8), and mailpit (W9) arrive with the issues
-# that need them; their blocks are commented at the bottom so the shape of the
-# stack is visible before the services are.
+# against. W3 adds Gitea, the forge the MCP server is a resource server in
+# front of. Postgres (W8) and mailpit (W9) arrive with the issues that need
+# them; their blocks are commented at the bottom so the shape of the stack is
+# visible before the services are.
 #
 # `docker compose` reads `.env` from this directory for every value below, so
 # credentials live in `.env` and never in this file. `.env.example` lists the
@@ -16,21 +17,33 @@ services:
     image: quay.io/keycloak/keycloak:26.7.3
     # start-dev keeps state in the container's own store and serves plain
     # HTTP, which is what a local stack wants. Nothing here faces a network.
-    command: ["start-dev"]
+    # `--import-realm` reads infra/keycloak/warrant-realm.json on a store
+    # that does not have the realm yet, so `make reset` reproduces it and a
+    # later `make up` leaves it alone.
+    command: ["start-dev", "--import-realm", "--features=parameterized-scopes"]
     ports:
       - "8080:8080"
     environment:
-      # The username is not a secret, so it lives here. The password does not,
-      # and `:?` refuses to start without it.
+      # The username is not a secret, so it lives here. The passwords are not,
+      # and `:?` refuses to start without them.
       # These are the 26.x names. KEYCLOAK_ADMIN and KEYCLOAK_ADMIN_PASSWORD,
       # which most published snippets still show, are ignored from 26.0 on.
       KC_BOOTSTRAP_ADMIN_USERNAME: "admin"
       KC_BOOTSTRAP_ADMIN_PASSWORD: "${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD is not set: add it to .env}"
+      # The realm import resolves `${WARRANT_USER_PASSWORD}` and
+      # `${WARRANT_AGENT_CLIENT_SECRET}` in the JSON below from the
+      # container's environment, so the committed realm file holds a
+      # placeholder and the value stays in `.env`.
+      WARRANT_USER_PASSWORD: "${WARRANT_USER_PASSWORD:?WARRANT_USER_PASSWORD is not set: add it to .env}"
+      WARRANT_AGENT_CLIENT_SECRET: "${WARRANT_AGENT_CLIENT_SECRET:?WARRANT_AGENT_CLIENT_SECRET is not set: add it to .env}"
     volumes:
       # start-dev still writes its store under /opt/keycloak/data, so the
       # realm survives `make down`. `make reset` removes the volume and the
       # store with it.
       - keycloak-data:/opt/keycloak/data
+      # The realm JSON is the system of record. This is the directory
+      # `--import-realm` reads. Read-only: Keycloak only ever reads it.
+      - ./infra/keycloak:/opt/keycloak/data/import:ro
     healthcheck:
       # The image carries no curl, so the check is bash's own TCP redirect.
       # It turns healthy once the HTTP listener accepts connections.
@@ -43,22 +56,47 @@ services:
     # leave it stopped; `unless-stopped` brings it back on the next Docker
     # start, which reads as a service nobody asked to run.
 
+  gitea:
+    # Patch-pinned to the 1.24 line the ticket names. The bare `1.24` tag is a
+    # moving alias, and a Gitea bump moves the API the MCP server calls, so the
+    # bump is its own change. This tag exists on the registry and pulls.
+    image: gitea/gitea:1.24.7
+    ports:
+      - "3000:3000"   # web and API, which the MCP server and the tests call
+      - "2222:22"     # ssh, for git clone from the host
+    environment:
+      # The container carries its own SQLite file under the volume. INSTALL_LOCK
+      # skips the first-run web installer, which is what lets `make reset`
+      # produce a working forge with no browser step. The schema is still
+      # migrated on startup.
+      GITEA__database__DB_TYPE: "sqlite3"
+      GITEA__security__INSTALL_LOCK: "true"
+      # Clone URLs and the SSH port the container advertises. ROOT_URL has to
+      # name the published port, not the container's, or the API returns
+      # clone URLs nothing on the host can reach.
+      GITEA__server__ROOT_URL: "http://localhost:3000/"
+      GITEA__server__SSH_PORT: "2222"
+      # Local stack: nobody self-registers. The bootstrap script creates the
+      # admin, and W12 seeds the users the scenarios need.
+      GITEA__service__DISABLE_REGISTRATION: "true"
+    volumes:
+      - gitea-data:/data
+    healthcheck:
+      # The image ships curl. /api/healthz answers 200 once the app is serving,
+      # which is what `make up --wait` and the bootstrap script wait for.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+
 volumes:
   keycloak-data:
+  gitea-data:
 
 # --- later issues, commented until the issue that needs them ---------------
 # Each block is a complete service definition. Uncommenting it and adding the
 # volume it names is the whole change.
-#
-#  gitea:
-#    image: gitea/gitea:1
-#    ports:
-#      - "3000:3000"   # web
-#      - "2222:22"     # ssh
-#    environment:
-#      GITEA__security__INSTALL_LOCK: "true"
-#    volumes:
-#      - gitea-data:/data
 #
 #  postgres:
 #    image: postgres:17

@@ -43,6 +43,11 @@ next step. `docs/decisions/` holds the decisions behind this setup.
 - Edit a Linear description only with an append or a targeted patch, never a full replace. A save
   that passes the whole `description` overwrites every section the ticket already had. That is how
   W6 lost its Spec and Acceptance criteria, which Linear cannot restore through its API.
+- An issue that has to build on unmerged work stacks on that branch, and the pull request body says
+  which branch it is stacked on and why. Once the base pull request merges, retarget the stacked
+  pull request to `main` before Ed merges it. A stacked pull request that keeps an unmerged base
+  lands on the base branch and never reaches `main`; that happened to W3 and W4, which were reported
+  merged while `main` held neither.
 
 ## Model and effort
 
