@@ -40,6 +40,9 @@ next step. `docs/decisions/` holds the decisions behind this setup.
   Ed merges.
 - Every pull request body carries `Closes EDW-<n>`, so the issue closes when the pull request
   lands.
+- Edit a Linear description only with an append or a targeted patch, never a full replace. A save
+  that passes the whole `description` overwrites every section the ticket already had. That is how
+  W6 lost its Spec and Acceptance criteria, which Linear cannot restore through its API.
 
 ## Model and effort
 
