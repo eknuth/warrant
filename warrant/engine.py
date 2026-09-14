@@ -14,9 +14,13 @@ A request becomes a Cedar request like this:
   `owner` (the graph's owner for the agent, or the human who asked when the
   graph has no row), `onBehalfOf` (always `chain.sub`), `clientId`,
   `allowedTools`, and `justification`.
-* action: `Action::"<action_kind>"`, one of `read`, `write`, or `send`. The
-  tool id travels in `context.tool`, because a Cedar action scope is always an
-  `Action` and the schema can declare three kinds but not every tool.
+* action: `Action::"<tool>"`, the tool the call names, with the action kind as
+  its membership: every tool action is a member of `Action::"read"`,
+  `Action::"write"`, or `Action::"send"` according to the graph's `tools` row,
+  so a rule about a kind reads `action in Action::"write"` and a rule about one
+  tool reads `action == Action::"gitea.create_issue_comment"`. The schema is
+  generated from the graph, so it declares every tool action. `context.actionKind`
+  still carries the kind for the log and for a policy that wants it as data.
 * resource: `Resource::"<request.resource>"`, with `kind`, `name`, `owner`, and
   `sensitivity` taken from the graph. A resource the graph does not know is
   presented as `kind` and `sensitivity` `"unknown"`, which no permit should
@@ -31,27 +35,25 @@ Escalate
 Cedar has no third verdict, so escalation is two passes over the same policy
 set:
 
-1. Evaluate the real action. If it is allowed, return `allow` and stop. The
-   escalation pass is not consulted.
+1. Evaluate the real action, `Action::"<tool>"`. If it is allowed, return
+   `allow` and stop. The escalation pass is not consulted.
 2. If and only if the real action is *denied* by policies, evaluate the
-   synthetic action `Action::"Escalate"` with the same principal, resource, and
+   synthetic action `Action::"escalate"` with the same principal, resource, and
    context. If that is allowed, the verdict is `escalate` and `policy_ids` names
    the escalate permit. Otherwise the verdict is `deny` and `policy_ids` names
    what denied the real action.
 
-The ticket writes the synthetic action as `Escalate::"<tool>"`. Cedar's action
-scope has to be an entity of type `Action`, so the literal form will not parse.
-The shape here is `Action::"Escalate"` with the tool in `context.tool`; a
-per-tool escalate permit reads
+The escalate action is the one place the tool stays in `context.tool`. The real
+action already names the tool, so an escalate permit that needs to know which
+tool was denied reads it as data; a per-tool escalate permit reads
 
     @id("escalate-search")
-    permit(principal, action == Action::"Escalate", resource)
-    when { context.tool == "gitea.search" };
+    permit(principal, action == Action::"escalate", resource)
+    when { context.tool == "gitea.search_code" };
 
-and keeps the whole policy set inside one schema. A `forbid` that is not scoped
-to the real action also forbids `Action::"Escalate"`, which is Cedar's rule that
-a forbid beats every permit; an escalate permit only lifts an implicit deny or a
-deny scoped to the real action.
+A `forbid` that is not scoped to the real action also forbids
+`Action::"escalate"`, which is Cedar's rule that a forbid beats every permit; an
+escalate permit only lifts an implicit deny or a deny scoped to the real action.
 
 A request that Cedar cannot evaluate at all (no decision, an error) is a deny
 with the error in `reasons`. It does not fall through to the escalation pass,
@@ -60,6 +62,7 @@ because escalation is the answer to a deny, not to a broken request.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -77,7 +80,11 @@ DEFAULT_POLICIES_DIR = PACKAGE_ROOT / "policies"
 DEFAULT_SCHEMA_PATH = DEFAULT_POLICIES_DIR / "schema.cedarschema.json"
 
 # The synthetic action the second pass evaluates. See the module docstring.
-ESCALATE_ACTION = "Escalate"
+ESCALATE_ACTION = "escalate"
+
+# The action kinds, which are also the membership groups the tool actions
+# belong to. A rule about a kind reads `action in Action::"write"`.
+ACTION_KINDS = ("read", "write", "send")
 
 # Cedar entity types. The schema uses the empty namespace, so these are bare.
 AGENT = "Agent"
@@ -112,6 +119,136 @@ def _entity_ref(entity_type: str, entity_id: str) -> dict[str, Any]:
     return {"__entity": {"type": entity_type, "id": entity_id}}
 
 
+# The action ids the generated schema writes itself: the three kinds, which are
+# also the membership groups, and the escalate action. A tool may not take one of
+# these names, because the generated action would overwrite the group or the
+# escalate action and the policy that reads `action in Action::"write"` would no
+# longer mean "a write tool".
+RESERVED_ACTION_IDS = (*ACTION_KINDS, ESCALATE_ACTION)
+
+
+class ReservedActionIdError(ValueError):
+    """A tool id that collides with an action the schema writes itself."""
+
+
+def schema_for(graph: Graph) -> dict[str, Any]:
+    """The Cedar schema for the tools this graph holds.
+
+    Every tool in the graph becomes an action, and each tool action is a member
+    of its kind, so a rule can be about one tool (`action ==
+    Action::"gitea.create_issue_comment"`) or about a kind (`action in
+    Action::"write"`). Generating it rather than hand-writing it is what lets a
+    policy name a tool: a static file would need an edit for every tool W8, W9,
+    and W21 add, and a missing entry is not a policy error, it is a schema
+    validation failure at load.
+
+    A tool id that is one of `RESERVED_ACTION_IDS` is refused here rather than
+    written. Cedar makes `Action::"read"` a member of itself a cycle and refuses
+    to build the schema at all; a collision with another kind or with `escalate`
+    is worse, because the schema builds and the group quietly stops meaning what
+    a policy reads it to mean. Both are findings at load, where they can be
+    fixed, rather than at a decision.
+
+    The kind actions themselves carry the same `appliesTo` as the tools, so a
+    rule scoped to a kind validates. `Action::"escalate"` is the second pass's
+    action and is the one action whose tool is data rather than the action id.
+    """
+    applies_to = {
+        "principalTypes": [AGENT],
+        "resourceTypes": [RESOURCE],
+        "context": {"type": "RequestContext"},
+    }
+    actions: dict[str, Any] = {kind: {"appliesTo": applies_to} for kind in ACTION_KINDS}
+    for tool in graph.tools():
+        if tool.id in RESERVED_ACTION_IDS:
+            raise ReservedActionIdError(
+                f"tool id {tool.id!r} is a reserved action name "
+                f"({', '.join(RESERVED_ACTION_IDS)}); rename the tool in the graph seed"
+            )
+        actions[tool.id] = {
+            "memberOf": [{"id": tool.action_kind}],
+            "appliesTo": applies_to,
+        }
+    actions[ESCALATE_ACTION] = {"appliesTo": applies_to}
+    return {
+        "": {
+            "commonTypes": {
+                "ProvenanceSummary": {
+                    "type": "Record",
+                    "attributes": {
+                        "count": {"type": "Long"},
+                        "hasExternal": {"type": "Boolean"},
+                        "minTier": {"type": "String"},
+                        "systems": {"type": "Set", "element": {"type": "String"}},
+                    },
+                },
+                "RequestContext": {
+                    "type": "Record",
+                    "attributes": {
+                        "actionKind": {"type": "String"},
+                        "argsDigest": {"type": "String"},
+                        "groups": {"type": "Set", "element": {"type": "String"}},
+                        "justificationValid": {"type": "Boolean"},
+                        "provenance": {"type": "ProvenanceSummary"},
+                        "scopes": {"type": "Set", "element": {"type": "String"}},
+                        "taskId": {"type": "String"},
+                        "tokenExp": {"type": "Long"},
+                        "tool": {"type": "String"},
+                    },
+                },
+            },
+            "entityTypes": {
+                "Human": {
+                    "shape": {
+                        "type": "Record",
+                        "attributes": {
+                            "groups": {"type": "Set", "element": {"type": "String"}},
+                            "login": {"type": "String"},
+                        },
+                    }
+                },
+                "Agent": {
+                    "shape": {
+                        "type": "Record",
+                        "attributes": {
+                            "allowedTools": {"type": "Set", "element": {"type": "String"}},
+                            "clientId": {"type": "String"},
+                            "justification": {"type": "String"},
+                            "onBehalfOf": {"type": "Entity", "name": HUMAN},
+                            "owner": {"type": "Entity", "name": HUMAN},
+                        },
+                    }
+                },
+                "Resource": {
+                    "shape": {
+                        "type": "Record",
+                        "attributes": {
+                            "kind": {"type": "String"},
+                            "name": {"type": "String"},
+                            "owner": {"type": "Entity", "name": HUMAN},
+                            "sensitivity": {"type": "String"},
+                        },
+                    }
+                },
+            },
+            "actions": actions,
+        }
+    }
+
+
+def write_schema(graph: Graph, path: Path | str = DEFAULT_SCHEMA_PATH) -> Path:
+    """Write the graph's schema to `path`, for the committed copy.
+
+    `policies/schema.cedarschema.json` is generated and committed so a reader
+    can see the action surface without running anything. A test regenerates it
+    from `infra/graph.yml` and compares, which is what keeps the committed copy
+    from going stale.
+    """
+    target = Path(path)
+    target.write_text(json.dumps(schema_for(graph), indent=2) + "\n", encoding="utf-8")
+    return target
+
+
 class CedarEngine:
     """A `PolicyEngine` that evaluates `policies/*.cedar` with cedarpy."""
 
@@ -134,18 +271,35 @@ class CedarEngine:
             cedarpy.PolicySet.from_str(text) if text.strip() else ""
         )
 
+        # The schema comes from the graph when there is one, so the tool actions
+        # are exactly the tools this deployment has, and `schema_for` refuses a
+        # tool id that collides with an action the schema writes itself.
+        # `schema_path` is the override; its default is the committed file, and
+        # an explicit `None` means no schema at all, which is a test's affordance
+        # rather than a deployment's: nothing here validates that the action
+        # exists, so a caller that wants that has to give a graph or a path.
         self.schema_path = Path(schema_path) if schema_path is not None else None
-        self._schema = (
-            cedarpy.Schema.from_json_str(self.schema_path.read_text(encoding="utf-8"))
-            if self.schema_path is not None
-            else None
-        )
+        if graph is not None:
+            self._schema = cedarpy.Schema.from_json_str(json.dumps(schema_for(graph)))
+            # The graph's schema is what was loaded, so the path would be a lie.
+            self.schema_path = None
+        elif schema_path is not None:
+            self._schema = cedarpy.Schema.from_json_str(
+                self.schema_path.read_text(encoding="utf-8")  # type: ignore[union-attr]
+            )
+        else:
+            self._schema = None
 
         self.graph = graph
         self._mode = Mode(mode) if mode is not None else config.current_mode()
         self._log = decision_log if decision_log is not None else DecisionLog()
 
     # The two methods a caller gets.
+
+    @property
+    def decision_log(self) -> DecisionLog:
+        """The log this engine appends to, for a caller that writes beside it."""
+        return self._log
 
     def decide(self, req: AuthzRequest) -> Decision:
         """Evaluate the request and append the decision to the log."""
@@ -208,7 +362,10 @@ class CedarEngine:
                 mode=self._mode.value,
             )
 
-        real = self._ask(req, req.action_kind.value)
+        # The tool is the action: a rule can name one tool outright, and a rule
+        # about a kind reads `action in Action::"write"`. The kind is still in
+        # `context.actionKind` for the log and for a policy that wants it.
+        real = self._ask(req, req.tool)
         if real.decision is cedarpy.Decision.Allow:
             # An erroring policy anywhere in the set is recorded even when a
             # permit matched, because the verdict may not be the one the policy
@@ -257,7 +414,10 @@ class CedarEngine:
             # The deny that caused the escalation belongs in the record too: an
             # escalate line that names only the escalate permit cannot be read
             # back to why the action needed a human.
-            reasons = [f"real action denied: {req.action_kind.value}"]
+            # The tool is the real action now, so naming the kind here would name
+            # something the agent never called. The kind is still in the line
+            # beside it, and in `context.actionKind` for a policy.
+            reasons = [f"real action denied: {req.tool} ({req.action_kind.value})"]
             reasons.extend(f"real action denied by: {policy_id}" for policy_id in real.policy_ids)
             reasons.extend(_matched("escalate permit", escalate))
             return Decision(

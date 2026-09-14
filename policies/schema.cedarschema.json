@@ -4,24 +4,59 @@
       "ProvenanceSummary": {
         "type": "Record",
         "attributes": {
-          "count": { "type": "Long" },
-          "hasExternal": { "type": "Boolean" },
-          "minTier": { "type": "String" },
-          "systems": { "type": "Set", "element": { "type": "String" } }
+          "count": {
+            "type": "Long"
+          },
+          "hasExternal": {
+            "type": "Boolean"
+          },
+          "minTier": {
+            "type": "String"
+          },
+          "systems": {
+            "type": "Set",
+            "element": {
+              "type": "String"
+            }
+          }
         }
       },
       "RequestContext": {
         "type": "Record",
         "attributes": {
-          "actionKind": { "type": "String" },
-          "argsDigest": { "type": "String" },
-          "groups": { "type": "Set", "element": { "type": "String" } },
-          "justificationValid": { "type": "Boolean" },
-          "provenance": { "type": "ProvenanceSummary" },
-          "scopes": { "type": "Set", "element": { "type": "String" } },
-          "taskId": { "type": "String" },
-          "tokenExp": { "type": "Long" },
-          "tool": { "type": "String" }
+          "actionKind": {
+            "type": "String"
+          },
+          "argsDigest": {
+            "type": "String"
+          },
+          "groups": {
+            "type": "Set",
+            "element": {
+              "type": "String"
+            }
+          },
+          "justificationValid": {
+            "type": "Boolean"
+          },
+          "provenance": {
+            "type": "ProvenanceSummary"
+          },
+          "scopes": {
+            "type": "Set",
+            "element": {
+              "type": "String"
+            }
+          },
+          "taskId": {
+            "type": "String"
+          },
+          "tokenExp": {
+            "type": "Long"
+          },
+          "tool": {
+            "type": "String"
+          }
         }
       }
     },
@@ -30,8 +65,15 @@
         "shape": {
           "type": "Record",
           "attributes": {
-            "groups": { "type": "Set", "element": { "type": "String" } },
-            "login": { "type": "String" }
+            "groups": {
+              "type": "Set",
+              "element": {
+                "type": "String"
+              }
+            },
+            "login": {
+              "type": "String"
+            }
           }
         }
       },
@@ -39,11 +81,26 @@
         "shape": {
           "type": "Record",
           "attributes": {
-            "allowedTools": { "type": "Set", "element": { "type": "String" } },
-            "clientId": { "type": "String" },
-            "justification": { "type": "String" },
-            "onBehalfOf": { "type": "Entity", "name": "Human" },
-            "owner": { "type": "Entity", "name": "Human" }
+            "allowedTools": {
+              "type": "Set",
+              "element": {
+                "type": "String"
+              }
+            },
+            "clientId": {
+              "type": "String"
+            },
+            "justification": {
+              "type": "String"
+            },
+            "onBehalfOf": {
+              "type": "Entity",
+              "name": "Human"
+            },
+            "owner": {
+              "type": "Entity",
+              "name": "Human"
+            }
           }
         }
       },
@@ -51,10 +108,19 @@
         "shape": {
           "type": "Record",
           "attributes": {
-            "kind": { "type": "String" },
-            "name": { "type": "String" },
-            "owner": { "type": "Entity", "name": "Human" },
-            "sensitivity": { "type": "String" }
+            "kind": {
+              "type": "String"
+            },
+            "name": {
+              "type": "String"
+            },
+            "owner": {
+              "type": "Entity",
+              "name": "Human"
+            },
+            "sensitivity": {
+              "type": "String"
+            }
           }
         }
       }
@@ -62,30 +128,306 @@
     "actions": {
       "read": {
         "appliesTo": {
-          "principalTypes": ["Agent"],
-          "resourceTypes": ["Resource"],
-          "context": { "type": "RequestContext" }
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
         }
       },
       "write": {
         "appliesTo": {
-          "principalTypes": ["Agent"],
-          "resourceTypes": ["Resource"],
-          "context": { "type": "RequestContext" }
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
         }
       },
       "send": {
         "appliesTo": {
-          "principalTypes": ["Agent"],
-          "resourceTypes": ["Resource"],
-          "context": { "type": "RequestContext" }
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
         }
       },
-      "Escalate": {
+      "db.execute": {
+        "memberOf": [
+          {
+            "id": "write"
+          }
+        ],
         "appliesTo": {
-          "principalTypes": ["Agent"],
-          "resourceTypes": ["Resource"],
-          "context": { "type": "RequestContext" }
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
+        }
+      },
+      "db.query": {
+        "memberOf": [
+          {
+            "id": "read"
+          }
+        ],
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
+        }
+      },
+      "gitea.commit_file": {
+        "memberOf": [
+          {
+            "id": "write"
+          }
+        ],
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
+        }
+      },
+      "gitea.create_branch": {
+        "memberOf": [
+          {
+            "id": "write"
+          }
+        ],
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
+        }
+      },
+      "gitea.create_issue_comment": {
+        "memberOf": [
+          {
+            "id": "write"
+          }
+        ],
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
+        }
+      },
+      "gitea.get_file": {
+        "memberOf": [
+          {
+            "id": "read"
+          }
+        ],
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
+        }
+      },
+      "gitea.get_issue": {
+        "memberOf": [
+          {
+            "id": "read"
+          }
+        ],
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
+        }
+      },
+      "gitea.list_issues": {
+        "memberOf": [
+          {
+            "id": "read"
+          }
+        ],
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
+        }
+      },
+      "gitea.list_repos": {
+        "memberOf": [
+          {
+            "id": "read"
+          }
+        ],
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
+        }
+      },
+      "gitea.open_pull_request": {
+        "memberOf": [
+          {
+            "id": "write"
+          }
+        ],
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
+        }
+      },
+      "gitea.search_code": {
+        "memberOf": [
+          {
+            "id": "read"
+          }
+        ],
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
+        }
+      },
+      "gitea.set_repo_visibility": {
+        "memberOf": [
+          {
+            "id": "write"
+          }
+        ],
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
+        }
+      },
+      "mail.search": {
+        "memberOf": [
+          {
+            "id": "read"
+          }
+        ],
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
+        }
+      },
+      "mail.send": {
+        "memberOf": [
+          {
+            "id": "send"
+          }
+        ],
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
+        }
+      },
+      "escalate": {
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
         }
       }
     }

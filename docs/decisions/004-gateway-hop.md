@@ -142,22 +142,35 @@ forward. `python -m warrant.graph load` upserts and does not delete, so a `warra
 the old seed keeps the old rows beside the new ones. The database is gitignored and rebuilt from
 `infra/graph.yml`; delete it and let the gateway seed it again after a seed whose ids changed.
 
-## The criterion's literal policy is inert
+## The criterion's literal policy was inert, and the engine changed
 
 The ticket's second acceptance criterion writes the refusal as
 `forbid(principal, action == Action::"gitea.create_issue_comment", resource);`. In the W5 engine the
-Cedar action is the kind (`read`, `write`, `send`) and the tool travels in `context.tool`, which
-`docs/decisions/003-w5-warrant-core.md` records. Run against the gateway, that policy with a
-permit-all beside it allows the comment: the forbid names an action no request carries. With no
-permit beside it the comment is refused, but so is every read, and the reason is the default deny
-rather than the forbid. The spelling that refuses the comment while the reads proceed, and that the
-acceptance run used, is:
+Cedar action was the kind (`read`, `write`, `send`) and the tool travelled in `context.tool`, which
+`docs/decisions/003-w5-warrant-core.md` recorded. Run against the gateway, that policy with a
+permit-all beside it allowed the comment: the forbid named an action no request carried. With no
+permit beside it the comment was refused, but so was every read, and the reason was the default deny
+rather than the forbid.
+
+That is no longer the shape. The engine now evaluates `Action::"<tool>"`, with every tool action a
+member of its kind, so the criterion's policy works exactly as written and the reason the agent
+receives is the forbid's own. `docs/decisions/003-w5-warrant-core.md` carries the dated section that
+supersedes its earlier mapping, and `tests/test_warrant_engine.py` holds the criterion's policy
+verbatim with a permit beside it. The spelling the W6 acceptance run used before the change was:
 
 ```cedar
 @id("forbid-comment")
 forbid(principal, action == Action::"write", resource)
 when { context.tool == "gitea.create_issue_comment" };
 ```
+
+That spelling is inert now, and saying it "still works" would undo this change. The action is the
+tool, so `action == Action::"write"` is equality against an action id no request carries, and only
+`action in Action::"write"` traverses the membership. A rule about a kind has to be rewritten from
+`==` to `in`; a rule about one tool is now `action == Action::"<tool>"` and needs no `context.tool`
+condition at all. The escalate pass is the exception, and the one place `context.tool` still scopes
+a rule. The substitution was never recorded as an accepted change to the criterion, which is why the
+engine was changed instead.
 
 ## What was verified
 

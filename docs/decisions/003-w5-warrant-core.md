@@ -79,8 +79,9 @@ left to the policies, since a deployment may call tools the seed does not enumer
 that no human row can equal.
 
 An escalate decision also carries the deny that caused it, and the escalate pass has a test that a
-permit scoped to another tool does not match, since the tool lives in `context.tool` rather than in
-the action id.
+permit scoped to another tool does not match. When this was written the tool lived in `context.tool`
+rather than in the action id, which is the shape the escalate pass still uses; the real pass moved
+to `Action::"<tool>"` on 2026-09-14, below.
 
 ## Consequences
 
@@ -88,3 +89,30 @@ The decision log and the ledger are append-only JSONL, one line per record, so t
 reconstructs a task without a model. `Ledger.get` replays the file when the process that recorded
 the sources is gone. W6 wires `chain_from_headers` and the ledger into the request path. W7 writes
 policies against the schema in `policies/schema.cedarschema.json`. W11 fills provenance.
+
+## 2026-09-14: the tool is the action
+
+W6's second acceptance criterion writes its refusal as `forbid(principal, action ==
+Action::"gitea.create_issue_comment", resource)`. Under the three-kind action above, that forbid
+named an action no request carried: the engine asked Cedar about `Action::"write"` and left the tool
+in `context.tool`. The policy was therefore inert. With a permit beside it the comment was allowed,
+and with nothing beside it the comment was refused by the default deny with reason `no permit
+matched`. A test written to the criterion's letter would have passed for the wrong reason, and the
+W6 smoke run could not deliver the criterion at all.
+
+The tool is now the action. `Action::"<tool>"` is the real pass, generated into the schema from the
+graph's `tools` table, and every tool action is a member of its kind, so a rule about a kind reads
+`action in Action::"write"` and a rule about one tool reads `action ==
+Action::"gitea.create_issue_comment"`. The criterion's policy works as written and a test asserts
+that the forbid, not the default deny, produced the reason the agent receives. Cedar cannot express
+`Action::"<tool>"` as a child of a kind without the membership relation, and a static schema would
+need an edit for every tool W8, W9, and W21 add, so `warrant/engine.py` generates the schema at load
+and `policies/schema.cedarschema.json` is the committed copy of that generation. A test regenerates
+it and compares, which is what keeps the file from going stale.
+
+The earlier claim that the schema "cannot declare every tool" was wrong, and the sentence above is
+left in place because it is what was believed when W5 shipped. `Action::"escalate"` is the one
+action whose tool is still `context.tool`, because that pass exists to ask a human about a denied
+call and the tool is data there rather than the action. The three-kind actions remain in the schema
+as membership groups, so a policy written against a kind keeps working. W7 writes one action per
+tool plus `escalate`, per its own spec.
