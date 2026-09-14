@@ -122,6 +122,11 @@ class Graph:
 
     def __init__(self, path: Path | str = DEFAULT_DB) -> None:
         self.path = Path(path)
+        # The ledger and the decision log create their parent directory, so this
+        # sink does too rather than failing where the others succeed. An
+        # in-memory database has no parent to make.
+        if str(self.path) != ":memory:":
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.path)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")

@@ -10,9 +10,10 @@ import cedarpy
 import pytest
 
 from warrant.engine import DEFAULT_SCHEMA_PATH, CedarEngine
+from warrant.graph import Graph
 from warrant.graph import load as load_graph
 from warrant.log import DecisionLog
-from warrant.models import Chain, Provenance, Source, Tier, Verdict
+from warrant.models import ActionKind, Chain, Provenance, Source, Tier, Verdict
 
 REPO = Path(__file__).resolve().parents[1]
 SEED = REPO / "infra" / "graph.yml"
@@ -211,7 +212,12 @@ def test_a_deny_with_an_escalate_permit_escalates(
     decision = engine.decide(make_request())
 
     assert decision.verdict is Verdict.escalate
-    assert decision.policy_ids == ["escalate-search"]
+    # Both the deny that caused the escalation and the escalate permit are in
+    # the line. Naming only the permit leaves a reader unable to say why the
+    # action needed a human.
+    assert decision.policy_ids == ["forbid-read", "escalate-search"]
+    assert any("forbid-read" in reason for reason in decision.reasons)
+    assert any("escalate-search" in reason for reason in decision.reasons)
     assert actions == ["read", "Escalate"]
 
 
@@ -445,3 +451,151 @@ def test_a_request_cedar_cannot_evaluate_denies_without_escalating(
     assert decision.verdict is Verdict.deny
     assert decision.policy_ids == []
     assert "request could not be evaluated" in decision.reasons
+
+
+def test_an_erroring_policy_denies_and_does_not_escalate(
+    policy_dir: Any, make_request: Any, decision_log: DecisionLog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An evaluation error is not a deny a human can answer.
+
+    cedarpy reports an evaluation error as `Decision.Deny` with diagnostics, not
+    as `NoDecision`, so keying the escalate guard on the decision alone let an
+    erroring policy escalate, and the error reached no field of the Decision.
+    """
+    directory = policy_dir(
+        '@id("broken")\npermit(principal, action == Action::"read", resource)\n'
+        "when { context.provenance.minTier > 3 };",
+        '@id("escalate-any")\npermit(principal, action == Action::"Escalate", resource);',
+    )
+    engine = engine_for(directory, decision_log, schema_path=None)
+    actions = count_cedar_actions(monkeypatch)
+
+    decision = engine.decide(make_request())
+
+    assert decision.verdict is Verdict.deny, "an error must not reach a human as a question"
+    assert actions == ["read"], "the escalate pass must not run for an error"
+    assert any("error" in reason.lower() for reason in decision.reasons), decision.reasons
+
+
+def test_an_error_is_recorded_even_when_a_permit_matched(
+    policy_dir: Any, make_request: Any, decision_log: DecisionLog
+) -> None:
+    """A broken policy is invisible in the log if its error is dropped.
+
+    Two permits, one of which errors and one of which matches, used to allow
+    with no mention of the error.
+    """
+    directory = policy_dir(
+        '@id("ok")\npermit(principal, action == Action::"read", resource)\n'
+        'when { context.tool == "gitea.search" };',
+        '@id("broken")\npermit(principal, action == Action::"read", resource)\n'
+        "when { context.provenance.minTier > 3 };",
+    )
+    engine = engine_for(directory, decision_log, schema_path=None)
+
+    decision = engine.decide(make_request())
+
+    assert decision.verdict is Verdict.allow
+    assert any("evaluation error" in reason for reason in decision.reasons), decision.reasons
+
+
+def test_a_write_tool_cannot_be_authorized_as_a_read(
+    graph_db: Any, policy_dir: Any, make_request: Any, decision_log: DecisionLog
+) -> None:
+    """The action kind comes from the graph, not from the caller.
+
+    A tool labelled with a cheaper kind would otherwise be authorized by that
+    kind's permits. `gitea.create_issue` is a write in the seed and the request
+    here asks for a read.
+    """
+    directory = policy_dir(
+        '@id("read-ok")\npermit(principal, action == Action::"read", resource);',
+    )
+    engine = engine_for(directory, decision_log, schema_path=None, graph=Graph(graph_db.path))
+
+    # `gitea.create_issue` is a write in the seed; the request claims it is a read.
+    decision = engine.decide(make_request(tool="gitea.create_issue", action_kind=ActionKind.read))
+
+    assert decision.verdict is Verdict.deny, "a write must not be authorized by a read permit"
+    assert "graph" in " ".join(decision.reasons)
+
+
+def test_an_unknown_resource_is_not_owned_by_the_requester(
+    graph_db: Any, policy_dir: Any, make_request: Any, decision_log: DecisionLog
+) -> None:
+    """A resource the graph has never heard of is nobody's, so ownership cannot match."""
+    directory = policy_dir(
+        '@id("owner-may-read")\npermit(principal, action == Action::"read", resource)\n'
+        "when { resource.owner == principal.owner };",
+    )
+    engine = engine_for(directory, decision_log, schema_path=None, graph=Graph(graph_db.path))
+
+    decision = engine.decide(make_request(resource="repo-nobody-has-ever-heard-of"))
+
+    # An unknown resource is nobody's, so ownership cannot make it match.
+    assert decision.verdict is Verdict.deny
+
+
+def test_an_agent_the_graph_does_not_know_cannot_claim_ownership(
+    chain: Chain, graph_db: Any, policy_dir: Any, make_request: Any, decision_log: DecisionLog
+) -> None:
+    """An agent with no row has no owner, rather than the person who asked.
+
+    `principal.owner == principal.onBehalfOf` is an ordinary shape for "this
+    agent may act for its own owner". With the owner filled in from `sub`, an
+    agent the graph has never heard of satisfied it.
+    """
+    directory = policy_dir(
+        '@id("own-agent-read")\npermit(principal, action == Action::"read", resource)\n'
+        "when { principal.owner == principal.onBehalfOf };",
+    )
+    engine = engine_for(directory, decision_log, schema_path=None, graph=Graph(graph_db.path))
+    unknown_agent = Chain(
+        sub=chain.sub,
+        act="agent-ghost",
+        task_id=chain.task_id,
+        scopes=list(chain.scopes),
+        groups=list(chain.groups),
+        token_exp=chain.token_exp,
+    )
+
+    decision = engine.decide(make_request(chain=unknown_agent))
+
+    # An unknown agent must not inherit the owner of whoever asked.
+    assert decision.verdict is Verdict.deny
+
+
+def test_an_escalate_permit_for_another_tool_does_not_escalate_this_one(
+    policy_dir: Any, make_request: Any, decision_log: DecisionLog
+) -> None:
+    """The tool scope lives in `context.tool`, so it has to be pinned.
+
+    The ticket's `Escalate::"<tool>"` does not parse, so the tool became a policy
+    clause. Without a test, a W7 author who forgets the clause gets an
+    all-tools escalate.
+    """
+    directory = policy_dir(
+        '@id("forbid-read")\nforbid(principal, action == Action::"read", resource);',
+        '@id("escalate-other")\npermit(principal, action == Action::"Escalate", resource)\n'
+        'when { context.tool == "gitea.get_file" };',
+    )
+    engine = engine_for(directory, decision_log, schema_path=None)
+
+    decision = engine.decide(make_request())  # the tool is gitea.search
+
+    assert decision.verdict is Verdict.deny, "an escalate permit for another tool must not match"
+    assert decision.policy_ids == ["forbid-read"]
+
+
+def test_a_decision_names_the_mode_that_produced_it(
+    policy_dir: Any, make_request: Any, decision_log: DecisionLog
+) -> None:
+    """The grader has to attribute a line to an ablation from the record alone."""
+    directory = policy_dir("permit(principal, action, resource);")
+    engine = engine_for(directory, decision_log, schema_path=None)
+
+    decision = engine.decide(make_request())
+
+    assert decision.mode == "full"
+    line = decision_log.read(decision.request.chain.task_id)[0]
+    assert line.mode == "full"

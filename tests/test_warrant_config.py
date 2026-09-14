@@ -159,9 +159,27 @@ def test_no_exchange_requires_the_identifying_headers() -> None:
 
 def test_task_dir_keeps_a_crafted_task_id_inside_the_run_root(tmp_path: Path) -> None:
     assert config.task_dir(tmp_path, "task-1") == tmp_path / "task-1"
-    assert config.task_dir(tmp_path, "../../escape") == tmp_path / ".._.._escape"
-    assert config.task_dir(tmp_path, "a/b") == tmp_path / "a_b"
+    # A crafted id stays inside the root, and carries a digest of the original
+    # because the sanitizer changed it.
+    escaped = config.task_dir(tmp_path, "../../escape")
+    assert escaped.parent == tmp_path
+    assert escaped.name.startswith(".._.._escape-")
     with pytest.raises(ValueError):
         config.task_dir(tmp_path, "..")
     with pytest.raises(ValueError):
         config.task_dir(tmp_path, "")
+
+
+def test_two_distinct_task_ids_never_share_a_run_directory() -> None:
+    """`a_b`, `a/b`, and `a b` used to be one directory, and so one ledger.
+
+    Sharing a directory means sharing a provenance set, which is the one input
+    the design says an agent cannot forge. `no-exchange` takes the task id from
+    an agent-supplied header, so the collision is reachable.
+    """
+    ids = ["a_b", "a/b", "a b", "a\\b"]
+
+    directories = {config.task_dir("/runs", task_id).name for task_id in ids}
+
+    assert len(directories) == len(ids), directories
+    assert config.task_dir("/runs", "a_b").name == "a_b", "a safe id keeps its name"

@@ -85,6 +85,11 @@ HUMAN = "Human"
 RESOURCE = "Resource"
 ACTION = "Action"
 
+# The owner given to an agent or resource the graph cannot vouch for. It is a
+# sentinel rather than the requester, so an ownership permit cannot match an
+# entity nobody owns. It is deliberately not a valid login.
+UNKNOWN_HUMAN = "warrant:unknown"
+
 
 class PolicyEngine(Protocol):
     """What a caller needs from an engine, and nothing else."""
@@ -137,7 +142,7 @@ class CedarEngine:
         )
 
         self.graph = graph
-        self._mode = mode if mode is not None else config.current_mode()
+        self._mode = Mode(mode) if mode is not None else config.current_mode()
         self._log = decision_log if decision_log is not None else DecisionLog()
 
     # The two methods a caller gets.
@@ -186,41 +191,111 @@ class CedarEngine:
                 policy_ids=[PROMPT_ONLY_POLICY_ID],
                 reasons=["prompt-only ablation: no policy was evaluated"],
                 request=req,
+                mode=self._mode.value,
+            )
+
+        mismatch = self._action_kind_mismatch(req)
+        if mismatch is not None:
+            # The action kind selects which policies apply, so it cannot be the
+            # caller's word when the graph holds the tool's own answer. A call
+            # labelled with a cheaper kind would otherwise be authorized by that
+            # kind's permits.
+            return Decision(
+                verdict=Verdict.deny,
+                policy_ids=[],
+                reasons=[mismatch],
+                request=req,
+                mode=self._mode.value,
             )
 
         real = self._ask(req, req.action_kind.value)
         if real.decision is cedarpy.Decision.Allow:
+            # An erroring policy anywhere in the set is recorded even when a
+            # permit matched, because the verdict may not be the one the policy
+            # author intended and the log is where that shows. The decision
+            # itself still follows Cedar: a matching permit allows.
             return Decision(
                 verdict=Verdict.allow,
                 policy_ids=real.policy_ids,
-                reasons=_matched("permit", real),
+                reasons=_with_errors(_matched("permit", real), real),
                 request=req,
+                mode=self._mode.value,
+            )
+        if real.errors:
+            # No permit matched and the set does not evaluate cleanly, so this is
+            # an error rather than the ordinary default deny. Fail closed and do
+            # not escalate: escalation asks a human to answer a policy's refusal,
+            # and an error is not a refusal a human can answer.
+            return Decision(
+                verdict=Verdict.deny,
+                policy_ids=real.policy_ids,
+                reasons=["request could not be evaluated", *real.errors],
+                request=req,
+                mode=self._mode.value,
             )
         if real.decision is not cedarpy.Decision.Deny:
-            # NoDecision: the request could not be evaluated. Fail closed and do
-            # not escalate, because escalation answers a deny, not an error.
+            # NoDecision: the request or the entity set failed schema parsing.
+            # Fail closed and do not escalate, because escalation answers a deny.
             return Decision(
                 verdict=Verdict.deny,
                 policy_ids=[],
                 reasons=["request could not be evaluated", *real.errors],
                 request=req,
+                mode=self._mode.value,
             )
 
         escalate = self._ask(req, ESCALATE_ACTION)
+        if escalate.errors:
+            return Decision(
+                verdict=Verdict.deny,
+                policy_ids=real.policy_ids,
+                reasons=["request could not be evaluated", *escalate.errors],
+                request=req,
+                mode=self._mode.value,
+            )
         if escalate.decision is cedarpy.Decision.Allow:
+            # The deny that caused the escalation belongs in the record too: an
+            # escalate line that names only the escalate permit cannot be read
+            # back to why the action needed a human.
             reasons = [f"real action denied: {req.action_kind.value}"]
+            reasons.extend(f"real action denied by: {policy_id}" for policy_id in real.policy_ids)
             reasons.extend(_matched("escalate permit", escalate))
             return Decision(
                 verdict=Verdict.escalate,
-                policy_ids=escalate.policy_ids,
+                policy_ids=[*real.policy_ids, *escalate.policy_ids],
                 reasons=reasons,
                 request=req,
+                mode=self._mode.value,
             )
         return Decision(
             verdict=Verdict.deny,
             policy_ids=real.policy_ids,
-            reasons=_denied(real),
+            reasons=_with_errors(_denied(real), escalate),
             request=req,
+            mode=self._mode.value,
+        )
+
+    def _action_kind_mismatch(self, req: AuthzRequest) -> str | None:
+        """A reason to refuse when the request's action kind is not the graph's.
+
+        The graph is authoritative for what a tool does. A tool with no row is
+        left to the policies: the shipped graph does not list every tool a
+        deployment might call, and inventing a kind for it would be the same
+        mistake in the other direction.
+        """
+        if self.graph is None:
+            return None
+        tool = self.graph.tool(req.tool)
+        if tool is None:
+            return None
+        # The row holds the kind as text, so compare the values rather than the
+        # enum and the string. Comparing them directly is always unequal, which
+        # would have made this check a no-op.
+        if tool.action_kind == req.action_kind.value:
+            return None
+        return (
+            f"tool {req.tool!r} is a {tool.action_kind} tool in the graph, "
+            f"but the request asks for {req.action_kind.value}"
         )
 
     def _ask(self, req: AuthzRequest, action_id: str) -> _Outcome:
@@ -256,6 +331,9 @@ class CedarEngine:
                 "minTier": provenance.min_tier.value,
                 "hasExternal": provenance.has_external,
                 "systems": sorted({source.system for source in provenance.sources}),
+                # `count` is what lets a policy tell "nothing has been read yet"
+                # from "only the owner's own material has been read", which the
+                # summary alone cannot distinguish.
                 "count": len(provenance.sources),
             },
         }
@@ -285,10 +363,13 @@ class CedarEngine:
             }
 
         agent_row = self.graph.agent(req.chain.act) if self.graph is not None else None
+        # An agent with no row, or a row with no owner, is not owned by whoever
+        # asked. Filling the owner in from `sub` made every ownership permit
+        # match, which is the opposite of what an unknown agent should mean.
         owner_id = (
             agent_row.owner_human_id
             if agent_row is not None and agent_row.owner_human_id
-            else req.chain.sub
+            else UNKNOWN_HUMAN
         )
 
         self._add_human(entities, add, req.chain.sub, fallback_groups=req.chain.groups)
@@ -321,13 +402,17 @@ class CedarEngine:
                 },
             )
         else:
+            # No row for this resource. `kind` and `sensitivity` are `unknown`,
+            # and the owner is a sentinel that no human row can equal, so a
+            # permit that keys on ownership cannot match a resource the graph
+            # has never heard of.
             add(
                 RESOURCE,
                 req.resource,
                 {
                     "kind": "unknown",
                     "name": req.resource,
-                    "owner": _entity_ref(HUMAN, req.chain.sub),
+                    "owner": _entity_ref(HUMAN, UNKNOWN_HUMAN),
                     "sensitivity": "unknown",
                 },
             )
@@ -341,6 +426,10 @@ class CedarEngine:
         fallback_groups: list[str] | None = None,
     ) -> None:
         if (HUMAN, human_id) in entities:
+            return
+        if human_id == UNKNOWN_HUMAN:
+            # The sentinel names no person, so no Human entity is registered for
+            # it and `_entity_ref` to it cannot equal a real human's uid.
             return
         row = self.graph.human(human_id) if self.graph is not None else None
         if row is not None:
@@ -357,6 +446,20 @@ def _matched(verb: str, outcome: _Outcome) -> list[str]:
     if outcome.policy_ids:
         return [f"{verb} matched: {policy_id}" for policy_id in outcome.policy_ids]
     return [f"{verb} path reached with no policy id reported"]
+
+
+def _with_errors(reasons: list[str], outcome: _Outcome) -> list[str]:
+    """The reasons so far, plus any evaluation error from `outcome`.
+
+    A permit that matches and an erroring policy can be in the same policy set,
+    and the error still matters: it says the set does not evaluate cleanly, so
+    the verdict may not be the one the policy author intended. Dropping it when
+    some policy id was present made a broken policy invisible in three of the
+    four paths through `_evaluate`.
+    """
+    if not outcome.errors:
+        return reasons
+    return [*reasons, *(f"evaluation error: {error}" for error in outcome.errors)]
 
 
 def _denied(outcome: _Outcome) -> list[str]:

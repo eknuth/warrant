@@ -24,6 +24,7 @@ id cannot escape the run directory.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from collections.abc import Mapping
@@ -95,13 +96,22 @@ def task_dir(root: Path | str, task_id: str) -> Path:
     """The run directory for one task, with the task id made safe for a path.
 
     Every character outside `[A-Za-z0-9._-]` becomes `_`, and a name that is
-    only dots is rejected, so a crafted task id cannot walk out of `root`. Two
-    task ids that differ only in replaced characters would share a directory,
-    which is why task ids are opaque generated values rather than user text.
+    only dots is rejected, so a crafted task id cannot walk out of `root`.
+
+    When the sanitizer changes the id, a short digest of the original is
+    appended. Without it `a_b`, `a/b`, and `a b` all name `runs/a_b`, and two
+    tasks share one provenance ledger and one decision log: a task could inherit
+    another task's provenance set, which is the one input this design says an
+    agent cannot forge. `no-exchange` takes the task id from a header the agent
+    sends, so the collision is reachable rather than theoretical. A task id that
+    is already safe keeps its readable name.
     """
     safe = _SAFE_TASK_ID.sub("_", task_id)
     if not safe or set(safe) <= {"."}:
         raise ValueError(f"task id {task_id!r} cannot name a run directory")
+    if safe != task_id:
+        digest = hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:12]
+        safe = f"{safe}-{digest}"
     return Path(root) / safe
 
 
@@ -112,11 +122,18 @@ def _split_list(raw: str | None) -> list[str]:
 
 
 def _parse_exp(raw: str) -> datetime:
+    """The token expiry as a datetime, or a `ChainSourceError`.
+
+    Every way this can fail is a bad header, so every one of them is the same
+    error type. `OverflowError` used to escape for an expiry far in the future,
+    which is a header an agent controls in `no-exchange` and not something a
+    caller should have to catch separately.
+    """
     try:
         seconds = int(raw)
-    except ValueError as exc:
-        raise ValueError(f"{HEADER_TOKEN_EXP} must be unix seconds, got {raw!r}") from exc
-    return datetime.fromtimestamp(seconds, tz=UTC)
+        return datetime.fromtimestamp(seconds, tz=UTC)
+    except (ValueError, OverflowError, OSError) as exc:
+        raise ChainSourceError(f"{HEADER_TOKEN_EXP} is not a usable unix time: {raw!r}") from exc
 
 
 def chain_from_headers(headers: Mapping[str, str], *, mode: Mode | None = None) -> Chain:

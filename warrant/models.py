@@ -97,9 +97,19 @@ class Provenance(BaseModel):
     """Every source read so far in one task.
 
     `min_tier` and `has_external` are computed from `sources`, so a caller
-    cannot assert a trust level that the sources do not support. `min_tier` is
-    the least trusted tier present; with no sources it is `owner`, because
-    nothing untrusted has been read yet.
+    cannot assert a trust level that the sources do not support.
+
+    `has_external` covers both `external` and `unknown`, the two tiers below any
+    classification. `unknown` means classification failed, and a commit with no
+    forge account is exactly the case it describes, so a policy that forbids on
+    external content has to see it too. Leaving `unknown` out let the least
+    trusted tier in the model past a `hasExternal` forbid.
+
+    With no sources, `min_tier` is `owner` and `has_external` is false, which
+    reads as the most trusted state. That is vacuous, not earned: nothing has
+    been read yet. A permit that depends on how much has been read has to check
+    `context.provenance.count > 0` for itself, because the summary cannot tell
+    "read nothing" from "read only the owner's own material".
     """
 
     task_id: str
@@ -115,7 +125,7 @@ class Provenance(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def has_external(self) -> bool:
-        return any(source.author_tier is Tier.external for source in self.sources)
+        return any(source.author_tier in (Tier.external, Tier.unknown) for source in self.sources)
 
 
 class AuthzRequest(BaseModel):
@@ -149,9 +159,15 @@ class Decision(BaseModel):
 
     `request` is inlined, not referenced, so a decision line on its own carries
     the full chain and the full provenance set.
+
+    `mode` names the ablation that produced the line. Without it an allow logged
+    under `no-provenance` and an allow under `full` where the agent read nothing
+    serialize the same, and the grader cannot attribute a line to an ablation
+    from the record alone.
     """
 
     verdict: Verdict
     policy_ids: list[str] = Field(default_factory=list)
     reasons: list[str] = Field(default_factory=list)
     request: AuthzRequest
+    mode: str = ""

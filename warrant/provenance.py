@@ -30,7 +30,10 @@ class Ledger:
 
     def __init__(self, root: Path | str = RUNS_DIR, mode: Mode | None = None) -> None:
         self.root = Path(root)
-        self._mode = mode if mode is not None else config.current_mode()
+        # `Mode(...)` rather than the value as given: a bare string that happens
+        # to match would compare unequal against `is`, silently disabling the
+        # ablation and corrupting the measurement.
+        self._mode = Mode(mode) if mode is not None else config.current_mode()
         self._sources: dict[str, list[Source]] = {}
 
     def record(self, task_id: str, source: Source) -> None:
