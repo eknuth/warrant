@@ -46,3 +46,24 @@ gitea-mcp:
 # Reproducible and idempotent; see infra/dsh/install-profile.sh.
 dsh-profile:
 	bash infra/dsh/install-profile.sh
+
+# --- later issues, commented until the issue that needs them ----------------
+# Each block names the target that issue will add, so its purpose is visible
+# before the target exists. A commented target is not a target: `make` does not
+# see it, and the scaffold test checks `make` rather than this text.
+#
+# W8, the postgres MCP resource server on :9102.
+# postgres-mcp:
+# 	uv run python -m servers.postgres_mcp.server
+#
+# W9, the mail MCP resource server on :9103.
+# mail-mcp:
+# 	uv run python -m servers.mail_mcp.server
+#
+# W16, the adjudicator and its human queue.
+# adjudicate:
+# 	uv run python -m warrant.adjudicator
+#
+# W22, the matrix run across model families and effort variants.
+# matrix:
+# 	uv run python -m evals.matrix

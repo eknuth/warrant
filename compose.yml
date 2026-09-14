@@ -112,3 +112,11 @@ volumes:
 #    ports:
 #      - "1025:1025"   # smtp
 #      - "8025:8025"   # web ui
+#
+# --- W16 and W22, which add no compose service ------------------------------
+# The adjudicator and its human queue (W16) and the second model family (W22)
+# are processes and HTTP endpoints rather than long-lived services, so they add
+# no block here. W16's escalation queue is a table the existing postgres
+# serves, and W22 is a hosted API reached over the network. Their variables are
+# stubbed in .env.example. If either turns out to need a service, its block
+# goes above this line.

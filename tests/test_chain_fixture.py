@@ -1,7 +1,7 @@
 """The chain invariants, checked over a committed recording of a real run.
 
-`runs/` is gitignored, so nothing here reads a live run. The fixture under
-`tests/fixtures/recorded_run/` is a copy of one run's `calls.jsonl` and
+`runs/` is gitignored, so nothing here reads a live run. The recording under
+`tests/data/recorded_run/` is a copy of one run's `calls.jsonl` and
 `token.json` with the signature stripped. The token record carries claims only,
 and the call log carries digests rather than tool arguments and results, so the
 fixture is evidence of a run rather than a credential from one.
@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-FIXTURE = Path(__file__).resolve().parent / "fixtures" / "recorded_run"
+FIXTURE = Path(__file__).resolve().parent / "data" / "recorded_run"
 CALLS = FIXTURE / "calls.jsonl"
 TOKEN = FIXTURE / "token.json"
 

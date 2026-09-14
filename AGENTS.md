@@ -48,6 +48,15 @@ next step. `docs/decisions/` holds the decisions behind this setup.
   pull request to `main` before Ed merges it. A stacked pull request that keeps an unmerged base
   lands on the base branch and never reaches `main`; that happened to W3 and W4, which were reported
   merged while `main` held neither.
+- One issue branch is open at a time. The next issue waits for the current pull request to merge,
+  even when the two touch different files, because the working tree is shared and a second branch
+  changes the tree under the first one's tests.
+- Rebase onto `origin/main` before a push and again before a merge; never merge `main` into an issue
+  branch. On a `uv.lock` conflict take `main`'s copy and run `uv lock`, rather than resolving the
+  lockfile by hand.
+- After resolving any conflict, diff the result against both branch tips and account for every line
+  that went in. A hasty resolution has silently dropped the other side's work more than once: a
+  merge once deleted W5's core, and a scripted replay dropped a file's worth of tests.
 
 ## Model and effort
 
