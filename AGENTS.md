@@ -34,8 +34,12 @@ next step. `docs/decisions/` holds the decisions behind this setup.
 - Browser work is Ed's. He drives the browser himself, signed in. An implementer or reviewer
   subagent says what it needs from a browser and stops: a login wall, MFA, a payment step, or any
   change outside a disposable checkout is a reason to stop and ask, not to click.
-- Do not push, do not open a pull request, and do not comment on Linear unless the issue says to.
-  Ed says when to push, and Ed merges.
+- The orchestrator session owns Linear: it comments on the issue, moves its state, and posts the
+  project status update. Implementer and reviewer children never write to Linear, never push, and
+  never open a pull request; the orchestrator does those when `make test` and `make lint` pass.
+  Ed merges.
+- Every pull request body carries `Closes EDW-<n>`, so the issue closes when the pull request
+  lands.
 
 ## Model and effort
 
@@ -80,6 +84,7 @@ The profile, the hooks, and the skills below are the project's own extension poi
 |---|---|
 | `/issue-start <ID>` | Read the issue, mark it In Progress, branch `w<N>-<slug>`, delegate to an implementer child |
 | `/review [ref]` | Two-lens adversarial review of the current branch, as a fresh child at `max` effort |
+| `/status` | Post a project status update to Linear with the health, what landed, what is next, and the blockers |
 | `/pass-run <park>` | Before-and-after eval pass. Stub; W15 fills it in |
 | `/compare <before> <after>` | Paired comparison of two result columns. Stub; W15 fills it in |
 | `/cell <col> <scenario> <n>` | One result cell with its evidence. Stub; W15 fills it in |
