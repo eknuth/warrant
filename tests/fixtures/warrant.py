@@ -23,7 +23,7 @@ from warrant.models import ActionKind, AuthzRequest, Chain, Provenance, Source, 
 def chain() -> Chain:
     return Chain(
         sub="h-alice",
-        act="agent-triage",
+        act="triage-agent",
         task_id="task-1",
         scopes=["read", "write"],
         groups=["engineering"],
@@ -56,7 +56,7 @@ def make_request(chain: Chain) -> Callable[..., AuthzRequest]:
         )
         data: dict[str, object] = {
             "chain": chain,
-            "tool": "gitea.search",
+            "tool": "gitea.search_code",
             "action_kind": ActionKind.read,
             "resource": "repo-acme-api",
             "args_digest": "sha256:args",

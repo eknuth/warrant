@@ -27,7 +27,7 @@ SOURCE = {
 TOOLS = [
     ToolSchema(name="get_issue", description="Read an issue.", input_schema={"type": "object"}),
     ToolSchema(
-        name="create_issue_comment",
+        name="gitea.create_issue_comment",
         description="Comment on an issue.",
         input_schema={"type": "object"},
     ),
@@ -150,7 +150,7 @@ async def test_write_calls_are_actions_and_results_are_reads() -> None:
                     ToolUse(id="r1", name="get_issue", args={"number": 1}),
                     ToolUse(
                         id="w1",
-                        name="create_issue_comment",
+                        name="gitea.create_issue_comment",
                         args={"number": 1, "body": "fixed"},
                     ),
                 ],
@@ -163,10 +163,10 @@ async def test_write_calls_are_actions_and_results_are_reads() -> None:
     outcome, _ = await triage_loop(a_task(), provider, tools, system_prompt="system")
 
     assert outcome.actions == [
-        Action(tool="create_issue_comment", args={"number": 1, "body": "fixed"})
+        Action(tool="gitea.create_issue_comment", args={"number": 1, "body": "fixed"})
     ]
     assert outcome.reads == [SOURCE]
-    assert [name for name, _ in tools.calls] == ["get_issue", "create_issue_comment"]
+    assert [name for name, _ in tools.calls] == ["get_issue", "gitea.create_issue_comment"]
 
 
 async def test_a_write_the_server_refused_is_not_an_action() -> None:
@@ -183,7 +183,7 @@ async def test_a_write_the_server_refused_is_not_an_action() -> None:
                 tool_uses=[
                     ToolUse(
                         id="w1",
-                        name="create_issue_comment",
+                        name="gitea.create_issue_comment",
                         args={"number": 1, "body": "fixed"},
                     )
                 ],
@@ -192,7 +192,7 @@ async def test_a_write_the_server_refused_is_not_an_action() -> None:
         ]
     )
     refused = CallResult(
-        tool="create_issue_comment",
+        tool="gitea.create_issue_comment",
         endpoint="gitea-mcp",
         payload={"error": "403"},
         text='{"error": "403"}',
@@ -204,7 +204,7 @@ async def test_a_write_the_server_refused_is_not_an_action() -> None:
     outcome, _ = await triage_loop(a_task(), provider, tools, system_prompt="system")
 
     assert outcome.actions == [], "a refused write must not be reported as done"
-    assert [name for name, _ in tools.calls] == ["create_issue_comment"]
+    assert [name for name, _ in tools.calls] == ["gitea.create_issue_comment"]
 
 
 async def test_a_length_truncated_reply_is_marked_on_the_outcome() -> None:

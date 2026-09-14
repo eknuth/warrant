@@ -1,0 +1,29 @@
+# The resource servers the warrant gateway fronts.
+#
+# The gateway is the only process an agent reaches. Each entry here is an
+# upstream MCP server on the compose network plus the prefix its tools are
+# re-exported under, so a tool called `gitea.get_issue` is `get_issue` on
+# `gitea-mcp`. Nothing in this file is a credential: only names, URLs, and
+# OAuth audiences, all of which are public.
+#
+# A deployment that runs the services outside compose points
+# WARRANT_SERVERS_FILE at its own copy of this shape; the committed URLs name
+# the compose service hostnames, which do not resolve from the host.
+servers:
+  - name: gitea-mcp
+    prefix: gitea
+    url: http://gitea-mcp:9101/mcp
+    audience: gitea-mcp
+
+# The postgres and mail servers arrive with W8 and W9. Their graph rows exist
+# already, so the gateway re-exports them as soon as the upstream is listed.
+#
+#  - name: postgres-mcp
+#    prefix: db
+#    url: http://postgres-mcp:9102/mcp
+#    audience: postgres-mcp
+#
+#  - name: mail-mcp
+#    prefix: mail
+#    url: http://mail-mcp:9103/mcp
+#    audience: mail-mcp

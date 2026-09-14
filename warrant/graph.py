@@ -236,6 +236,27 @@ class Graph:
             "resources": len(resources),
         }
 
+    def resource_named(self, name: str, kind: str | None = None) -> Resource | None:
+        """The resource row whose `name` is `name`, optionally of `kind`.
+
+        A tool call carries a name (`acme/widgets`, `public.orders`,
+        `support@acme.example`) while the engine and the policies key on the
+        graph's id. This is that lookup. With two rows sharing a name and no
+        kind to tell them apart, the lowest id wins rather than an arbitrary
+        one, so the same call resolves the same way on every run.
+        """
+        if kind is None:
+            row = self._row("SELECT id FROM resources WHERE name = ? ORDER BY id LIMIT 1", name)
+        else:
+            row = self._row(
+                "SELECT id FROM resources WHERE name = ? AND kind = ? ORDER BY id LIMIT 1",
+                name,
+                kind,
+            )
+        if row is None:
+            return None
+        return self.resource(row["id"])
+
     def human(self, entity_id: str) -> Human | None:
         row = self._row("SELECT * FROM humans WHERE id = ?", entity_id)
         if row is None:

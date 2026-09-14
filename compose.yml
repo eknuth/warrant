@@ -90,6 +90,55 @@ services:
       retries: 30
       start_period: 20s
 
+  # --- W6 --------------------------------------------------------------------
+  # The gateway and the Gitea resource server it fronts. Both are built from
+  # the one Dockerfile. The upstream port is `expose`d, not published: on the
+  # compose network `gitea-mcp:9101` answers, and from the host nothing does.
+  # Only the gateway publishes a port, so `localhost:9100` is the single way in.
+  #
+  # The issuer is the one deployment wart here. Keycloak mints `iss` from the
+  # URL the token endpoint was reached at, `http://localhost:8080/...` for a
+  # host-side login, and inside a container `localhost` is the container. A
+  # deployment therefore needs an issuer hostname both the host and the compose
+  # network resolve (or the host-side login to use that name too). That is
+  # recorded in docs/decisions/004-gateway-hop.md; the host smoke run in the
+  # ticket uses a host-run gateway and a host-run upstream.
+  gitea-mcp:
+    build:
+      context: .
+    image: warrant-local:latest
+    command: ["python", "-m", "servers.gitea_mcp.server"]
+    env_file: [.env]
+    environment:
+      GITEA_URL: "http://gitea:3000"
+      GITEA_MCP_HOST: "0.0.0.0"
+      GITEA_MCP_PORT: "9101"
+      WARRANT_OIDC_ISSUER: "http://keycloak:8080/realms/warrant"
+    expose:
+      - "9101"
+    depends_on:
+      gitea:
+        condition: service_healthy
+
+  warrant:
+    build:
+      context: .
+    image: warrant-local:latest
+    command: ["python", "-m", "warrant", "serve"]
+    env_file: [.env]
+    environment:
+      WARRANT_GATEWAY_HOST: "0.0.0.0"
+      WARRANT_GATEWAY_PORT: "9100"
+      WARRANT_OIDC_ISSUER: "http://keycloak:8080/realms/warrant"
+      GITEA_URL: "http://gitea:3000"
+    ports:
+      - "9100:9100"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      gitea-mcp:
+        condition: service_started
+
 volumes:
   keycloak-data:
   gitea-data:

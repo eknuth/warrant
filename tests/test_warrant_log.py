@@ -32,7 +32,7 @@ def test_two_decisions_are_two_lines_that_parse_back(
     assert len(lines) == 2
     parsed = [Decision.model_validate_json(line) for line in lines]
     assert [decision.verdict.value for decision in parsed] == ["allow", "allow"]
-    assert [decision.request.tool for decision in parsed] == ["gitea.search", "gitea.get_file"]
+    assert [decision.request.tool for decision in parsed] == ["gitea.search_code", "gitea.get_file"]
     assert parsed == written
 
 
@@ -66,11 +66,11 @@ def test_a_decision_line_carries_the_full_chain_and_provenance(
     # ones: a dropped digest or resource would parse back green while the grader
     # lost the ability to reconstruct the call.
     assert parsed.request.chain.sub == "h-alice"
-    assert parsed.request.chain.act == "agent-triage"
+    assert parsed.request.chain.act == "triage-agent"
     assert parsed.request.chain.task_id == "task-1"
     assert parsed.request.chain.scopes == ["read", "write"]
     assert parsed.request.chain.groups == ["engineering"]
-    assert parsed.request.tool == "gitea.search"
+    assert parsed.request.tool == "gitea.search_code"
     assert parsed.request.action_kind.value == "read"
     assert parsed.request.resource == "repo-acme-api"
     assert parsed.request.args_digest == "sha256:args"
