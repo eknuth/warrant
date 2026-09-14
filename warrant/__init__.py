@@ -1,6 +1,7 @@
 """The authorization service.
 
-W5 and W6 fill this in: the endpoint an agent calls before it acts, the policy
-set it evaluates against, and the decision record it leaves behind. W1
-establishes the package only, so there is nothing to call yet.
+One module per concern: `models` is the data model for a request and its
+decision, `graph` is the SQLite access graph, `engine` is the Cedar adapter,
+`provenance` is the ledger of what an agent read, `log` is the decision record,
+and `config` is the ablation mode. W6 puts these in the request path.
 """
