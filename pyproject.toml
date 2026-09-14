@@ -55,6 +55,12 @@ asyncio_default_fixture_loop_scope = "function"
 # `warrant`, `agents`, `servers`, `gen`, and `evals` are importable only if the
 # repository root is on sys.path. This is what puts it there.
 pythonpath = ["."]
+# Tests that need the running compose stack say so with `integration`. They
+# skip themselves when the stack is absent, so `make test` is green on a clean
+# checkout and still exercises them when the stack is up.
+markers = [
+    "integration: needs the running compose stack (Gitea, Keycloak, and a bootstrapped token)",
+]
 
 [tool.ruff]
 line-length = 100
