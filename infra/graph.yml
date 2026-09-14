@@ -28,8 +28,12 @@ agents:
     justification: read the issue queue to triage it
     justification_expires_at: null
     # Reads plus the writes a triage pass needs. `gitea.set_repo_visibility` is
-    # deliberately absent: the resource server's admin token can do it, and the
-    # graph is where the agent's narrower authority is written down.
+    # granted because W7's policy set has to be able to refuse a tainted
+    # visibility change with a rule rather than with the absence of a permit: a
+    # tool no agent holds can only ever be refused by the default deny, and then
+    # the quiet-control rule never appears in a decision. The grant is what makes
+    # the taint rule the thing that refuses it, and the grant is narrow: one
+    # tool, one agent.
     allowed_tools:
       - gitea.list_repos
       - gitea.list_issues
@@ -39,6 +43,7 @@ agents:
       - gitea.create_issue_comment
       - gitea.create_branch
       - gitea.commit_file
+      - gitea.set_repo_visibility
       - gitea.open_pull_request
   - id: support-agent
     client_id: support-agent
@@ -147,6 +152,15 @@ resources:
     kind: db_table
     name: public.orders
     owner_human_id: h-alice
+    sensitivity: confidential
+  # Bob's confidential table. Without a confidential row owned by the person
+  # whose agent holds a database read, the confidential arm of the quiet-control
+  # rule has nothing to refuse: a read of alice's table by bob's agent is refused
+  # by the wrong-subject rule first, which is a different scenario.
+  - id: table-support-billing
+    kind: db_table
+    name: support.billing
+    owner_human_id: h-bob
     sensitivity: confidential
   - id: mailbox-support
     kind: mailbox

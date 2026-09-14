@@ -118,7 +118,7 @@ def test_loading_twice_leaves_the_same_graph(tmp_path: Path) -> None:
         assert len(second.humans()) == 3
         assert len(second.agents()) == 3
         assert len(second.tools()) == 14
-        assert len(second.resources()) == 5
+        assert len(second.resources()) == 6
 
 
 def test_an_agent_with_an_unknown_owner_is_refused(tmp_path: Path) -> None:

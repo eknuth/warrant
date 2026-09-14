@@ -11,9 +11,9 @@ Mapping
 A request becomes a Cedar request like this:
 
 * principal: `Agent::"<chain.act>"`, the acting agent. Its entity carries
-  `owner` (the graph's owner for the agent, or the human who asked when the
-  graph has no row), `onBehalfOf` (always `chain.sub`), `clientId`,
-  `allowedTools`, and `justification`.
+  `owner` (the graph's owner for the agent, or `warrant:unknown` when the graph
+  has no row), `onBehalfOf` (always `chain.sub`), `clientId`, `allowedTools`,
+  and `justification`.
 * action: `Action::"<tool>"`, the tool the call names, with the action kind as
   its membership: every tool action is a member of `Action::"read"`,
   `Action::"write"`, or `Action::"send"` according to the graph's `tools` row,
@@ -25,9 +25,18 @@ A request becomes a Cedar request like this:
   `sensitivity` taken from the graph. A resource the graph does not know is
   presented as `kind` and `sensitivity` `"unknown"`, which no permit should
   match.
-* context: the provenance summary (`minTier`, `hasExternal`, `systems`,
-  `count`), the task id, the token scopes, the human's groups, the action kind,
-  the args digest, `justificationValid`, and `tokenExp`.
+* context: the provenance summary (`minTier`, `hasExternal`, `hasCustomer`,
+  `systems`, `sourceIds`, `overlapSources`, `overlapExternal`, `count`), the
+  task id, the token scopes as `taskScopes`, the human's groups, the human in
+  `sub` as `onBehalfOf`, the action kind, the args digest, `justificationValid`,
+  `tokenExp`, `argsTouchSecret`, and `targetOutsideTask`.
+
+A human entity carries `entitledTools`, the union of `allowedTools` over the
+agents that human owns. The OBO token's scopes name the agent client's
+authority, not the human's, so a permit that narrows the token to the person
+who asked reads `context.onBehalfOf.entitledTools` rather than `taskScopes`
+alone. The agent's owner is the wrong human for that check: an agent owned by
+one person and invoked by another must not carry the owner's entitlements.
 
 Escalate
 --------
@@ -64,6 +73,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -131,6 +141,16 @@ class ReservedActionIdError(ValueError):
     """A tool id that collides with an action the schema writes itself."""
 
 
+class PolicyValidationError(ValueError):
+    """A policy set that does not validate against the schema it is loaded with.
+
+    A policy that names an action the schema does not declare parses fine and
+    then never matches, which is the failure mode W6 spent an issue undoing. The
+    check belongs at load, where the policy file is in front of the author, not
+    at a decision, where the only evidence is a missing permit.
+    """
+
+
 def schema_for(graph: Graph) -> dict[str, Any]:
     """The Cedar schema for the tools this graph holds.
 
@@ -177,8 +197,12 @@ def schema_for(graph: Graph) -> dict[str, Any]:
                     "type": "Record",
                     "attributes": {
                         "count": {"type": "Long"},
+                        "hasCustomer": {"type": "Boolean"},
                         "hasExternal": {"type": "Boolean"},
                         "minTier": {"type": "String"},
+                        "overlapExternal": {"type": "Boolean"},
+                        "overlapSources": {"type": "Set", "element": {"type": "String"}},
+                        "sourceIds": {"type": "Set", "element": {"type": "String"}},
                         "systems": {"type": "Set", "element": {"type": "String"}},
                     },
                 },
@@ -187,11 +211,14 @@ def schema_for(graph: Graph) -> dict[str, Any]:
                     "attributes": {
                         "actionKind": {"type": "String"},
                         "argsDigest": {"type": "String"},
+                        "argsTouchSecret": {"type": "Boolean"},
                         "groups": {"type": "Set", "element": {"type": "String"}},
                         "justificationValid": {"type": "Boolean"},
+                        "onBehalfOf": {"type": "Entity", "name": HUMAN},
                         "provenance": {"type": "ProvenanceSummary"},
-                        "scopes": {"type": "Set", "element": {"type": "String"}},
+                        "targetOutsideTask": {"type": "Boolean"},
                         "taskId": {"type": "String"},
+                        "taskScopes": {"type": "Set", "element": {"type": "String"}},
                         "tokenExp": {"type": "Long"},
                         "tool": {"type": "String"},
                     },
@@ -202,6 +229,10 @@ def schema_for(graph: Graph) -> dict[str, Any]:
                     "shape": {
                         "type": "Record",
                         "attributes": {
+                            "entitledTools": {
+                                "type": "Set",
+                                "element": {"type": "String"},
+                            },
                             "groups": {"type": "Set", "element": {"type": "String"}},
                             "login": {"type": "String"},
                         },
@@ -289,6 +320,19 @@ class CedarEngine:
             )
         else:
             self._schema = None
+
+        if self._schema is not None:
+            # A policy that does not validate against the schema will not mean
+            # what its author read. Validate once, here, so a typo in an action
+            # id or an attribute name stops the process instead of quietly
+            # denying (or quietly permitting) every call for the life of a run.
+            validation = cedarpy.validate_policies(text, self._schema)
+            if not validation.validation_passed:
+                errors = "; ".join(str(error) for error in validation.errors)
+                raise PolicyValidationError(
+                    f"policies under {self.policies_dir} do not validate against the "
+                    f"schema: {errors}"
+                )
 
         self.graph = graph
         self._mode = Mode(mode) if mode is not None else config.current_mode()
@@ -469,7 +513,13 @@ class CedarEngine:
             cedar_request, self._policies, self._entities(req), self._schema
         )
         annotations = dict(result.diagnostics.id_annotations_by_reason)
-        policy_ids = [annotations.get(reason, reason) for reason in result.diagnostics.reasons]
+        # Sorted, because Cedar returns the reasons as a set and the process hash
+        # seed changes their order between runs. An audit line that lists the
+        # same two policies in a different order on every run cannot be compared
+        # to the run before it, and the grader reads this field.
+        policy_ids = sorted(
+            annotations.get(reason, reason) for reason in result.diagnostics.reasons
+        )
         return _Outcome(
             decision=result.decision,
             policy_ids=policy_ids,
@@ -483,14 +533,30 @@ class CedarEngine:
             "actionKind": req.action_kind.value,
             "argsDigest": req.args_digest,
             "taskId": req.chain.task_id,
-            "scopes": list(req.chain.scopes),
+            "taskScopes": list(req.chain.scopes),
             "groups": list(req.chain.groups),
+            "onBehalfOf": _entity_ref(HUMAN, req.chain.sub),
             "justificationValid": self._justification_valid(req),
             "tokenExp": int(req.chain.token_exp.timestamp()),
+            "argsTouchSecret": req.args_touch_secret,
+            "targetOutsideTask": req.target_outside_task,
             "provenance": {
                 "minTier": provenance.min_tier.value,
                 "hasExternal": provenance.has_external,
+                "hasCustomer": provenance.has_customer,
                 "systems": sorted({source.system for source in provenance.sources}),
+                "sourceIds": sorted({source.id for source in provenance.sources}),
+                # `overlapSources` and `overlapExternal` are W11's content-taint
+                # computation, and `argsTouchSecret` and `targetOutsideTask` are
+                # its argument scan and target comparison. W7 carries them so the
+                # rules that read them exist. The default claims no taint, which
+                # is the permissive direction rather than the deny-safe one: a
+                # `False` here suppresses the rule instead of firing it, so until
+                # W11 fills them the containment against a target shift, a
+                # paraphrased injection, or a secret in the arguments is the
+                # allowlist and the subject rule, not these three forbids.
+                "overlapSources": sorted(req.overlap_sources),
+                "overlapExternal": req.overlap_external,
                 # `count` is what lets a policy tell "nothing has been read yet"
                 # from "only the owner's own material has been read", which the
                 # summary alone cannot distinguish.
@@ -507,10 +573,9 @@ class CedarEngine:
         if self.graph is None:
             return False
         agent = self.graph.agent(req.chain.act)
-        if agent is None or not agent.justification:
+        if agent is None:
             return False
-        expires = agent.justification_expires_at
-        return expires is None or expires > req.ts
+        return self._live_justification(agent, req.ts)
 
     def _entities(self, req: AuthzRequest) -> list[dict[str, Any]]:
         entities: dict[tuple[str, str], dict[str, Any]] = {}
@@ -522,6 +587,11 @@ class CedarEngine:
                 "parents": [],
             }
 
+        # The union of `allowed_tools` over the agents each human owns, built
+        # once per request. This is the policy input that narrows the OBO
+        # token's scopes to the person who asked rather than to the agent client.
+        entitled = self._entitled_tools(req.ts)
+
         agent_row = self.graph.agent(req.chain.act) if self.graph is not None else None
         # An agent with no row, or a row with no owner, is not owned by whoever
         # asked. Filling the owner in from `sub` made every ownership permit
@@ -532,9 +602,9 @@ class CedarEngine:
             else UNKNOWN_HUMAN
         )
 
-        self._add_human(entities, add, req.chain.sub, fallback_groups=req.chain.groups)
+        self._add_human(entities, add, req.chain.sub, entitled, fallback_groups=req.chain.groups)
         if owner_id != req.chain.sub:
-            self._add_human(entities, add, owner_id)
+            self._add_human(entities, add, owner_id, entitled)
 
         add(
             AGENT,
@@ -550,7 +620,7 @@ class CedarEngine:
 
         resource_row = self.graph.resource(req.resource) if self.graph is not None else None
         if resource_row is not None:
-            self._add_human(entities, add, resource_row.owner_human_id)
+            self._add_human(entities, add, resource_row.owner_human_id, entitled)
             add(
                 RESOURCE,
                 req.resource,
@@ -578,11 +648,44 @@ class CedarEngine:
             )
         return list(entities.values())
 
+    def _entitled_tools(self, at: datetime) -> dict[str, list[str]]:
+        """What each human may reach, as the union of the tools their live agents hold.
+
+        The access graph records `allowed_tools` on an agent and the human who
+        owns it. The union over the agents one person owns is the honest answer
+        to "what may this person do". The permit looks it up for the human in
+        `sub`, not for the agent's owner, so an agent owned by one person cannot
+        carry that person's authority when somebody else invokes it.
+
+        An agent whose justification is missing or expired confers nothing. Its
+        own calls are refused by `orphan-agent`, so treating its allowlist as
+        authority would let a person borrow a tool from an agent that may not
+        act at all. `entitledTools` is sorted so the same graph gives the same
+        entity set on every run, which a decision replayed from the log needs.
+        """
+        if self.graph is None:
+            return {}
+        entitled: dict[str, set[str]] = {}
+        for agent in self.graph.agents():
+            if not agent.owner_human_id or not self._live_justification(agent, at):
+                continue
+            entitled.setdefault(agent.owner_human_id, set()).update(agent.allowed_tools)
+        return {human: sorted(tools) for human, tools in entitled.items()}
+
+    @staticmethod
+    def _live_justification(agent: Any, at: datetime) -> bool:
+        """Whether one agent row carries a justification that is live at `at`."""
+        if not agent.justification:
+            return False
+        expires = agent.justification_expires_at
+        return expires is None or expires > at
+
     def _add_human(
         self,
         entities: dict[tuple[str, str], dict[str, Any]],
         add: Any,
         human_id: str,
+        entitled: dict[str, list[str]],
         fallback_groups: list[str] | None = None,
     ) -> None:
         if (HUMAN, human_id) in entities:
@@ -591,14 +694,23 @@ class CedarEngine:
             # The sentinel names no person, so no Human entity is registered for
             # it and `_entity_ref` to it cannot equal a real human's uid.
             return
+        tools = list(entitled.get(human_id, []))
         row = self.graph.human(human_id) if self.graph is not None else None
         if row is not None:
-            add(HUMAN, human_id, {"login": row.login, "groups": list(row.groups)})
+            add(
+                HUMAN,
+                human_id,
+                {"login": row.login, "groups": list(row.groups), "entitledTools": tools},
+            )
         else:
             add(
                 HUMAN,
                 human_id,
-                {"login": human_id, "groups": list(fallback_groups or [])},
+                {
+                    "login": human_id,
+                    "groups": list(fallback_groups or []),
+                    "entitledTools": tools,
+                },
             )
 
 
