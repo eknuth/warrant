@@ -1,0 +1,23 @@
+# The build context is the repository, and the image runs from what is copied
+# into it. `.env` holds every credential and is gitignored, so it is the one
+# file that must not travel by a second route: `compose.yml` reads it with
+# `env_file`, which passes values at run time, and nothing about the image needs
+# it on disk. Without this, `COPY . .` baked the credentials into the image.
+.env
+.env.*
+!.env.example
+
+# Run records, the local access graph, and the virtual environment are all
+# local state. `warrant.db` is rebuilt from `infra/graph.yml`, and `runs/`
+# carries real tokens and decisions.
+runs/
+warrant.db
+
+.venv/
+.worktrees/
+.git/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.DS_Store

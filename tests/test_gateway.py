@@ -286,7 +286,7 @@ async def test_an_allowed_read_is_forwarded_and_its_source_recorded(
 
     assert result is upstream.result
     assert upstream.calls == [("gitea-mcp", "get_issue", {"repo": "acme/widgets", "number": 1})]
-    sources = gateway.ledger.get("task-1").sources
+    sources = gateway.ledger.get("task-1", "triage-agent").sources
     assert [source.id for source in sources] == ["acme/widgets#1"]
     assert sources[0].digest
     assert engine.requests[0].action_kind.value == "read"
@@ -436,7 +436,7 @@ async def test_agent_supplied_provenance_is_ignored_and_absent_from_the_record(
         author_tier=Tier.member,
         digest="sha256:real",
     )
-    gateway.ledger.record("task-1", real)
+    gateway.ledger.record("task-1", "triage-agent", real)
     fabricated = {
         "task_id": "task-1",
         "sources": [
@@ -672,7 +672,8 @@ async def test_the_real_upstream_client_discovers_and_calls_a_fake_server(
         )
 
     assert result.is_error is False
-    assert [source.id for source in gateway.ledger.get("task-1").sources] == ["acme/widgets#1"]
+    recorded = gateway.ledger.get("task-1", "triage-agent").sources
+    assert [source.id for source in recorded] == ["acme/widgets#1"]
 
 
 # -- the second token hop --------------------------------------------------
@@ -765,3 +766,172 @@ async def test_the_request_timestamp_is_the_gateways_clock(tmp_path: Path, graph
 
     assert engine.requests[0].ts.tzinfo is not None
     assert engine.requests[0].ts <= datetime.now(UTC)
+
+
+# -- the fixes the W6 review asked for ---------------------------------------
+
+
+async def test_a_task_id_cannot_inherit_another_actors_provenance(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """The agent chooses its own task id, so the actor is part of the ledger key.
+
+    `scope=task-id:<value>` is written by the caller of the exchange, so an agent
+    can name a task id that belongs to someone else. With the ledger keyed on the
+    id alone, that agent inherited the sources recorded under it and the engine
+    computed `hasExternal` from another task's reads. Two actors, one task id:
+    the second must see nothing.
+    """
+    log = DecisionLog(tmp_path / "runs")
+    engine = FakeEngine(decision_log=log, verdict=Verdict.allow)
+    upstream = FakeUpstream(
+        result=CallToolResult(
+            content=[TextContent(type="text", text=json.dumps(source_payload()))],
+            is_error=False,
+        )
+    )
+    gateway = make_gateway(tmp_path, graph_db, engine, upstream=upstream)
+
+    await gateway.call_tool(
+        "gitea.get_issue",
+        {"repo": "acme/widgets", "number": 1},
+        claims=claims_for(act="triage-agent", task_id="shared-task"),
+        token="",
+    )
+    # Read before the second call: that call performs its own read of the same
+    # issue, and its own read belongs in its own ledger. What the second call
+    # must not do is start from the first actor's sources.
+    before = list(gateway.ledger.get("shared-task", "support-agent").sources)
+    await gateway.call_tool(
+        "gitea.get_issue",
+        {"repo": "acme/widgets", "number": 1},
+        claims=claims_for(act="support-agent", task_id="shared-task"),
+        token="",
+    )
+
+    assert before == [], "the second actor starts from nothing, under the same task id"
+    assert engine.requests[1].provenance.sources == [], "and is decided with nothing"
+    assert [source.id for source in gateway.ledger.get("shared-task", "triage-agent").sources] == [
+        "acme/widgets#1"
+    ]
+    assert [source.id for source in gateway.ledger.get("shared-task", "support-agent").sources] == [
+        "acme/widgets#1"
+    ], "each actor's own read lands in its own file"
+
+
+async def test_an_all_dots_task_id_is_refused_as_a_tool_error(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """A task id that cannot name a run is refused, not raised out of the log.
+
+    `task_dir` rejects an all-dots name. The gateway used to pass that value to
+    the decision log, which raised `ValueError` out of the request handler after
+    the call had been accepted: an unlogged crash in place of a refusal.
+    """
+    log = DecisionLog(tmp_path / "runs")
+    engine = FakeEngine(decision_log=log, verdict=Verdict.allow)
+    gateway = make_gateway(tmp_path, graph_db, engine, upstream=FakeUpstream())
+
+    result = await gateway.call_tool(
+        "gitea.get_issue",
+        {"repo": "acme/widgets", "number": 1},
+        claims=claims_for(task_id=".."),
+        token="",
+    )
+
+    assert result.is_error is True
+    assert "cannot name a run" in result.content[0].text
+    assert engine.requests == [], "a refused call never reaches the engine"
+
+
+async def test_an_unknown_tool_leaves_a_gateway_line_with_its_task(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """A refusal before the engine is still a call, and the record says so.
+
+    The module docstring promises a line for every call including the ones the
+    gateway refuses itself. An unknown tool is the easiest such call to make and
+    it wrote nothing, because the refusal carried no task id.
+    """
+    log = DecisionLog(tmp_path / "runs")
+    engine = FakeEngine(decision_log=log, verdict=Verdict.allow)
+    gateway = make_gateway(tmp_path, graph_db, engine, upstream=FakeUpstream())
+
+    result = await gateway.call_tool("gitea.delete_everything", {}, claims=claims_for(), token="")
+
+    assert result.is_error is True
+    lines = [
+        json.loads(line)
+        for line in (tmp_path / "runs" / "task-1" / "gateway.jsonl").read_text().splitlines()
+    ]
+    assert len(lines) == 1
+    assert lines[0]["tool"] == "gitea.delete_everything"
+    assert lines[0]["verdict"] == "deny"
+    assert lines[0]["task_id"] == "task-1"
+    assert lines[0]["act"] == "triage-agent"
+    assert "unknown tool" in lines[0]["error"]
+
+
+async def test_an_upstream_failure_is_recorded_as_an_error_not_a_clean_allow(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """The verdict is the decision and the error is the outcome.
+
+    The line for a failed upstream call used to be byte-identical in shape to a
+    successful one: `allow`, no error, no way to tell a delivered call from a
+    lost one.
+    """
+    log = DecisionLog(tmp_path / "runs")
+    engine = FakeEngine(decision_log=log, verdict=Verdict.allow)
+
+    class Exploding(FakeUpstream):
+        async def call_tool(
+            self, server: UpstreamServer, name: str, arguments: dict[str, Any], bearer: str
+        ) -> CallToolResult:
+            raise RuntimeError("upstream exploded")
+
+    gateway = make_gateway(tmp_path, graph_db, engine, upstream=Exploding())
+
+    result = await gateway.call_tool(
+        "gitea.get_issue", {"repo": "acme/widgets", "number": 1}, claims=claims_for(), token=""
+    )
+
+    assert result.is_error is True
+    lines = [
+        json.loads(line)
+        for line in (tmp_path / "runs" / "task-1" / "gateway.jsonl").read_text().splitlines()
+    ]
+    assert lines[-1]["verdict"] == "allow", "the decision was allow; the call is what failed"
+    assert "upstream gitea-mcp failed" in lines[-1]["error"]
+
+
+async def test_listing_tools_for_an_unknown_agent_reaches_no_upstream(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """Tool inventory is the deployment's shape, and it is not for a ghost.
+
+    `call_tool` refused an unknown actor before the engine; `list_tools` did an
+    exchange and an upstream round trip for it and handed back the names.
+    """
+    log = DecisionLog(tmp_path / "runs")
+    engine = FakeEngine(decision_log=log, verdict=Verdict.allow)
+    upstream = FakeUpstream(tools=[Tool(name="get_issue", input_schema={"type": "object"})])
+    gateway = make_gateway(tmp_path, graph_db, engine, upstream=upstream)
+
+    tools = await gateway.list_tools(claims=claims_for(act="agent-ghost"), token="")
+
+    assert tools == []
+    assert upstream.bearers == [], "no upstream was contacted for an actor with no row"
+
+
+def test_a_resource_id_of_another_kind_does_not_become_that_resource(graph_db: Graph) -> None:
+    """A mailbox that names a table id must not be decided as that table.
+
+    Names and ids share one namespace, so `to="table-orders"` missed the
+    kind-filtered name lookup and was passed through as an id, where the engine
+    resolved alice's confidential table under a permit aimed at a mailbox.
+    """
+    resolved = resolve_resource(graph_db, "mailbox", "table-orders")
+
+    assert graph_db.resource(resolved) is None, "it must not resolve to a known row"
+    assert resolved != "table-orders", "and it must not be the id that does"

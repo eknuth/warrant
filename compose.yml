@@ -10,6 +10,11 @@
 # credentials live in `.env` and never in this file. `.env.example` lists the
 # names. A variable that is missing stops `make up` and says which one.
 
+# Every worktree shares one stack. The project name is fixed here rather than
+# taken from the directory the command runs in, so `make up` from a worktree
+# starts, finds, and stops the same stack as the main checkout.
+name: warrant
+
 services:
   keycloak:
     # Patch-pinned. A bump changes the auth surface, so it is its own change,

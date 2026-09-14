@@ -10,6 +10,11 @@ __pycache__/
 runs/
 .DS_Store
 
+# worktrees for verifying a pull request, for an eval run pinned to a commit,
+# and for the recording. They live inside the checkout, so this is what keeps
+# each one's copy of the tree out of the main checkout's status.
+.worktrees/
+
 # the access graph, rebuilt from infra/graph.yml by `python -m warrant.graph load`
 warrant.db
 

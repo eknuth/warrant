@@ -94,10 +94,15 @@ already documents the same shortcut for the agents. A deployment gives each clie
 
 **The model endpoint has no dot in a function name.** The chat-completions grammar allows only
 `[A-Za-z0-9_-]`, and the gateway's names carry a dot. `agents/providers/openai_compat.py` encodes a
-name for the wire and decodes the model's answer, so the model sees `gitea_2e_get_issue` while the
-loop, the agent's write list, and the gateway all see `gitea.get_issue`. The encoding is
-`_<codepoint hex>_` and it escapes `_` too, so it is injective. The first live triage run failed
-`400` on `tools[0].function.name` before this existed; the second completed.
+name for the wire and decodes the model's answer, so the model sees `gitea_2e_get_5f_issue` while
+the loop, the agent's write list, and the gateway all see `gitea.get_issue`. The encoding is
+`_<codepoint hex>_` and `_` is outside the wire-safe class, so it is encoded too and the codec is
+injective. That second half was wrong in the first version of this file: `_` was left literal, so
+`db.public.orders` and a tool literally named `db.public_2e_orders` both encoded to
+`db_2e_public_2e_orders`, one of them became unreachable, and the other answered calls aimed at it.
+No shipped upstream tool name contains `_<hex>_` yet, which is why the collision was latent rather
+than live. The first live triage run failed `400` on `tools[0].function.name` before any of this
+existed; the second completed.
 
 **Compose and the issuer hostname.** Keycloak writes `iss` from the URL its token endpoint was
 reached at, which is `http://localhost:8080/realms/warrant` for a host-side login. Inside a
@@ -110,12 +115,22 @@ their network shape rather than run.
 
 ## Provenance is the ledger's, and only the ledger's
 
-`Gateway.call_tool` builds the `AuthzRequest` from `ledger.get(task_id)`. The ledger is filled by
-the gateway itself as it forwards reads, from the `source` block the resource server returned, and
-from nowhere else. The `tools/call` body can carry whatever the agent wants, including a
+`Gateway.call_tool` builds the `AuthzRequest` from `ledger.get(task_id, act)`. The ledger is filled
+by the gateway itself as it forwards reads, from the `source` block the resource server returned,
+and from nowhere else. The `tools/call` body can carry whatever the agent wants, including a
 `provenance` key in the arguments; the arguments reach the upstream, the decision does not read
 them. `tests/test_gateway.py` sends a fabricated set and asserts the decision used the ledger's set
 and that the fabricated source's id and digest appear nowhere in the recorded decision line.
+
+The actor is part of the ledger key, and that is load-bearing rather than tidy. The task id is not
+proven to be the caller's: the realm comment says the caller writes `scope=task-id:<value>` and the
+value comes back as the `task_id` claim, so an agent picks its own. With the ledger keyed on the id
+alone, an agent could name another task's id and start from the sources recorded under it, and its
+own reads appended to that other task's file. The files are now
+`runs/<task_id>/provenance/<actor>.jsonl`, so a task id that was never this actor's reads as empty
+and every actor's evidence stays under its own name. The review that found this is the reason the
+key changed; the acceptance criterion's wording was already about the ledger, and this is what makes
+it true rather than nearly true.
 
 ## What the id reconciliation cost
 
@@ -155,3 +170,33 @@ when { context.tool == "gitea.create_issue_comment" };
   line each, which is why the provenance count is above the read count.
 - The comment forbid produced two `deny` lines with reason `forbid matched: forbid-comment`, the
   agent's summary named that reason, and the run ended with `finish_reason` `stop`.
+
+## What the first review changed
+
+An adversarial pass over the branch found ten things. Eight were live defects and two were nits,
+and all ten are fixed here, because the ones that looked small were the same kind of mistake:
+
+- The ledger key described above. This was the serious one: it made the ticket's central claim a
+  convention rather than a property.
+- The wire codec above. `_` is now escaped, and a test asserts that two different names never share
+  a wire name, not just that one name round-trips.
+- An upstream failure was recorded as `verdict: allow` with no error, so a lost call and a delivered
+  one were the same line. The outcome now travels in an `error` field beside the verdict, because
+  the verdict is the decision and the error is what happened after it.
+- `.env` was copied into the image by `COPY . .`. A `.dockerignore` now excludes it along with
+  `runs/`, `warrant.db`, and the rest of the local state.
+- `no-exchange` crashed on `tools/list`, which is the first request an MCP client makes, so the
+  whole ablation was unusable. `list_tools` now builds its chain the same way `call_tool` does.
+- A refusal before the engine wrote nothing, because it carried no task id, while this file and the
+  module docstring both said every call gets a line. Refusals that happen after the chain is built
+  now write their line with the real `task_id` and `act`.
+- A token whose task id was `.` or `..` raised `ValueError` out of the request handler, long after
+  the call was accepted: an unlogged crash instead of a refusal. `Chain` refuses such an id where
+  the claim enters, and the gateway answers with a tool error.
+- A resource name that collided with the id of a row of another kind resolved to that row, so a
+  `mail.send` whose `to` was `table-orders` was decided against the confidential table. A name that
+  is some row's id under the wrong kind now resolves to nothing at all.
+- `upstream_ms` counted the token exchange as well as the upstream call, so a slow issuer read as a
+  slow upstream. The clock starts after the exchange.
+- `tools/list` reached every upstream for an actor the graph does not know. It now answers an empty
+  list, which is the same answer `call_tool` gives with `unknown agent`.
