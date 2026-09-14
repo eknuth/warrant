@@ -16,6 +16,19 @@ standing effort instead. The prompt is the brief below plus the issue id, the br
 range, and these lines: read only, do not push, do not post to Linear, do not open a pull request,
 do not touch a browser, do not modify anything outside this checkout.
 
+## How much review, by effort label
+
+The issue's effort label sets the tier, and the tier decides how many lenses the child writes.
+
+| Label | Tier |
+|---|---|
+| `effort:low` | No review. Mechanical work does not get one |
+| `effort:high` | One lens, correctness |
+| `effort:max` | Both lenses, correctness then the project story |
+
+Tell the child which tier it is. A one-lens child that writes a project-story verdict anyway has
+gone outside its brief, and that paragraph is not recorded anywhere.
+
 ## The brief
 
 Two lenses, reported separately.
