@@ -60,7 +60,7 @@ from starlette.applications import Starlette
 
 from servers.common.auth import BearerAuthMiddleware
 from warrant import config, oidc
-from warrant.config import Mode, task_dir
+from warrant.config import RUNS_DIR, Mode, bad_task_id, task_dir
 from warrant.engine import PolicyEngine
 from warrant.graph import Graph
 from warrant.log import DecisionLog
@@ -82,7 +82,6 @@ GATEWAY_LOG_NAME = "gateway.jsonl"
 
 DEFAULT_SERVERS_FILE = Path("infra/servers.yml")
 DEFAULT_POLICIES_DIR = Path("policies")
-DEFAULT_RUNS_DIR = Path("runs")
 DEFAULT_DB = Path("warrant.db")
 DEFAULT_SEED = Path("infra/graph.yml")
 
@@ -160,7 +159,7 @@ class GatewaySettings(BaseSettings):
     warrant_graph_db: str = str(DEFAULT_DB)
     warrant_graph_seed: str = str(DEFAULT_SEED)
     warrant_policies_dir: str = str(DEFAULT_POLICIES_DIR)
-    warrant_runs_dir: str = str(DEFAULT_RUNS_DIR)
+    warrant_runs_dir: str = str(RUNS_DIR)
     warrant_gateway_host: str = "127.0.0.1"
     warrant_gateway_port: int = 9100
     warrant_gateway_path: str = "/mcp"
@@ -367,24 +366,44 @@ class Gateway:
 
     # Tool surface ----------------------------------------------------------
 
-    async def list_tools(self, *, claims: oidc.Claims, token: str) -> list[Tool]:
+    async def list_tools(
+        self,
+        *,
+        claims: oidc.Claims | None = None,
+        token: str = "",
+        headers: Mapping[str, str] | None = None,
+    ) -> list[Tool]:
         """Every upstream tool the graph knows, with the upstream name prefixed.
 
         The graph is the authority on what may be called: a tool the upstream
         offers but the graph has no row for is not re-exported, because the
         gateway would have no action kind to decide it with.
+
+        `claims` is None under the `no-exchange` ablation, where the chain comes
+        from headers and there is no token at all. `tools/list` is the first
+        thing an MCP client asks for after `initialize`, so reading
+        `claims.task_id` unconditionally made the whole ablation unusable.
         """
+        chain, _ = self._chain_for(claims=claims, headers=headers)
+        if chain is None:
+            return []
+        # An actor the graph does not know gets no tool inventory. `call_tool`
+        # already refuses it before the engine; listing is not a decision, but
+        # it is a round trip to every upstream and a description of what this
+        # deployment can do, and neither belongs to an actor with no row.
+        if self.graph.agent(chain.act) is None:
+            logger.info("not listing tools for unknown agent %s", chain.act)
+            return []
+
         tools: list[Tool] = []
         for server in self.servers:
-            tools.extend(await self._discover(server, claims=claims, token=token))
+            tools.extend(await self._discover(server, task_id=chain.task_id, token=token))
         return tools
 
-    async def _discover(
-        self, server: UpstreamServer, *, claims: oidc.Claims, token: str
-    ) -> list[Tool]:
+    async def _discover(self, server: UpstreamServer, *, task_id: str, token: str) -> list[Tool]:
         if server.name in self._tools:
             return self._tools[server.name]
-        upstream_token = await self.upstream_token(token, server.audience, claims.task_id)
+        upstream_token = await self.upstream_token(token, server.audience, task_id)
         try:
             offered = await self.upstream.list_tools(server, upstream_token)
         except Exception as error:  # noqa: BLE001 - an upstream that will not list is reported
@@ -467,30 +486,23 @@ class Gateway:
         headers: Mapping[str, str] | None = None,
     ) -> CallToolResult:
         """Decide one tool call and, on an allow, forward it upstream."""
-        if self.mode is Mode.no_exchange:
-            chain = config.chain_from_headers(headers or {}, mode=self.mode)
-        elif claims is not None:
-            chain = Chain(
-                sub=claims.sub,
-                act=claims.act.sub,
-                task_id=claims.task_id or "",
-                scopes=list(claims.scope),
-                groups=list(claims.groups),
-                token_exp=datetime.fromtimestamp(claims.exp, tz=UTC),
-            )
-        else:
-            return self._refuse(name, "no verified token reached the gateway")
-
-        # The ledger and every run record are keyed by task id, so a token
-        # without one cannot be decided against provenance at all.
+        chain, refusal = self._chain_for(claims=claims, headers=headers)
+        if chain is None:
+            return self._refuse(name, refusal)
         if not chain.task_id:
-            return self._refuse(name, "token carries no task id")
+            return self._refuse(name, "token carries no task id", chain)
+        if bad_task_id(chain.task_id):
+            # The task id names the run directory and the ledger file. A value
+            # the path sanitizer refuses would raise out of the decision log
+            # after the call had already been processed, turning a refusal into
+            # an unlogged crash.
+            return self._refuse(name, f"task id {chain.task_id!r} cannot name a run", chain)
 
         row = self.graph.tool(name)
         if row is None:
-            return self._refuse(name, f"unknown tool {name!r}")
+            return self._refuse(name, f"unknown tool {name!r}", chain)
 
-        provenance = self.ledger.get(chain.task_id)
+        provenance = self.ledger.get(chain.task_id, chain.act)
         resource_name = extract_resource(row.resource_kind, arguments)
         request = AuthzRequest(
             chain=chain,
@@ -515,7 +527,6 @@ class Gateway:
             logger.info("escalated: pending tool=%s act=%s", name, chain.act)
             return tool_result_error("escalated: pending")
 
-        upstream_started = time.monotonic()
         server = self._by_prefix.get(row.server)
         if server is None:
             # The graph names a server the deployment does not list. Fail closed
@@ -524,6 +535,10 @@ class Gateway:
                 request, [f"no upstream configured for server {row.server!r}"]
             )
         upstream_token = await self.upstream_token(token, server.audience, chain.task_id)
+        # Started after the exchange, so the number is the upstream's latency. A
+        # slow issuer and a slow upstream are different problems and the record
+        # has to be able to tell them apart.
+        upstream_started = time.monotonic()
         upstream_name = row.name
         try:
             result = await self.upstream.call_tool(server, upstream_name, arguments, upstream_token)
@@ -533,6 +548,7 @@ class Gateway:
                 decision,
                 provenance_count=len(provenance.sources),
                 upstream_ms=(time.monotonic() - upstream_started) * 1000,
+                error=f"upstream {server.name} failed: {describe_failure(error)}",
             )
             logger.warning(
                 "upstream %s failed for %s: %s", server.name, name, describe_failure(error)
@@ -540,7 +556,7 @@ class Gateway:
             return tool_result_error(f"upstream {server.name} failed: {describe_failure(error)}")
 
         if request.action_kind is READ:
-            self._record_sources(chain.task_id, result)
+            self._record_sources(chain.task_id, chain.act, result)
         self._write_log(
             name,
             decision,
@@ -549,23 +565,62 @@ class Gateway:
         )
         return result
 
-    def _record_sources(self, task_id: str, result: CallToolResult) -> None:
+    def _chain_for(
+        self, *, claims: oidc.Claims | None, headers: Mapping[str, str] | None
+    ) -> tuple[Chain | None, str]:
+        """The chain for this call, or the reason there is none.
+
+        `no-exchange` builds it from the headers the agent sends, which is the
+        ablation's dishonesty made explicit. Every other mode takes it from the
+        verified token. Both `tools/list` and `tools/call` come through here so
+        the two cannot disagree about whose call this is.
+        """
+        if self.mode is Mode.no_exchange:
+            return config.chain_from_headers(headers or {}, mode=self.mode), ""
+        if claims is None:
+            return None, "no verified token reached the gateway"
+        try:
+            chain = Chain(
+                sub=claims.sub,
+                act=claims.act.sub,
+                task_id=claims.task_id or "",
+                scopes=list(claims.scope),
+                groups=list(claims.groups),
+                token_exp=datetime.fromtimestamp(claims.exp, tz=UTC),
+            )
+        except ValueError as error:
+            # A token whose claims cannot build a chain is a malformed token, not
+            # a crash: `Chain` refuses an id that cannot name a run directory,
+            # and a refusal the caller can read beats a traceback.
+            return None, f"the token's claims cannot build a chain: {error}"
+        return chain, ""
+
+    def _record_sources(self, task_id: str, actor: str, result: CallToolResult) -> None:
         payload = payload_of(result)
         for block, record in extract_sources(payload):
-            self.ledger.record(task_id, as_source(block, record))
+            self.ledger.record(task_id, actor, as_source(block, record))
 
     # Decisions the gateway makes itself, and logging -----------------------
 
-    def _refuse(self, tool: str, reason: str) -> CallToolResult:
+    def _refuse(self, tool: str, reason: str, chain: Chain | None = None) -> CallToolResult:
+        """Refuse a call the gateway itself rejects, and record that it did.
+
+        This runs before the engine, so there is no `Decision`. The line still
+        goes to the task's `gateway.jsonl` when the call named a task, because
+        the spec asks for one line per call and "the gateway refused this" is
+        the outcome a reader most needs to see. A refusal that names no task
+        (no token at all) can only go to the process log.
+        """
         self._write_line(
             tool=tool,
             verdict=Verdict.deny.value,
             policy_ids=[],
-            sub="",
-            act="",
-            task_id="",
+            sub=chain.sub if chain else "",
+            act=chain.act if chain else "",
+            task_id=chain.task_id if chain else "",
             provenance_count=0,
             upstream_ms=0.0,
+            error=reason,
         )
         logger.info("refused %s before evaluation: %s", tool, reason)
         return tool_result_error(reason)
@@ -593,7 +648,13 @@ class Gateway:
         return tool_result_error(text)
 
     def _write_log(
-        self, tool: str, decision: Decision, *, provenance_count: int, upstream_ms: float
+        self,
+        tool: str,
+        decision: Decision,
+        *,
+        provenance_count: int,
+        upstream_ms: float,
+        error: str = "",
     ) -> None:
         request = decision.request
         self._write_line(
@@ -605,6 +666,7 @@ class Gateway:
             task_id=request.chain.task_id,
             provenance_count=provenance_count,
             upstream_ms=upstream_ms,
+            error=error,
         )
 
     def _write_line(
@@ -618,7 +680,15 @@ class Gateway:
         task_id: str,
         provenance_count: int,
         upstream_ms: float,
+        error: str = "",
     ) -> None:
+        """One line per call. `error` is what went wrong after the verdict.
+
+        The verdict is the decision and the error is the outcome, so an allowed
+        call whose upstream failed is `allow` with an error rather than a second
+        verdict. `error` is absent from a line that has none, so the nine keys
+        the spec names are the ones a clean call carries.
+        """
         record = {
             "ts": self._now().isoformat().replace("+00:00", "Z"),
             "tool": tool,
@@ -630,6 +700,8 @@ class Gateway:
             "provenance_count": provenance_count,
             "upstream_ms": round(upstream_ms, 3),
         }
+        if error:
+            record["error"] = error
         if not task_id:
             logger.info(json.dumps(record, sort_keys=True))
             return

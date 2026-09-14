@@ -41,16 +41,22 @@ EFFORTS = ("off", "low", "high", "max")
 # any other character is refused with a 400 before the request is considered.
 # The gateway re-exports tools as `gitea.get_issue`, so the dot has to be
 # encoded before it goes on the wire and decoded when the model asks for it.
-WIRE_SAFE = re.compile(r"[A-Za-z0-9_-]")
+#
+# `_` is deliberately not in this class. It is the escape character, so leaving
+# it literal makes the codec non-injective: with `_` safe, `db.public.orders`
+# and a second tool literally named `db.public_2e_orders` both encode to
+# `db_2e_public_2e_orders`, one of them becomes unreachable, and the other
+# answers calls the model aimed at it. Escaping `_` is what makes every escape
+# unambiguous.
+WIRE_SAFE = re.compile(r"[A-Za-z0-9-]")
 
 
 def encode_tool_name(name: str) -> str:
     """An endpoint-safe spelling of a tool name, injective on any name.
 
-    A character outside the endpoint's grammar becomes `_<hex codepoint>_`.
-    `_` is itself encoded, because leaving it literal would let a tool named
-    `a_x2e_b` collide with `a.b`; every escape therefore starts at an
-    underscore and ends at the next one, so decoding is unambiguous.
+    A character outside the endpoint's grammar becomes `_<hex codepoint>_`, and
+    `_` is outside it too, so every escape starts at an underscore and ends at
+    the next one. Two different names never share a wire name.
     """
     encoded: list[str] = []
     for char in name:

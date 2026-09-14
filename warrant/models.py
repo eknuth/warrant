@@ -15,8 +15,15 @@ and the grader read it without a model in the loop.
 from __future__ import annotations
 
 from enum import StrEnum
+from re import compile as re_compile
 
 from pydantic import AwareDatetime, BaseModel, Field, computed_field, model_validator
+
+# The characters a task id may keep when it becomes a directory name. The rule
+# itself lives in `warrant.config.task_dir`, which this module cannot import:
+# `config` imports this one. `tests/test_warrant_config.py` pins the two to each
+# other, so a change there that is not made here fails rather than drifting.
+_UNSAFE_TASK_ID = re_compile(r"[^A-Za-z0-9._-]")
 
 
 class Tier(StrEnum):
@@ -76,6 +83,25 @@ class Chain(BaseModel):
     scopes: list[str] = Field(default_factory=list)
     groups: list[str] = Field(default_factory=list)
     token_exp: AwareDatetime
+
+    @model_validator(mode="after")
+    def _task_id_can_name_a_run(self) -> Chain:
+        """A task id the run layout refuses is refused here, at the boundary.
+
+        The task id becomes a directory name, and `task_dir` raises on a value
+        that cannot name one. The gateway builds this from a token claim, so a
+        token with `task_id: "."` used to raise out of the decision log long
+        after the call was accepted: an unlogged crash instead of a refusal.
+        Refusing the chain applies the same rule where the claim enters.
+
+        An empty task id is not refused here. It cannot name a directory either,
+        but it means "the token carried no task id", which is a different answer
+        with a different refusal, and the gateway says so before it gets this
+        far.
+        """
+        if self.task_id and set(_UNSAFE_TASK_ID.sub("_", self.task_id)) <= {"."}:
+            raise ValueError(f"task id {self.task_id!r} cannot name a run directory")
+        return self
 
 
 class Source(BaseModel):
