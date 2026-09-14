@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -334,3 +335,37 @@ async def test_an_error_that_does_not_name_the_reasoning_field_is_not_retried() 
         await provider.run([Turn(role="user", text="Find the port.")], TOOLS)
 
     assert len(transport.requests) == 1
+
+
+def test_a_gateway_tool_name_round_trips_through_the_wire_encoding() -> None:
+    """The endpoint's grammar has no dot, and the gateway's names do."""
+    from agents.providers.openai_compat import decode_tool_name, encode_tool_name
+
+    for name in (
+        "gitea.get_issue",
+        "gitea.create_issue_comment",
+        "db.search_customers",
+        "mail.send_reply",
+        "a_x2e_b",
+        "_leading",
+        "trailing_",
+    ):
+        encoded = encode_tool_name(name)
+
+        assert re.fullmatch(r"[A-Za-z0-9_-]+", encoded), encoded
+        assert decode_tool_name(encoded) == name
+
+
+def test_the_wire_tools_carry_the_encoded_name() -> None:
+    from agents.providers.openai_compat import decode_tool_name, wire_tools
+
+    schema = ToolSchema(
+        name="gitea.get_issue",
+        description="Read one issue.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    entry = wire_tools([schema])[0]["function"]
+
+    assert "." not in entry["name"]
+    assert decode_tool_name(entry["name"]) == "gitea.get_issue"
