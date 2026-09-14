@@ -61,6 +61,13 @@ def lint_target_exists(project: Path) -> bool:
     the two apart. Without this, `make lint` on a project that has not defined
     the target yet exits non-zero and the hook reports red lint for work that was
     never linted.
+
+    The annotation is not always on its own line: some make builds join the
+    target line with the first comment (`lint: #  Phony target ...`), so the
+    window starts at the target line and is read as a whole. A fixed short
+    window misses the annotation in that layout and reports a project with a
+    lint target as having none, so this hook silently stopped checking lint
+    rather than failing loudly.
     """
     try:
         proc = subprocess.run(
@@ -75,8 +82,8 @@ def lint_target_exists(project: Path) -> bool:
     lines = proc.stdout.splitlines()
     for index, line in enumerate(lines):
         if line.startswith("lint:"):
-            annotation = " ".join(lines[index : index + 6])
-            return "has been updated" in annotation and "has not been updated" not in annotation
+            window = " ".join(lines[index : index + 20])
+            return "has been updated" in window and "has not been updated" not in window
     return False
 
 

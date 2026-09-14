@@ -37,7 +37,11 @@ next step. `docs/decisions/` holds the decisions behind this setup.
 - The orchestrator session owns Linear: it comments on the issue, moves its state, and posts the
   project status update. Implementer and reviewer children never write to Linear, never push, and
   never open a pull request; the orchestrator does those when `make test` and `make lint` pass.
-  Ed merges.
+- When the branch is rebased and `make test` and `make lint` pass, the orchestrator merges its own
+  pull request with `gh pr merge --merge --delete-branch`, pulls `main`, moves the issue to Done,
+  and comments the pull request link on the issue. Ed reviews after the merge and files follow-ups
+  as issues. The `guard_merge.py` hook is what enforces the three conditions, so an attempt to merge
+  out of order is refused with the reason rather than noticed afterwards.
 - Every pull request body carries `Closes EDW-<n>`, so the issue closes when the pull request
   lands.
 - Edit a Linear description only with an append or a targeted patch, never a full replace. A save
@@ -86,10 +90,11 @@ The profile, the hooks, and the skills below are the project's own extension poi
   reproducible; the live copies under `$DSH_HOME` are generated, so edit `infra/dsh/core.patch.yml`
   and `infra/dsh/web.patch.yml` and reinstall.
 - `AGENTS.md` (this file) is loaded by the `agent-instructions` plugin.
-- `.dsh/hooks.json` names four command hooks in `.dsh/hooks/`. They block a commit that stages
+- `.dsh/hooks.json` names five command hooks in `.dsh/hooks/`. They block a commit that stages
   `.env` or adds a key-shaped line, refuse two runs at once, refuse a parked results column at
-  three levels, and warn when lint is red after a commit. They run in the session workspace and
-  read the diff of the repository a commit actually lands in, including a `git -C <path>` target.
+  three levels, refuse a `gh pr merge` whose branch is not rebased, clean, and green, and warn when
+  lint is red after a commit. They run in the session workspace and read the repository the command
+  actually acts on, including a `git -C <path>` target or a `cd` before it.
 - `.agents/skills/` holds the project skills. `skill-filesystem` discovers them from the project
   root, so they ship with the repository and need no profile change.
 - `scripts/dsh_run.py` runs one issue headlessly through the SDK and records the cost to
