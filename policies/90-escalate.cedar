@@ -20,11 +20,19 @@
 // reproduces neither of their shapes, and the first two conditions below
 // refuse it outright when either rule applies beside an escalatable one.
 //
-// The target shift branch reads provenance, so it states the `count > 0` the
-// policy set requires of any permit that does. `hasExternal` cannot be true on
-// an empty set, so the count is a second reading of the same ground rather than
-// a new condition. The scope branch does not read provenance and does not ask
-// for it: a scope collapse is escalatable in a task that has read nothing.
+// The target shift branch reads provenance, so it states `count > 0`, which the
+// ticket requires of any permit written on a tier or on the absence of external
+// content. `hasExternal` cannot be true on an empty set, so the count is a
+// second reading of the same ground rather than a new condition. This is the
+// only permit in the set that reads provenance; the baseline permit does not, so
+// the rule is stated where it applies rather than as a property of the set. The
+// scope branch does not read provenance and does not ask for it: a scope
+// collapse is escalatable in a task that has read nothing.
+//
+// `incident_id` is the record that this work is an incident and not routine. No
+// client scope mints it today, so this permit cannot fire on the running stack
+// until one does. That is recorded in docs/policies.md rather than worked
+// around here.
 
 @id("escalate-incident")
 permit(principal, action == Action::"escalate", resource)

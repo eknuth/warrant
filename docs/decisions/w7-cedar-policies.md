@@ -28,13 +28,17 @@ present, which every deployment has. A test asserts that a deliberately broken p
 Ed's scope-collapse rule says a permit must narrow the token's scopes to the human in `sub` against
 the access graph, and must not use the agent's owner as the human. The permit reads
 `context.onBehalfOf.entitledTools`, which the engine computes as the union of `allowed_tools` over
-the agents that human owns. It also allows a call on a resource the human owns, and that branch does
-not require the tool to be in the agent's allowlist. Ownership is a separate grant of authority, and
-the provenance rules are what refuse a tainted change to a resource the caller owns. The alternative
-reading, where ownership only widens the human check while the agent's allowlist stays the outer
-gate, would make the visibility scenario unreachable: no agent in the seed holds
-`gitea.set_repo_visibility`, so the rule that refuses a tainted visibility change would never be
-denied by that rule, only by the default deny, and its `@id` would never appear in a decision.
+the agents that human owns. It also allows a call on a resource the human owns through an agent the
+same human owns, and that branch does not require the tool to be in the agent's allowlist. Both
+halves of the ownership are required. The first draft matched the resource owner alone, which let
+one person drive another person's agent against their own property and reach a tool that agent never
+carried; a test pins the shipped set refusing that and the widened shape allowing it. Ownership is a
+separate grant of authority, and the provenance rules are what refuse a tainted change to a resource
+the caller owns. The alternative reading, where ownership only widens the human check while the
+agent's allowlist stays the outer gate, would make the visibility scenario unreachable: no agent in
+the seed holds `gitea.set_repo_visibility`, so the rule that refuses a tainted visibility change
+would never be denied by that rule, only by the default deny, and its `@id` would never appear in a
+decision.
 
 ## Escalation is written twice
 
@@ -74,11 +78,18 @@ name.
 ## The escalation group comes from the token
 
 The ticket writes the escalation group check against `context.onBehalfOf`. The rule reads
-`context.groups`, the verified token's group claim. The identity provider records membership under
-those names and that claim is what the gateway verified, while the graph seed records different
-group names for the same people. The two sources disagree, and the token is the one that carries the
-names the rule is about. The graph remains the authority for the agent's `allowed_tools`, which is
-what `entitledTools` uses.
+`context.groups`, the verified token's group claim. Each of the realm's OBO client scopes carries a
+group-membership mapper with `full.path: false`, so the exchanged token carries `groups: ["owners"]`
+and `["engineers"]` rather than Keycloak's `/owners` path form, and the two names the rule tests are
+the two the token holds. The graph seed records different group names for the same people
+(`engineering`, `support`), so the rule reads the claim rather than the graph attribute. The graph
+remains the authority for the agent's `allowed_tools`, which is what `entitledTools` uses.
+
+Two group-shaped conditions have no definition in the stack. `support-leads`, the `wrong-subject`
+exemption, is in no realm group and no graph row, so it is a knob an operator grants rather than a
+path the seed exercises. `incident_id`, the escalate permit's scope, is minted by no client scope, so
+the permit is false for every real token. Both are recorded in `docs/policies.md` under what the
+running stack can decide today, and adding them is realm work rather than a policy change.
 
 ## What the two provenance rules miss
 

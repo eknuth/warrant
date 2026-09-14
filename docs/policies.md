@@ -67,12 +67,14 @@ task has read external material or carries external text.
 
 ## `40-exfil.cedar`
 
-The exfil rule. The argument scan sets `argsTouchSecret` when a write carries a value the task read
-from the key table or from a file whose name says it holds secrets, and this rule forbids the two
-tools that put text in front of somebody outside the task. The ticket named a reply tool for the
-mail side. This graph has one mail send tool, and a policy that names an action the generated schema
-does not declare fails validation at load, so the rule names the tool the graph holds. When a reply
-tool lands and the graph gains its row, this line gains the name.
+The exfil rule. W11 computes `argsTouchSecret` when a write carries a value the
+task read from the key table or from a file whose name says it holds secrets, and
+this rule forbids the two tools that put text in front of somebody outside the
+task. The field is false today, so the rule is written and waiting; see the
+section above. The ticket named a reply tool for the mail side. This graph has
+one mail send tool, and a policy that names an action the generated schema does
+not declare fails validation at load, so the rule names the tool the graph holds.
+When a reply tool lands and the graph gains its row, this line gains the name.
 
 ## `50-ownership.cedar`
 
@@ -97,6 +99,48 @@ record that this work is an incident and not routine. Orphan never escalates, be
 also matches the escalate action and a forbid beats every permit. Content and exfil never escalate,
 because the permit refuses itself when `overlapExternal` or `argsTouchSecret` is set, and neither
 shape is reproduced in the permit.
+
+## What the running stack can decide today
+
+The set is written, and not all of it can fire yet. Saying which parts can is
+the difference between a policy set and a claim about one.
+
+Decided today, from inputs the engine or the token provides: `permit-baseline`,
+`orphan-agent`, `scope-collapse`, `wrong-subject`, and `tainted-visibility`,
+whose `hasExternal` comes from the provenance ledger the gateway fills as it
+forwards reads. `tainted-visibility` is the one provenance rule that decides
+anything now, and it is what refuses a visibility change or a confidential read
+after an external read.
+
+Waiting on W11, which computes the argument scan and the content-taint overlap:
+`tainted-write` reads `targetOutsideTask`, `tainted-content` reads
+`overlapExternal`, and `secret-in-args` reads `argsTouchSecret`. All three
+default to false, and the gateway does not set them, so those fields currently
+say "no taint found" rather than "no taint exists". That direction is the
+permissive one, which is the opposite of deny-safe, so until W11 lands the
+containment against a target shift, a paraphrased injection, or a secret in the
+arguments is the ordinary allowlist and the ownership rule rather than these
+three forbids.
+
+Waiting on a scope the realm does not mint: `escalate-incident` requires an
+`incident_id` scope. No client scope carries that name today, so the permit is
+false for every real token and escalation has no live path. The scope is the
+record that a task is an incident rather than routine, and it belongs in the
+realm with the other optional scopes.
+
+Waiting on a group nobody holds: `wrong-subject` exempts a caller in
+`support-leads`. The realm defines `owners` and `engineers` and its OBO client
+scopes emit them into the token with `full.path: false`, so those two names work
+as written, and the escalation group check is live for the people who hold them.
+`support-leads` is defined nowhere, so the exemption is a knob an operator
+grants by adding the group to a person, not a path the seed exercises.
+
+One consequence of the last point is worth stating: `wrong-subject` refuses
+every `db.*` or `mail.*` call whose resource the caller does not own, and a
+recipient the graph does not know resolves to a sentinel-owned resource. A send
+to an address outside the task is therefore refused today by `wrong-subject`,
+not by `secret-in-args`. The containment is real and it comes from resource
+ownership rather than from the exfil rule written for it.
 
 ## The scenarios
 
