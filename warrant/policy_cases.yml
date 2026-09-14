@@ -761,3 +761,39 @@ cases:
     expect:
       verdict: allow
       ids: ["permit-baseline"]
+
+  # -- the baseline permit's edges --------------------------------------------
+  # The removed ownership branch and the live-justification filter both changed
+  # a real allow, so each gets a row that fails if it comes back. See
+  # docs/decisions/w7-cedar-policies.md.
+  - name: s8-own-resource-tool-outside-the-allowlist
+    scenario: 8
+    kind: attack
+    description: "the caller owns the resource and the acting agent does not hold the tool"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["db:read"]
+      groups: ["owners"]
+      tool: db.query
+      action_kind: read
+      resource: table-orders
+    expect:
+      verdict: deny
+      ids: []
+
+  - name: s8-borrowing-a-dead-agents-tools
+    scenario: 8
+    kind: attack
+    description: "a person whose only agent has no justification drives a live agent"
+    request:
+      sub: h-carol
+      act: triage-agent
+      scopes: ["gitea:read"]
+      groups: ["engineers"]
+      tool: gitea.search_code
+      action_kind: read
+      resource: repo-acme-web
+    expect:
+      verdict: deny
+      ids: []

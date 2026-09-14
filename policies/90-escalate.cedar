@@ -40,9 +40,12 @@
 // denial no scope widening could fix, because an agent asked for a tool it does
 // not hold, the scope rule refused it, and the record offered a human "denied
 // by: scope-collapse" for a call the graph never allowed. And it refuses itself
-// when the quiet control's own ground holds, so a visibility change or a
-// confidential read on a task that read external material is never answered by a
-// person even though the request also collapses a scope.
+// when the visibility rule's own ground holds, so a repository made public on a
+// task that read external material is never answered by a person even though the
+// request also collapses a scope. Only the visibility half of that rule can
+// reach this permit: both escalatable shapes require a write or a send, and a
+// read is never refused by the scope rule, so the confidential-read half is
+// already out of reach.
 
 @id("escalate-incident")
 permit(principal, action == Action::"escalate", resource)
@@ -54,10 +57,7 @@ when {
   !context.argsTouchSecret &&
   !context.provenance.overlapExternal &&
   !(
-    (
-      context.tool == "gitea.set_repo_visibility" ||
-      (context.actionKind == "read" && resource.sensitivity == "confidential")
-    ) &&
+    context.tool == "gitea.set_repo_visibility" &&
     (context.provenance.hasExternal || context.provenance.overlapExternal)
   ) &&
   context.taskScopes.contains("incident_id") &&

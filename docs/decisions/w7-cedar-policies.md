@@ -55,8 +55,15 @@ human matched, and the full policy set refused every call of the recorded W6 smo
 line per user in `infra/keycloak/warrant-realm.json`: alice is `h-alice` and bob is `h-bob`, the ids
 `infra/graph.yml` already keys them by. `mallory` keeps a generated id, because the graph has no row
 for the attacker and an unregistered caller is meant to resolve to nothing.
-`tests/test_realm.py` holds the two trees to the same key, which is the check that would have caught
-the mismatch before a reviewer had to replay a run to find it.
+`tests/test_realm.py` holds the two trees to the same key, both directions, which is the check that
+would have caught the mismatch before a reviewer had to replay a run to find it.
+
+The import sets the id only when the realm is created. A Keycloak volume that already ran W6 keeps
+the old generated ids, so a stack that has been up since before this change needs `make reset` to
+reimport the realm. Nothing in the policies can fix that; it is a property of the local volume.
+
+Carol has a graph row and no realm user, so she cannot get a token. That is pre-existing and fails
+closed: a scenario that needs her to authenticate is realm work, not policy work.
 
 ## Escalation is written twice
 
@@ -79,7 +86,9 @@ acting agent could never make, because the scope rule refuses a tool the allowli
 widening by a person can change that; the permit now requires the baseline's non-scope conditions.
 And it escalated a tainted visibility change, because the scope branch reproduced the scope rule's
 shape and the request also matched the quiet-control rule; the permit now refuses itself when that
-rule's ground holds. Both properties have table rows or tests.
+rule's ground holds, which for an escalatable request means the visibility half, because both
+escalatable shapes require a write or a send and a read is never refused by the scope rule. Both
+properties have table rows or tests.
 
 The baseline permit is scoped to the three kinds so it does not reach the escalate action. Before
 that scope was added, every denial escalated because the permit matched the escalate pass, and the

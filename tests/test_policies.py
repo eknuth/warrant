@@ -480,8 +480,10 @@ def test_ownership_does_not_let_one_person_drive_anothers_agent(
     against their own property and reach a tool that agent's allowlist never
     carried. This is the confused deputy the policy set exists to refuse.
 
-    Both halves are asserted: the shipped set refuses it, and a permit with the
-    old shape allows it, so the test fails if the branch is ever widened back.
+    Both the shipped set and the old shape are asserted, so the control shows the
+    defect this replaced. The regression pin is the table row
+    `s8-own-resource-tool-outside-the-allowlist`, which fails if a branch like
+    that comes back through the real files.
     """
     # `triage-agent` is alice's, and `mailbox-support` is bob's. Bob invokes
     # alice's agent against his own mailbox, reaching a tool that agent does not
@@ -558,7 +560,9 @@ def test_every_rule_the_table_names_is_load_bearing(tmp_path: Path) -> None:
     found to be refused by the entitlement check rather than by the taint rule.
 
     A permit is load bearing in the other direction: dropping it has to turn the
-    allow into a refusal.
+    allow into a refusal. The check is over the row's named rules together, which
+    is what the table asserts; a rule's own behavior is pinned by the row's
+    expected id and, for the two provenance rules, by the isolation tests.
     """
     rules = _policy_rules_by_id()
 
@@ -589,11 +593,13 @@ def test_every_rule_the_table_names_is_load_bearing(tmp_path: Path) -> None:
             )
             continue
 
-        if set(case.ids) & REDUNDANT_WITH_THE_PERMIT:
+        if set(case.ids) == REDUNDANT_WITH_THE_PERMIT:
             # The baseline permit's own conditions refuse these calls, so
             # dropping the rule cannot flip the verdict. That is a finding about
             # the set rather than about the row, and it is pinned here so the
-            # redundancy is visible instead of excused.
+            # redundancy is visible instead of excused. The carve-out is the
+            # exact redundant set, so a row that names it beside another rule
+            # still has to flip when that other rule is dropped.
             assert result.decision.verdict.value == "deny"
             assert result.decision.policy_ids == []
             continue
@@ -679,3 +685,38 @@ def test_escalation_does_not_answer_a_tainted_visibility_change(
     assert decision.verdict is Verdict.deny
     assert "tainted-visibility" in decision.policy_ids
     assert "escalate-incident" not in decision.policy_ids
+
+
+def test_a_table_row_cannot_pass_on_an_engine_error(tmp_path: Path) -> None:
+    """A request the schema cannot parse must not satisfy a `deny []` row.
+
+    Cedar reports a request that fails schema parsing as a deny with no policy
+    id, which is exactly what the default-deny rows expect. Without the reason
+    check a typo in a tool name passes a row that is meant to prove a policy
+    refused the call.
+    """
+    broken = PolicyCase(
+        name="a-tool-the-schema-does-not-declare",
+        scenario="8",
+        kind="attack",
+        description="a request that cannot be evaluated",
+        request={
+            "sub": "h-alice",
+            "act": "triage-agent",
+            "tool": "gitea.frobnicate",
+            "action_kind": "read",
+            "resource": "repo-acme-api",
+        },
+        verdict="deny",
+        ids=(),
+    )
+    with load_graph(SEED, tmp_path / "warrant.db") as graph:
+        loaded = CedarEngine(
+            policies_dir=POLICIES, graph=graph, decision_log=DecisionLog(tmp_path / "runs")
+        )
+        result = run_case(broken, loaded)
+
+    assert result.decision.verdict.value == "deny"
+    assert result.decision.policy_ids == []
+    assert result.decision.reasons, "an unevaluated request has to say so"
+    assert not result.ok, "a row may not pass on a request no policy evaluated"

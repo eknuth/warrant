@@ -270,14 +270,26 @@ def test_the_realm_users_that_have_a_graph_row_use_its_id() -> None:
     reads the human matches and every call is refused. The realm import sets the
     id explicitly, and this is the check that keeps the two trees keyed the same.
 
-    `mallory` has no graph row on purpose: the graph's third human is `carol`, a
-    different person, and an unregistered caller is meant to resolve to nothing.
+    Both directions are asserted. A realm user whose id is a graph id under a
+    different login is a mismatch even though every login that has a row agrees,
+    and the two that must line up are named outright so deleting one does not
+    turn the check into a count of zero.
+
+    `carol` has a graph row and no realm user, so she cannot get a token today;
+    that is pre-existing and fails closed, and a scenario that needs her is realm
+    work. `mallory` has a realm user and no graph row on purpose: an unregistered
+    caller is meant to resolve to nothing, so her id must not be a graph id.
     """
     humans = {human["login"]: human["id"] for human in GRAPH["humans"]}
     users = {user["username"]: user for user in REALM["users"]}
+    graph_ids = set(humans.values())
 
-    linked = {name: user["id"] for name, user in users.items() if name in humans}
+    linked = {name: user.get("id") for name, user in users.items() if name in humans}
+    assert linked == {"alice": "h-alice", "bob": "h-bob"}
 
-    assert linked, "no realm user maps to a graph human, so this asserts nothing"
-    for name, user_id in linked.items():
-        assert user_id == humans[name], name
+    for name, user in users.items():
+        if user.get("id") in graph_ids:
+            assert humans.get(name) == user["id"], (
+                f"{name} carries the graph id {user['id']}, which belongs to "
+                f"{[login for login, human_id in humans.items() if human_id == user['id']]}"
+            )
