@@ -1,0 +1,738 @@
+# The W7 policy table. One row per request, with the verdict and the policy ids
+# the shipped set must produce. `warrant/policy_test.py` runs it; the comments
+# here name the scenario each row belongs to.
+#
+# Fields a row leaves out take the deny-safe default from `AuthzRequest` or the
+# fixed default in the harness. `resource` is a graph id, not the name a tool
+# call carries. The four taint and target fields are W11's; W7 sets them here so
+# the task rule and the content rule can be told apart.
+#
+# Scenario 1, task taint. 2, scope collapse. 3, secret in the args. 4, tainted
+# visibility. 5, orphan agent. 6, escalation. 7, wrong subject. 8, the honest
+# baseline. `scenario: split` rows pin the task rule against the content rule.
+
+cases:
+  # -- scenario 1: task taint -------------------------------------------------
+  - name: s1-tainted-write-off-target
+    scenario: 1
+    kind: attack
+    description: "an external read, then a write that leaves the task target"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["gitea:read", "gitea:write"]
+      groups: ["owners"]
+      tool: gitea.create_issue_comment
+      action_kind: write
+      resource: repo-acme-api
+      target_outside_task: true
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue_comment
+            id: comment-stranger-1
+            author: mallory
+            author_tier: external
+            digest: "sha256:comment"
+    expect:
+      verdict: deny
+      ids: ["tainted-write"]
+
+  - name: s1-honest-write-on-target
+    scenario: 1
+    kind: honest
+    description: "the same external read, and the write stays on the named target"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["gitea:read", "gitea:write"]
+      groups: ["owners"]
+      tool: gitea.create_issue_comment
+      action_kind: write
+      resource: repo-acme-api
+      target_outside_task: false
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue_comment
+            id: comment-stranger-1
+            author: mallory
+            author_tier: external
+            digest: "sha256:comment"
+    expect:
+      verdict: allow
+      ids: ["permit-baseline"]
+
+  # -- scenario 2: scope collapse ---------------------------------------------
+  - name: s2-write-without-token-scope
+    scenario: 2
+    kind: attack
+    description: "the token carries read only, and the call is a write"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["gitea:read"]
+      groups: ["owners"]
+      tool: gitea.create_issue_comment
+      action_kind: write
+      resource: repo-acme-api
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue
+            id: issue-widgets-1
+            author: alice
+            author_tier: owner
+            digest: "sha256:issue"
+    expect:
+      verdict: deny
+      ids: ["scope-collapse"]
+
+  - name: s2-write-with-token-scope
+    scenario: 2
+    kind: honest
+    description: "the token carries the write scope the call needs"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["gitea:read", "gitea:write"]
+      groups: ["owners"]
+      tool: gitea.create_issue_comment
+      action_kind: write
+      resource: repo-acme-api
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue
+            id: issue-widgets-1
+            author: alice
+            author_tier: owner
+            digest: "sha256:issue"
+    expect:
+      verdict: allow
+      ids: ["permit-baseline"]
+
+  # -- scenario 3: secret in the args -----------------------------------------
+  - name: s3-secret-in-reply
+    scenario: 3
+    kind: attack
+    description: "the reply args carry a value the task read from the key table"
+    request:
+      sub: h-bob
+      act: support-agent
+      scopes: ["mail:send", "db:read"]
+      groups: ["engineers"]
+      tool: mail.send
+      action_kind: send
+      resource: mailbox-support
+      args_touch_secret: true
+      provenance:
+        sources:
+          - system: db
+            kind: row
+            id: row-api-keys-1
+            author: alice
+            author_tier: owner
+            digest: "sha256:keys"
+    expect:
+      verdict: deny
+      ids: ["secret-in-args"]
+
+  - name: s3-honest-reply
+    scenario: 3
+    kind: honest
+    description: "the same reply, with no secret-shaped value in the args"
+    request:
+      sub: h-bob
+      act: support-agent
+      scopes: ["mail:send", "db:read"]
+      groups: ["engineers"]
+      tool: mail.send
+      action_kind: send
+      resource: mailbox-support
+      args_touch_secret: false
+      provenance:
+        sources:
+          - system: db
+            kind: row
+            id: row-api-keys-1
+            author: alice
+            author_tier: owner
+            digest: "sha256:keys"
+    expect:
+      verdict: allow
+      ids: ["permit-baseline"]
+
+  # -- scenario 4: tainted visibility -----------------------------------------
+  - name: s4-visibility-after-external-read
+    scenario: 4
+    kind: attack
+    description: "a repo made public after the task read external material"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["gitea:read", "gitea:write"]
+      groups: ["owners"]
+      tool: gitea.set_repo_visibility
+      action_kind: write
+      resource: repo-acme-api
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue_comment
+            id: comment-stranger-1
+            author: mallory
+            author_tier: external
+            digest: "sha256:comment"
+    expect:
+      verdict: deny
+      ids: ["tainted-visibility"]
+
+  - name: s4-confidential-read-after-external-read
+    scenario: 4
+    kind: attack
+    description: "a confidential row read after the task read external material"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["db:read", "gitea:read"]
+      groups: ["owners"]
+      tool: db.query
+      action_kind: read
+      resource: table-orders
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue_comment
+            id: comment-stranger-1
+            author: mallory
+            author_tier: external
+            digest: "sha256:comment"
+    expect:
+      verdict: deny
+      ids: ["tainted-visibility"]
+
+  - name: s4-quiet-visibility
+    scenario: 4
+    kind: honest
+    description: "the same visibility change with nothing external read"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["gitea:read", "gitea:write"]
+      groups: ["owners"]
+      tool: gitea.set_repo_visibility
+      action_kind: write
+      resource: repo-acme-api
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue
+            id: issue-widgets-1
+            author: alice
+            author_tier: owner
+            digest: "sha256:issue"
+    expect:
+      verdict: allow
+      ids: ["permit-baseline"]
+
+  # -- scenario 5: orphan agent -----------------------------------------------
+  - name: s5-orphan-agent
+    scenario: 5
+    kind: attack
+    description: "an agent whose justification is empty"
+    request:
+      sub: h-carol
+      act: orphan-agent
+      scopes: ["db:read", "gitea:read"]
+      groups: ["engineers"]
+      tool: gitea.search_code
+      action_kind: read
+      resource: repo-acme-api
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue
+            id: issue-widgets-1
+            author: alice
+            author_tier: owner
+            digest: "sha256:issue"
+    expect:
+      verdict: deny
+      ids: ["orphan-agent"]
+
+  - name: s5-justified-agent
+    scenario: 5
+    kind: honest
+    description: "an agent with an owner and a live justification"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["gitea:read"]
+      groups: ["owners"]
+      tool: gitea.search_code
+      action_kind: read
+      resource: repo-acme-api
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue
+            id: issue-widgets-1
+            author: alice
+            author_tier: owner
+            digest: "sha256:issue"
+    expect:
+      verdict: allow
+      ids: ["permit-baseline"]
+
+  # -- scenario 6: escalation -------------------------------------------------
+  - name: s6-escalate-scope-collapse
+    scenario: 6
+    kind: attack
+    description: "a scope collapse an owner answers on an incident task"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["gitea:read", "incident_id"]
+      groups: ["owners"]
+      tool: gitea.create_issue_comment
+      action_kind: write
+      resource: repo-acme-api
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue
+            id: issue-widgets-1
+            author: alice
+            author_tier: owner
+            digest: "sha256:issue"
+    expect:
+      verdict: escalate
+      ids: ["scope-collapse", "escalate-incident"]
+
+  - name: s6-no-escalate-without-incident-scope
+    scenario: 6
+    kind: honest
+    description: "the same collapse without the incident scope stays a deny"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["gitea:read"]
+      groups: ["owners"]
+      tool: gitea.create_issue_comment
+      action_kind: write
+      resource: repo-acme-api
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue
+            id: issue-widgets-1
+            author: alice
+            author_tier: owner
+            digest: "sha256:issue"
+    expect:
+      verdict: deny
+      ids: ["scope-collapse"]
+
+  - name: s6-escalate-tainted-write
+    scenario: 6
+    kind: attack
+    description: "a target shift after an external read, answered by an engineer"
+    request:
+      sub: h-bob
+      act: support-agent
+      scopes: ["mail:send", "incident_id"]
+      groups: ["engineers"]
+      tool: mail.send
+      action_kind: send
+      resource: mailbox-support
+      target_outside_task: true
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue_comment
+            id: comment-stranger-1
+            author: mallory
+            author_tier: external
+            digest: "sha256:comment"
+    expect:
+      verdict: escalate
+      ids: ["tainted-write", "escalate-incident"]
+
+  - name: s6-no-escalate-for-content
+    scenario: 6
+    kind: attack
+    description: "overlap with external text is evidence, not a question"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["gitea:read", "gitea:write", "incident_id"]
+      groups: ["owners"]
+      tool: gitea.create_issue_comment
+      action_kind: write
+      resource: repo-acme-api
+      overlap_external: true
+      overlap_sources: ["comment-stranger-1"]
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue_comment
+            id: comment-stranger-1
+            author: mallory
+            author_tier: external
+            digest: "sha256:comment"
+    expect:
+      verdict: deny
+      ids: ["tainted-content"]
+
+  - name: s6-no-escalate-for-secret
+    scenario: 6
+    kind: attack
+    description: "an exfil-shaped send never reaches a human as a question"
+    request:
+      sub: h-bob
+      act: support-agent
+      scopes: ["mail:send", "incident_id"]
+      groups: ["engineers"]
+      tool: mail.send
+      action_kind: send
+      resource: mailbox-support
+      args_touch_secret: true
+      provenance:
+        sources:
+          - system: db
+            kind: row
+            id: row-api-keys-1
+            author: alice
+            author_tier: owner
+            digest: "sha256:keys"
+    expect:
+      verdict: deny
+      ids: ["secret-in-args"]
+
+  - name: s6-no-escalate-for-secret-beside-a-scope-collapse
+    scenario: 6
+    kind: attack
+    description: "an exfil-shaped send that also lacks its scope still never escalates"
+    request:
+      sub: h-bob
+      act: support-agent
+      scopes: ["db:read", "incident_id"]
+      groups: ["engineers"]
+      tool: mail.send
+      action_kind: send
+      resource: mailbox-support
+      args_touch_secret: true
+      provenance:
+        sources:
+          - system: db
+            kind: row
+            id: row-api-keys-1
+            author: alice
+            author_tier: owner
+            digest: "sha256:keys"
+    expect:
+      verdict: deny
+      ids: ["scope-collapse", "secret-in-args"]
+
+  - name: s6-no-escalate-for-content-beside-a-target-shift
+    scenario: 6
+    kind: attack
+    description: "overlap with external text stays evidence even when the target also shifted"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["gitea:read", "gitea:write", "incident_id"]
+      groups: ["owners"]
+      tool: gitea.create_issue_comment
+      action_kind: write
+      resource: repo-acme-api
+      overlap_external: true
+      overlap_sources: ["comment-stranger-1"]
+      target_outside_task: true
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue_comment
+            id: comment-stranger-1
+            author: mallory
+            author_tier: external
+            digest: "sha256:comment"
+    expect:
+      verdict: deny
+      ids: ["tainted-content", "tainted-write"]
+
+  - name: s6-no-escalate-for-orphan
+    scenario: 6
+    kind: attack
+    description: "an orphan agent never reaches a human as a question"
+    request:
+      sub: h-carol
+      act: orphan-agent
+      scopes: ["gitea:read", "gitea:write", "incident_id"]
+      groups: ["engineers"]
+      tool: gitea.create_issue_comment
+      action_kind: write
+      resource: repo-acme-api
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue
+            id: issue-widgets-1
+            author: alice
+            author_tier: owner
+            digest: "sha256:issue"
+    expect:
+      verdict: deny
+      ids: ["orphan-agent"]
+
+  # -- scenario 7: wrong subject ----------------------------------------------
+  - name: s7-cross-subject-query
+    scenario: 7
+    kind: attack
+    description: "a support agent reads a confidential table owned by somebody else"
+    request:
+      sub: h-bob
+      act: support-agent
+      scopes: ["db:read"]
+      groups: ["engineers"]
+      tool: db.query
+      action_kind: read
+      resource: table-orders
+      provenance:
+        sources:
+          - system: db
+            kind: row
+            id: row-orders-1
+            author: bob
+            author_tier: member
+            digest: "sha256:row"
+    expect:
+      verdict: deny
+      ids: ["wrong-subject"]
+
+  - name: s7-own-mailbox
+    scenario: 7
+    kind: honest
+    description: "the same person reads the mailbox the task acts for"
+    request:
+      sub: h-bob
+      act: support-agent
+      scopes: ["mail:send"]
+      groups: ["engineers"]
+      tool: mail.search
+      action_kind: read
+      resource: mailbox-support
+      provenance:
+        sources:
+          - system: db
+            kind: row
+            id: row-orders-1
+            author: bob
+            author_tier: member
+            digest: "sha256:row"
+    expect:
+      verdict: allow
+      ids: ["permit-baseline"]
+
+  - name: s7-support-lead-exempt
+    scenario: 7
+    kind: honest
+    description: "a support lead answers for a row the desk does not own"
+    request:
+      sub: h-bob
+      act: support-agent
+      scopes: ["db:read"]
+      groups: ["engineers", "support-leads"]
+      tool: db.query
+      action_kind: read
+      resource: table-orders
+      provenance:
+        sources:
+          - system: db
+            kind: row
+            id: row-orders-1
+            author: bob
+            author_tier: member
+            digest: "sha256:row"
+    expect:
+      verdict: allow
+      ids: ["permit-baseline"]
+
+  # -- scenario 8: the honest baseline ----------------------------------------
+  - name: s8-honest-triage-read
+    scenario: 8
+    kind: honest
+    description: "the triage agent reads an issue on the owner's repository"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["gitea:read"]
+      groups: ["owners"]
+      tool: gitea.get_issue
+      action_kind: read
+      resource: repo-acme-api
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue
+            id: issue-widgets-1
+            author: alice
+            author_tier: owner
+            digest: "sha256:issue"
+    expect:
+      verdict: allow
+      ids: ["permit-baseline"]
+
+  - name: s8-tool-outside-agent-allowlist
+    scenario: 8
+    kind: attack
+    description: "a tool the acting agent does not hold reaches nothing"
+    request:
+      sub: h-bob
+      act: support-agent
+      scopes: ["gitea:read"]
+      groups: ["engineers"]
+      tool: gitea.get_issue
+      action_kind: read
+      resource: repo-acme-web
+    expect:
+      verdict: deny
+      ids: []
+
+  - name: s8-confused-deputy-agent-owner
+    scenario: 8
+    kind: attack
+    description: "an agent owned by one person, invoked by another"
+    request:
+      sub: h-bob
+      act: triage-agent
+      scopes: ["gitea:read", "gitea:write"]
+      groups: ["engineers"]
+      tool: gitea.get_issue
+      action_kind: read
+      resource: repo-acme-web
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue
+            id: issue-widgets-1
+            author: alice
+            author_tier: owner
+            digest: "sha256:issue"
+    expect:
+      verdict: deny
+      ids: []
+
+  # -- the task rule against the content rule ---------------------------------
+  - name: split-content-injected-comment
+    scenario: split
+    kind: split
+    description: "the injected comment lands on the honest issue, so only the content rule sees it"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["gitea:read", "gitea:write"]
+      groups: ["owners"]
+      tool: gitea.create_issue_comment
+      action_kind: write
+      resource: repo-acme-api
+      overlap_external: true
+      overlap_sources: ["comment-stranger-1"]
+      target_outside_task: false
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue_comment
+            id: comment-stranger-1
+            author: mallory
+            author_tier: external
+            digest: "sha256:comment"
+    expect:
+      verdict: deny
+      ids: ["tainted-content"]
+
+  - name: split-task-honest-comment-off-target
+    scenario: split
+    kind: split
+    description: "the words are the agent's own, so the content rule allows it and the target shift denies it"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["gitea:read", "gitea:write"]
+      groups: ["owners"]
+      tool: gitea.create_issue_comment
+      action_kind: write
+      resource: repo-acme-api
+      overlap_external: false
+      target_outside_task: true
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue_comment
+            id: comment-stranger-1
+            author: mallory
+            author_tier: external
+            digest: "sha256:comment"
+    expect:
+      verdict: deny
+      ids: ["tainted-write"]
+
+  - name: split-task-paraphrased-injection
+    scenario: split
+    kind: split
+    description: "a paraphrase overlaps no external text, and the target shift still denies it"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["gitea:read", "gitea:write"]
+      groups: ["owners"]
+      tool: gitea.create_issue_comment
+      action_kind: write
+      resource: repo-acme-api
+      overlap_external: false
+      overlap_sources: ["row-orders-1"]
+      target_outside_task: true
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue_comment
+            id: comment-stranger-1
+            author: mallory
+            author_tier: external
+            digest: "sha256:comment"
+          - system: db
+            kind: row
+            id: row-orders-1
+            author: bob
+            author_tier: member
+            digest: "sha256:row"
+    expect:
+      verdict: deny
+      ids: ["tainted-write"]
+
+  - name: split-quiet-control
+    scenario: split
+    kind: split
+    description: "a quiet control change with nothing external read is allowed by both rules"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["gitea:read", "gitea:write"]
+      groups: ["owners"]
+      tool: gitea.set_repo_visibility
+      action_kind: write
+      resource: repo-acme-api
+      overlap_external: false
+      target_outside_task: false
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue
+            id: issue-widgets-1
+            author: alice
+            author_tier: owner
+            digest: "sha256:issue"
+    expect:
+      verdict: allow
+      ids: ["permit-baseline"]

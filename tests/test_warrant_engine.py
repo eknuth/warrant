@@ -70,14 +70,21 @@ def test_an_empty_policy_set_denies(
     assert decision.policy_ids == []
 
 
-def test_the_shipped_policy_set_denies_by_default(
+def test_the_shipped_policy_set_denies_an_agent_it_cannot_vouch_for(
     make_request: Any, decision_log: DecisionLog
 ) -> None:
-    """The shipped tree permits nothing until W7 writes the policies."""
+    """With no graph there is no justification on file, so W7's orphan rule fires.
+
+    The shipped set permits a tool the agent holds only when the human in `sub`
+    is entitled to it, and the entitlement is the graph's. An engine with no
+    graph cannot answer that, so the deny is `orphan-agent`'s rather than the
+    Cedar default. Before W7 the shipped tree permitted nothing, which is the
+    same verdict for a different reason.
+    """
     decision = CedarEngine(decision_log=decision_log).decide(make_request())
 
     assert decision.verdict is Verdict.deny
-    assert decision.policy_ids == []
+    assert decision.policy_ids == ["orphan-agent"]
 
 
 def test_the_shipped_schema_parses_and_validates_the_mapping(policy_dir: Any) -> None:

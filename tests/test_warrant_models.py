@@ -70,6 +70,47 @@ def test_provenance_with_no_sources_reads_as_owner_and_not_external() -> None:
     assert provenance.sources == []
     assert provenance.min_tier is Tier.owner
     assert provenance.has_external is False
+    assert provenance.has_customer is False
+
+
+def test_provenance_computes_has_customer() -> None:
+    """Customer material is its own tier, so it is not covered by has_external."""
+    provenance = Provenance(
+        task_id="task-1",
+        sources=[
+            Source(
+                system="mail",
+                kind="message",
+                id="m1",
+                author="customer",
+                author_tier=Tier.customer,
+                digest="d1",
+            )
+        ],
+    )
+
+    assert provenance.has_customer is True
+    assert provenance.has_external is False
+
+
+def test_the_taint_and_target_fields_default_to_claiming_nothing() -> None:
+    """W11 fills these four; an unfilled request claims no overlap and no secret."""
+    request = AuthzRequest.model_validate(
+        {
+            "chain": chain(),
+            "tool": "gitea.search_code",
+            "action_kind": ActionKind.read,
+            "resource": "repo-acme-api",
+            "args_digest": "sha256:args",
+            "provenance": Provenance(task_id="task-1"),
+            "ts": datetime.now(UTC),
+        }
+    )
+
+    assert request.overlap_sources == set()
+    assert request.overlap_external is False
+    assert request.args_touch_secret is False
+    assert request.target_outside_task is False
 
 
 def test_computed_fields_survive_a_json_round_trip() -> None:
