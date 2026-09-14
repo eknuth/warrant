@@ -25,6 +25,11 @@ from servers.gitea_mcp.server import ServerSettings
 from warrant.log import DecisionLog
 from warrant.models import ActionKind, AuthzRequest, Chain, Provenance, Source, Tier
 
+# A test issuer and audience. Nothing here talks to this issuer; `verify` is
+# handed the matching public key directly.
+TEST_ISSUER = "https://issuer.test/realms/warrant"
+TEST_AUDIENCE = "gitea-mcp"
+
 
 def _generate_keypair() -> tuple[str, str]:
     """(private PEM, public PEM) for one RSA key."""
