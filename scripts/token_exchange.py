@@ -19,6 +19,11 @@ The task id travels as a parameterized scope, `scope=task-id:<value>`. That is
 the one built-in way in this version for a caller to get a value into an
 exchanged access token; see docs/decisions/002-token-exchange.md.
 
+The flow itself lives in `agents/auth.py` now, because the triage agent needs
+the same two steps. This file keeps the CLI and imports those functions back
+out, so `from scripts.token_exchange import DevSettings` still works for the
+integration fixture.
+
 Usage: uv run python scripts/token_exchange.py [task_id] [--audience AUD]
 """
 
@@ -31,84 +36,49 @@ from pathlib import Path
 
 import httpx
 from jose import jwt
-from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# `python scripts/token_exchange.py` does not put the repository root on
+# sys.path the way pytest's `pythonpath` setting does, so `agents` is not
+# importable until this runs. It has to happen before the import below.
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
-ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
+from agents.auth import (  # noqa: E402
+    ACCESS_TOKEN_TYPE,
+    TOKEN_EXCHANGE_GRANT,
+    AuthError,
+    DevSettings,
+    exchange_for_obo,
+    login_as_alice,
+)
 
-class DevSettings(BaseSettings):
-    """The values this dev script needs, read from `.env` like compose does."""
-
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
-    keycloak_url: str = "http://localhost:8080"
-    warrant_user_password: str
-    warrant_agent_client_secret: str
-
-    @property
-    def issuer(self) -> str:
-        return f"{self.keycloak_url.rstrip('/')}/realms/warrant"
-
-    @property
-    def token_endpoint(self) -> str:
-        return f"{self.issuer}/protocol/openid-connect/token"
-
-
-def login_as_alice(settings: DevSettings, client: httpx.Client) -> str:
-    """The human's token, issued to `console`. Resource owner password grant."""
-    response = client.post(
-        settings.token_endpoint,
-        data={
-            "grant_type": "password",
-            "client_id": "console",
-            "username": "alice",
-            "password": settings.warrant_user_password,
-            "scope": "openid",
-        },
-    )
-    if response.status_code != 200:
-        raise SystemExit(f"login failed: {response.status_code} {response.text}")
-    return response.json()["access_token"]
-
-
-def exchange_for_obo(
-    settings: DevSettings, client: httpx.Client, subject_token: str, audience: str, task_id: str
-) -> str:
-    """triage-agent's on-behalf-of token for one audience, keyed to one task."""
-    response = client.post(
-        settings.token_endpoint,
-        auth=("triage-agent", settings.warrant_agent_client_secret),
-        data={
-            "grant_type": TOKEN_EXCHANGE_GRANT,
-            "subject_token": subject_token,
-            "subject_token_type": ACCESS_TOKEN_TYPE,
-            "requested_token_type": ACCESS_TOKEN_TYPE,
-            "audience": audience,
-            "scope": f"task-id:{task_id}",
-        },
-    )
-    if response.status_code != 200:
-        raise SystemExit(f"exchange failed: {response.status_code} {response.text}")
-    return response.json()["access_token"]
+__all__ = [
+    "ACCESS_TOKEN_TYPE",
+    "TOKEN_EXCHANGE_GRANT",
+    "DevSettings",
+    "exchange_for_obo",
+    "login_as_alice",
+    "main",
+]
 
 
 def main() -> int:
-    # `python scripts/token_exchange.py` does not put the repository root on
-    # sys.path the way pytest's `pythonpath` setting does.
-    sys.path.insert(0, str(REPO_ROOT))
-    from warrant.oidc import verify
-
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("task_id", nargs="?", default="task-1", help="task id to bind to the token")
     parser.add_argument("--audience", default="gitea-mcp", help="resource server client id")
     args = parser.parse_args()
 
     settings = DevSettings()
-    with httpx.Client(timeout=20.0) as client:
-        subject_token = login_as_alice(settings, client)
-        obo_token = exchange_for_obo(settings, client, subject_token, args.audience, args.task_id)
+    try:
+        with httpx.Client(timeout=20.0) as client:
+            subject_token = login_as_alice(settings, client)
+            obo_token = exchange_for_obo(
+                settings, client, subject_token, args.audience, args.task_id
+            )
+    except AuthError as error:
+        print(f"token exchange failed: {error}", file=sys.stderr)
+        return 1
 
     print("subject token claims (issued to console):")
     print(json.dumps(jwt.get_unverified_claims(subject_token), indent=2, sort_keys=True))
@@ -117,6 +87,8 @@ def main() -> int:
     print(json.dumps(jwt.get_unverified_claims(obo_token), indent=2, sort_keys=True))
     print()
     print("on-behalf-of token claims (after warrant.oidc.verify):")
+    from warrant.oidc import verify
+
     claims = verify(obo_token, args.audience, issuer=settings.issuer)
     print(claims.model_dump_json(indent=2))
     return 0
