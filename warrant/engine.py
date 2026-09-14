@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -546,8 +547,14 @@ class CedarEngine:
                 "systems": sorted({source.system for source in provenance.sources}),
                 "sourceIds": sorted({source.id for source in provenance.sources}),
                 # `overlapSources` and `overlapExternal` are W11's content-taint
-                # computation. W7 carries them so the content rule has something
-                # to read; the deny-safe default claims no overlap at all.
+                # computation, and `argsTouchSecret` and `targetOutsideTask` are
+                # its argument scan and target comparison. W7 carries them so the
+                # rules that read them exist. The default claims no taint, which
+                # is the permissive direction rather than the deny-safe one: a
+                # `False` here suppresses the rule instead of firing it, so until
+                # W11 fills them the containment against a target shift, a
+                # paraphrased injection, or a secret in the arguments is the
+                # allowlist and the subject rule, not these three forbids.
                 "overlapSources": sorted(req.overlap_sources),
                 "overlapExternal": req.overlap_external,
                 # `count` is what lets a policy tell "nothing has been read yet"
@@ -566,10 +573,9 @@ class CedarEngine:
         if self.graph is None:
             return False
         agent = self.graph.agent(req.chain.act)
-        if agent is None or not agent.justification:
+        if agent is None:
             return False
-        expires = agent.justification_expires_at
-        return expires is None or expires > req.ts
+        return self._live_justification(agent, req.ts)
 
     def _entities(self, req: AuthzRequest) -> list[dict[str, Any]]:
         entities: dict[tuple[str, str], dict[str, Any]] = {}
@@ -584,7 +590,7 @@ class CedarEngine:
         # The union of `allowed_tools` over the agents each human owns, built
         # once per request. This is the policy input that narrows the OBO
         # token's scopes to the person who asked rather than to the agent client.
-        entitled = self._entitled_tools()
+        entitled = self._entitled_tools(req.ts)
 
         agent_row = self.graph.agent(req.chain.act) if self.graph is not None else None
         # An agent with no row, or a row with no owner, is not owned by whoever
@@ -642,25 +648,37 @@ class CedarEngine:
             )
         return list(entities.values())
 
-    def _entitled_tools(self) -> dict[str, list[str]]:
-        """What each human may reach, as the union of the tools their agents hold.
+    def _entitled_tools(self, at: datetime) -> dict[str, list[str]]:
+        """What each human may reach, as the union of the tools their live agents hold.
 
         The access graph records `allowed_tools` on an agent and the human who
         owns it. The union over the agents one person owns is the honest answer
         to "what may this person do". The permit looks it up for the human in
         `sub`, not for the agent's owner, so an agent owned by one person cannot
         carry that person's authority when somebody else invokes it.
-        `entitledTools` is sorted so the same graph gives the same entity set on
-        every run, which a decision replayed from the log needs.
+
+        An agent whose justification is missing or expired confers nothing. Its
+        own calls are refused by `orphan-agent`, so treating its allowlist as
+        authority would let a person borrow a tool from an agent that may not
+        act at all. `entitledTools` is sorted so the same graph gives the same
+        entity set on every run, which a decision replayed from the log needs.
         """
         if self.graph is None:
             return {}
         entitled: dict[str, set[str]] = {}
         for agent in self.graph.agents():
-            if not agent.owner_human_id:
+            if not agent.owner_human_id or not self._live_justification(agent, at):
                 continue
             entitled.setdefault(agent.owner_human_id, set()).update(agent.allowed_tools)
         return {human: sorted(tools) for human, tools in entitled.items()}
+
+    @staticmethod
+    def _live_justification(agent: Any, at: datetime) -> bool:
+        """Whether one agent row carries a justification that is live at `at`."""
+        if not agent.justification:
+            return False
+        expires = agent.justification_expires_at
+        return expires is None or expires > at
 
     def _add_human(
         self,

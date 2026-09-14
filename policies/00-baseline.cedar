@@ -10,14 +10,13 @@
 // agents that human owns, which is the graph's answer for the person and not
 // for the agent's owner.
 //
-// The second branch is ownership, and it is deliberately narrow: the human in
-// `sub` must own the agent as well as the resource. A person may act on their
-// own resource through their own agent even for a tool the agent's allowlist
-// does not carry, which is what lets a quiet control such as a visibility
-// change be permitted in the clean case and refused by `30-provenance.cedar`
-// once the task has read something external. Requiring only the resource would
-// have let one person drive somebody else's agent against their own property,
-// which is the confused deputy this policy set exists to refuse.
+// There is deliberately no second branch for a resource the caller owns. An
+// earlier draft had one, and it handed every tool on the caller's own resources
+// to any agent they owned, which is the allowlist and the entitlement check both
+// bypassed. An agent's narrower authority comes from its allowlist, and a tool a
+// scenario needs the agent to attempt is granted in `infra/graph.yml` where that
+// authority is written down, not waved through here. The provenance rules are
+// what refuse a tainted change once the tool is held.
 //
 // The action scope is the three kinds, not every action, so this permit does
 // not reach `Action::"escalate"`. The escalate pass evaluates the whole policy
@@ -29,14 +28,6 @@ permit(principal, action in [Action::"read", Action::"write", Action::"send"], r
 when {
   principal has owner &&
   context.justificationValid &&
-  (
-    (
-      principal.allowedTools.contains(context.tool) &&
-      context.onBehalfOf.entitledTools.contains(context.tool)
-    ) ||
-    (
-      principal.owner == context.onBehalfOf &&
-      resource.owner == context.onBehalfOf
-    )
-  )
+  principal.allowedTools.contains(context.tool) &&
+  context.onBehalfOf.entitledTools.contains(context.tool)
 };

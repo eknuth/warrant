@@ -193,13 +193,13 @@ cases:
     kind: attack
     description: "a confidential row read after the task read external material"
     request:
-      sub: h-alice
-      act: triage-agent
-      scopes: ["db:read", "gitea:read"]
-      groups: ["owners"]
+      sub: h-bob
+      act: support-agent
+      scopes: ["db:read"]
+      groups: ["engineers"]
       tool: db.query
       action_kind: read
-      resource: table-orders
+      resource: table-support-billing
       provenance:
         sources:
           - system: gitea
@@ -485,6 +485,31 @@ cases:
     expect:
       verdict: deny
       ids: ["orphan-agent"]
+
+  - name: s6-no-escalate-for-a-tainted-visibility-change
+    scenario: 6
+    kind: attack
+    description: "a visibility change refused by the quiet control, with an incident scope"
+    request:
+      sub: h-alice
+      act: triage-agent
+      scopes: ["gitea:read", "incident_id"]
+      groups: ["owners"]
+      tool: gitea.set_repo_visibility
+      action_kind: write
+      resource: repo-acme-api
+      target_outside_task: false
+      provenance:
+        sources:
+          - system: gitea
+            kind: issue_comment
+            id: comment-stranger-1
+            author: mallory
+            author_tier: external
+            digest: "sha256:comment"
+    expect:
+      verdict: deny
+      ids: ["scope-collapse", "tainted-visibility"]
 
   # -- scenario 7: wrong subject ----------------------------------------------
   - name: s7-cross-subject-query

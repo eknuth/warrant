@@ -14,9 +14,10 @@
 //
 // A forbid whose `when` clause does not test the action kind also forbids
 // `Action::"escalate"`, which is Cedar's rule that a forbid beats every
-// permit. `orphan-agent` is written that way, so an orphan never escalates.
-// `tainted-content` and `secret-in-args` test the kind, so they do not match
-// the escalate action themselves; they never escalate because this permit
+// permit. `orphan-agent` and `wrong-subject` are written that way, so neither an
+// orphan nor a cross-subject call ever escalates, even when it also collapses a
+// scope. `tainted-content` and `secret-in-args` test the kind, so they do not
+// match the escalate action themselves; they never escalate because this permit
 // reproduces neither of their shapes, and the first two conditions below
 // refuse it outright when either rule applies beside an escalatable one.
 //
@@ -34,11 +35,31 @@
 // until one does. That is recorded in docs/policies.md rather than worked
 // around here.
 
+// The permit also requires the baseline's non-scope conditions: the agent holds
+// the tool and the human is entitled to it. Without them the permit answered a
+// denial no scope widening could fix, because an agent asked for a tool it does
+// not hold, the scope rule refused it, and the record offered a human "denied
+// by: scope-collapse" for a call the graph never allowed. And it refuses itself
+// when the quiet control's own ground holds, so a visibility change or a
+// confidential read on a task that read external material is never answered by a
+// person even though the request also collapses a scope.
+
 @id("escalate-incident")
 permit(principal, action == Action::"escalate", resource)
 when {
+  principal has owner &&
+  context.justificationValid &&
+  principal.allowedTools.contains(context.tool) &&
+  context.onBehalfOf.entitledTools.contains(context.tool) &&
   !context.argsTouchSecret &&
   !context.provenance.overlapExternal &&
+  !(
+    (
+      context.tool == "gitea.set_repo_visibility" ||
+      (context.actionKind == "read" && resource.sensitivity == "confidential")
+    ) &&
+    (context.provenance.hasExternal || context.provenance.overlapExternal)
+  ) &&
   context.taskScopes.contains("incident_id") &&
   (context.groups.contains("owners") || context.groups.contains("engineers")) &&
   (

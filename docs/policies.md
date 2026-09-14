@@ -17,17 +17,19 @@ the provenance summary, the action kind, and the two target fields the argument 
 The permit. A call is allowed when the acting agent holds the tool, the human the token names is
 entitled to it, the agent has an owner, and the agent has a live justification. The human check
 reads `context.onBehalfOf.entitledTools`, which the engine computes as the union of `allowed_tools`
-over the agents that person owns. The exchanged token carries the agent client's scopes rather than
-the person's, so without this check an agent could hand its caller more than the caller holds. The
-check is on the human in `sub` and not on the agent's owner, because an agent owned by one person
-and invoked by another must not carry the owner's entitlements. The second half of the condition
-allows a call on a resource the human owns through an agent the same human owns. Both halves of that
-ownership are required: matching the resource alone would let one person drive another person's
-agent against their own property, which is the confused deputy this set exists to refuse. Ownership
-is the authority on that path rather than the agent's allowlist, which is why a tainted change to a
-resource the caller owns is refused by `30-provenance.cedar` and not by the absence of a permit. The
-permit is scoped to the three kinds, so it does not reach `Action::"escalate"` and a denial is never
-turned into a question by accident.
+over the agents that person owns and whose justification is live. The exchanged token carries the
+agent client's scopes rather than the person's, so without this check an agent could hand its caller
+more than the caller holds. The check is on the human in `sub` and not on the agent's owner, because
+an agent owned by one person and invoked by another must not carry the owner's entitlements. An
+agent whose justification is missing or expired confers nothing, because its own calls are refused
+and a person must not borrow a tool from an agent that may not act.
+
+There is no ownership branch. An earlier draft allowed a call on a resource the caller owned through
+an agent the caller owned, which handed every tool on that resource to the agent and bypassed both
+the allowlist and the entitlement check. An agent's narrower authority comes from its allowlist, and
+a tool a scenario needs the agent to attempt is granted in `infra/graph.yml`, not waved through
+here. The permit is scoped to the three kinds, so it does not reach `Action::"escalate"` and a denial
+is never turned into a question by accident.
 
 ## `10-orphan.cedar`
 
@@ -110,7 +112,11 @@ Decided today, from inputs the engine or the token provides: `permit-baseline`,
 whose `hasExternal` comes from the provenance ledger the gateway fills as it
 forwards reads. `tainted-visibility` is the one provenance rule that decides
 anything now, and it is what refuses a visibility change or a confidential read
-after an external read.
+after an external read. The permit's identity half needs the token's `sub` to be
+a human id in the access graph: the realm import sets alice's and bob's user ids
+to `h-alice` and `h-bob`, and `tests/test_realm.py` holds the two trees to the
+same key. Before that, a real token carried a random Keycloak id, the graph
+lookup came back empty, and every call was refused.
 
 Waiting on W11, which computes the argument scan and the content-taint overlap:
 `tainted-write` reads `targetOutsideTask`, `tainted-content` reads
@@ -119,8 +125,7 @@ default to false, and the gateway does not set them, so those fields currently
 say "no taint found" rather than "no taint exists". That direction is the
 permissive one, which is the opposite of deny-safe, so until W11 lands the
 containment against a target shift, a paraphrased injection, or a secret in the
-arguments is the ordinary allowlist and the ownership rule rather than these
-three forbids.
+arguments is the allowlist and the subject rule rather than these three forbids.
 
 Waiting on a scope the realm does not mint: `escalate-incident` requires an
 `incident_id` scope. No client scope carries that name today, so the permit is

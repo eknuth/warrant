@@ -19,6 +19,7 @@
   ],
   "users": [
     {
+      "id": "h-alice",
       "username": "alice",
       "enabled": true,
       "emailVerified": true,
@@ -35,6 +36,7 @@
       ]
     },
     {
+      "id": "h-bob",
       "username": "bob",
       "enabled": true,
       "emailVerified": true,

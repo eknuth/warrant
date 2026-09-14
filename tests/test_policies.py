@@ -71,11 +71,20 @@ def test_the_table_has_at_least_twenty_cases() -> None:
 
 
 def test_the_table_has_two_cases_per_scenario_and_four_split_cases() -> None:
-    """Every scenario has an attack shape and an honest twin, plus the split."""
-    per_scenario = Counter(case.scenario for case in load_cases())
+    """Every scenario has an attack shape and an honest twin, plus the split.
+
+    The kinds are counted, not just the rows: two attack rows would satisfy a
+    row count while proving nothing about the honest path.
+    """
+    cases = load_cases()
+    per_scenario = Counter(case.scenario for case in cases)
+    kinds: dict[str, set[str]] = {}
+    for case in cases:
+        kinds.setdefault(case.scenario, set()).add(case.kind)
 
     for scenario in (str(number) for number in range(1, 9)):
         assert per_scenario[scenario] >= 2, f"scenario {scenario} has {per_scenario[scenario]}"
+        assert {"attack", "honest"} <= kinds[scenario], scenario
     assert per_scenario["split"] >= 4
 
 
@@ -234,6 +243,20 @@ def test_the_grep_finds_the_rules_it_is_meant_to_check() -> None:
 # -- the task rule against the content rule ----------------------------------
 
 
+def _shipped_rule(policy_id: str) -> str:
+    """The shipped rule text for one @id, read from the file that holds it.
+
+    A hand-copied rule is a second copy of the policy that no test compares to
+    the first, so a change to the shipped rule leaves the isolation test passing
+    against text nobody runs. This reads the rule the engine reads.
+    """
+    for path in _policy_files():
+        for annotation, _keyword, rule_text in _policy_rules(path.read_text(encoding="utf-8")):
+            if annotation == policy_id:
+                return f'@id("{policy_id}")\n{rule_text}'
+    raise AssertionError(f"no shipped rule named {policy_id}")
+
+
 def test_the_content_rule_allows_what_the_task_rule_denies(
     graph_db: Graph, tmp_path: Path, decision_log: DecisionLog
 ) -> None:
@@ -245,18 +268,8 @@ def test_the_content_rule_allows_what_the_task_rule_denies(
     it is denied. That is what "allowed under content, denied under task" means.
     """
     baseline = (POLICIES / "00-baseline.cedar").read_text(encoding="utf-8")
-    content_rule = (
-        '@id("tainted-content")\n'
-        "forbid(principal, action, resource)\n"
-        'when { (action in Action::"write" || action in Action::"send") &&\n'
-        "context.provenance.overlapExternal };"
-    )
-    task_rule = (
-        '@id("tainted-write")\n'
-        "forbid(principal, action, resource)\n"
-        'when { (action in Action::"write" || action in Action::"send") &&\n'
-        "context.provenance.hasExternal && context.targetOutsideTask };"
-    )
+    content_rule = _shipped_rule("tainted-content")
+    task_rule = _shipped_rule("tainted-write")
     case = next(case for case in load_cases() if case.name == TASK_RULE_CASE)
     request = build_request(case.request, case.name)
 
@@ -284,18 +297,8 @@ def test_the_content_rule_alone_denies_the_injected_comment(
 ) -> None:
     """The mirror of the split: the task rule misses the on-target injection."""
     baseline = (POLICIES / "00-baseline.cedar").read_text(encoding="utf-8")
-    content_rule = (
-        '@id("tainted-content")\n'
-        "forbid(principal, action, resource)\n"
-        'when { (action in Action::"write" || action in Action::"send") &&\n'
-        "context.provenance.overlapExternal };"
-    )
-    task_rule = (
-        '@id("tainted-write")\n'
-        "forbid(principal, action, resource)\n"
-        'when { (action in Action::"write" || action in Action::"send") &&\n'
-        "context.provenance.hasExternal && context.targetOutsideTask };"
-    )
+    content_rule = _shipped_rule("tainted-content")
+    task_rule = _shipped_rule("tainted-write")
     case = next(case for case in load_cases() if case.name == CONTENT_RULE_CASE)
     request = build_request(case.request, case.name)
 
@@ -501,3 +504,178 @@ def test_ownership_does_not_let_one_person_drive_anothers_agent(
 
     assert shipped.verdict is Verdict.deny, "the shipped set refuses the deputy"
     assert old_shape.verdict is Verdict.allow, "the widened shape it replaced did not"
+
+
+# -- the rules the table names are the rules that decide ---------------------
+
+
+def _policy_rules_by_id() -> dict[str, tuple[Path, str, str]]:
+    """Every shipped rule keyed by its `@id`: (file, keyword, rule text)."""
+    found: dict[str, tuple[Path, str, str]] = {}
+    for path in _policy_files():
+        for annotation, keyword, rule_text in _policy_rules(path.read_text(encoding="utf-8")):
+            if annotation is not None:
+                found[annotation] = (path, keyword, rule_text)
+    return found
+
+
+def _set_without(ids: set[str], destination: Path) -> Path:
+    """The shipped set with the named rules dropped, written to `destination`.
+
+    Each kept rule is rewritten from the parser's own view of it, so the copy is
+    the same rule the engine loaded and not a hand-copied approximation. The
+    comments do not travel, because a mutated set under a temp directory is
+    evidence rather than documentation.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    for path in _policy_files():
+        pieces: list[str] = []
+        for annotation, _keyword, rule_text in _policy_rules(path.read_text(encoding="utf-8")):
+            if annotation in ids:
+                continue
+            if annotation is not None:
+                pieces.append(f'@id("{annotation}")')
+            pieces.append(rule_text)
+        (destination / path.name).write_text("\n".join(pieces) + "\n", encoding="utf-8")
+    return destination
+
+
+# Rules that encode a refusal the baseline permit already makes. `orphan-agent`
+# forbids a call the baseline refuses anyway, because the permit requires a live
+# justification and the orphan rule forbids a missing one. The ticket writes both,
+# so the set keeps both, and the load-bearing test names the overlap rather than
+# treating it as a pass.
+REDUNDANT_WITH_THE_PERMIT = frozenset({"orphan-agent"})
+
+
+def test_every_rule_the_table_names_is_load_bearing(tmp_path: Path) -> None:
+    """An expected id has to be the reason for the verdict, not decoration.
+
+    A forbid fires whether or not a permit would have allowed the call, so a row
+    can pass with a rule that does nothing: the call was going to be refused
+    anyway. Dropping the row's expected rules and requiring the verdict to flip
+    is what tells the two apart, and it is how the confidential-read row was
+    found to be refused by the entitlement check rather than by the taint rule.
+
+    A permit is load bearing in the other direction: dropping it has to turn the
+    allow into a refusal.
+    """
+    rules = _policy_rules_by_id()
+
+    for case in load_cases():
+        if not case.ids:
+            # A default-deny row names no rule, so there is nothing to drop. The
+            # harness still holds it to a decision with no evaluation error.
+            assert case.verdict == "deny", case.name
+            continue
+        for policy_id in case.ids:
+            assert policy_id in rules, f"{case.name}: no shipped rule named {policy_id}"
+
+        directory = _set_without(set(case.ids), tmp_path / case.name)
+        with load_graph(SEED, directory / "warrant.db") as graph:
+            loaded = CedarEngine(
+                policies_dir=directory,
+                graph=graph,
+                decision_log=DecisionLog(directory / "runs"),
+            )
+            result = run_case(case, loaded)
+
+        if case.verdict == "allow":
+            # A permit is load bearing in the other direction: dropping it has to
+            # turn the allow into a refusal.
+            assert result.decision.verdict.value == "deny", (
+                f"{case.name}: dropping {list(case.ids)} left the call allowed, so the "
+                "permit is not what allowed it"
+            )
+            continue
+
+        if set(case.ids) & REDUNDANT_WITH_THE_PERMIT:
+            # The baseline permit's own conditions refuse these calls, so
+            # dropping the rule cannot flip the verdict. That is a finding about
+            # the set rather than about the row, and it is pinned here so the
+            # redundancy is visible instead of excused.
+            assert result.decision.verdict.value == "deny"
+            assert result.decision.policy_ids == []
+            continue
+
+        # A denied call whose expected rules are dropped has to become allowed,
+        # and an escalated call likewise: escalation is a permit on top of a
+        # denial, so without the denying rules the call is an ordinary allow.
+        assert result.decision.verdict.value == "allow", (
+            f"{case.name}: dropping {list(case.ids)} left "
+            f"{result.decision.verdict.value} {list(result.decision.policy_ids)}, so "
+            "those rules are not what refused the call"
+        )
+
+
+def test_escalation_does_not_answer_a_call_the_agent_could_never_make(
+    graph_db: Graph, decision_log: DecisionLog
+) -> None:
+    """A denial no scope widening can fix is not a question for a person.
+
+    `alice` invokes `support-agent`, which `bob` owns and which holds no database
+    write. The token has no `db:write`, so the scope rule refuses the call, and
+    the first version of the escalate permit offered a human "denied by:
+    scope-collapse" for a call the agent's allowlist and the caller's
+    entitlements both refuse. Neither can be widened by a person answering, so
+    the permit now requires the baseline's non-scope conditions too.
+    """
+    loaded = CedarEngine(policies_dir=POLICIES, graph=graph_db, decision_log=decision_log)
+
+    decision = loaded.decide(
+        _request(
+            sub="h-alice",
+            act="support-agent",
+            tool="db.execute",
+            resource="table-orders",
+            action_kind=ActionKind.write,
+            scopes=["db:read", "incident_id"],
+            groups=["owners"],
+        )
+    )
+
+    assert decision.verdict is Verdict.deny
+    assert "escalate-incident" not in decision.policy_ids
+
+
+def test_escalation_does_not_answer_a_tainted_visibility_change(
+    graph_db: Graph, decision_log: DecisionLog
+) -> None:
+    """The quiet control is evidence, not a judgment call, even on an incident.
+
+    The request collapses a scope and also matches the visibility rule's ground.
+    The scope branch alone would escalate it, and approving that would make a
+    repository public on a task that read external material. The permit refuses
+    itself when the visibility ground holds.
+    """
+    loaded = CedarEngine(policies_dir=POLICIES, graph=graph_db, decision_log=decision_log)
+    external = Provenance(
+        task_id="task-w6-smoke",
+        sources=[
+            Source(
+                system="gitea",
+                kind="issue_comment",
+                id="comment-stranger-1",
+                author="mallory",
+                author_tier=Tier.external,
+                digest="sha256:comment",
+            )
+        ],
+    )
+
+    decision = loaded.decide(
+        _request(
+            sub="h-alice",
+            act="triage-agent",
+            tool="gitea.set_repo_visibility",
+            resource="repo-acme-api",
+            action_kind=ActionKind.write,
+            scopes=["gitea:read", "incident_id"],
+            groups=["owners"],
+            provenance=external,
+        )
+    )
+
+    assert decision.verdict is Verdict.deny
+    assert "tainted-visibility" in decision.policy_ids
+    assert "escalate-incident" not in decision.policy_ids

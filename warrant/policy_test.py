@@ -55,6 +55,10 @@ DEFAULT_TOKEN_EXP = "2030-01-01T00:00:00Z"
 DEFAULT_TASK_ID = "task-policy"
 DEFAULT_ARGS_DIGEST = "sha256:args"
 
+# A decision whose reasons carry one of these did not come from a policy, so a
+# row may not pass on it whatever the verdict says.
+EVALUATION_FAILURE_MARKERS = ("could not be evaluated", "evaluation error")
+
 
 class CaseFormatError(ValueError):
     """A case in the table that the harness cannot run."""
@@ -85,6 +89,17 @@ class CaseResult:
         # The ids are compared as a set. Cedar reports the policies that matched
         # as a set, and the engine sorts them for the log, so a case states which
         # ids must be there and not the order they happened to come back in.
+        #
+        # An evaluation error is a failure even when the verdict and the ids are
+        # what the row expects. A request the schema cannot parse denies with no
+        # policy id at all, so a row expecting `deny []` would pass on a typo
+        # that never reached a policy.
+        if self.decision.reasons and any(
+            marker in reason
+            for reason in self.decision.reasons
+            for marker in EVALUATION_FAILURE_MARKERS
+        ):
+            return False
         return self.decision.verdict.value == self.case.verdict and sorted(
             self.decision.policy_ids
         ) == sorted(self.case.ids)
@@ -93,6 +108,7 @@ class CaseResult:
         return (
             f"{self.case.name}: expected {self.case.verdict} {list(self.case.ids)}, "
             f"got {self.decision.verdict.value} {list(self.decision.policy_ids)}"
+            + (f" with reasons {list(self.decision.reasons)}" if self.decision.reasons else "")
         )
 
 
