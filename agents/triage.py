@@ -45,11 +45,11 @@ from agents.mcp_client import CallResult, MCPClient, warrant_endpoint
 from agents.providers import Provider, ToolSchema, Turn, provider_for
 from agents.providers.base import ToolResultBlock, Usage
 from agents.task import Chain, Task
+from warrant.config import RUNS_DIR as DEFAULT_RUNS_DIR
+from warrant.config import task_dir, write_run_metadata
 
 logger = logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_RUNS_DIR = REPO_ROOT / "runs"
 PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "triage.md"
 
 # The audience the triage exchange asks for. The agent reaches the gateway and
@@ -334,6 +334,14 @@ async def run(
     decoded = decode_claims(obo_token)
     check_obo_claims(decoded["claims"], task, TRIAGE_AUDIENCE)
     token_path = write_token_record(runs_dir, task, decoded, TRIAGE_AUDIENCE)
+    # Which commit produced this run, beside the run. A column in the eval table
+    # is only worth reading if it says which code it is a column of.
+    write_run_metadata(
+        task_dir(runs_dir, task.task_id),
+        tool="agents.triage",
+        model=provider.model,
+        task_id=task.task_id,
+    )
     logger.info(
         "token for task %s: audience=%s lifetime=%ss actor=%s (record: %s)",
         task.task_id,

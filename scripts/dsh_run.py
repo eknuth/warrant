@@ -38,13 +38,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from warrant.config import RUNS_DIR as RUNS_ROOT
+from warrant.config import commit_is_dirty, commit_sha
+
 DEFAULT_PROVIDER = "deepseek-official"
 DEFAULT_MODEL = "deepseek-flash"
 DEFAULT_PROFILE = "warrant-sdk"
 EFFORTS = ("off", "low", "high", "max")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-RUNS_DIR = REPO_ROOT / "runs" / "dsh"
+# The shared run directory, not this checkout's: a harness run started from a
+# worktree records its cost beside every other run.
+RUNS_DIR = RUNS_ROOT / "dsh"
 
 USAGE_KEYS = (
     "inputTokens",
@@ -212,6 +217,10 @@ def main(argv: list[str] | None = None) -> int:
     wall_s = round(time.monotonic() - started, 2)
     record: dict[str, Any] = {
         "session_id": session_id,
+        # The commit, so a cost is the cost of some code rather than of "the
+        # project". A dirty tree is a different program at the same sha.
+        "commit": commit_sha(),
+        "dirty": commit_is_dirty(),
         "effort": args.effort,
         "provider": args.provider,
         "model": args.model,
