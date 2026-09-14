@@ -36,6 +36,11 @@ next step. `docs/decisions/` holds the decisions behind this setup.
   change outside a disposable checkout is a reason to stop and ask, not to click.
 - Do not push, do not open a pull request, and do not comment on Linear unless the issue says to.
   Ed says when to push, and Ed merges.
+- An issue that has to build on unmerged work stacks on that branch, and the pull request body says
+  which branch it is stacked on and why. Once the base pull request merges, retarget the stacked
+  pull request to `main` before Ed merges it. A stacked pull request that keeps an unmerged base
+  lands on the base branch and never reaches `main`; that happened to W3 and W4, which were reported
+  merged while `main` held neither.
 
 ## Model and effort
 

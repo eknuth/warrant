@@ -24,6 +24,8 @@ ENV_NAMES = (
     "WARRANT_USER_PASSWORD",
     "WARRANT_AGENT_CLIENT_SECRET",
     "GITEA_ADMIN_TOKEN",
+    "GITEA_URL",
+    "FORGE",
     "POSTGRES_PASSWORD",
     "DEEPSEEK_API_KEY",
     "LINEAR_API_KEY",
@@ -46,7 +48,7 @@ CREDENTIAL_NAMES = (
     "LINEAR_API_KEY",
 )
 
-MAKE_TARGETS = ["install", "lint", "test", "up", "down", "reset", "dsh-profile"]
+MAKE_TARGETS = ["install", "lint", "test", "up", "down", "reset", "gitea-mcp", "dsh-profile"]
 
 IGNORED_PATHS = [".env", ".venv/", "evals/results/grade.json", "__pycache__/x.pyc"]
 
@@ -139,11 +141,12 @@ def test_compose_takes_the_keycloak_password_from_env() -> None:
     assert "${KEYCLOAK_ADMIN_PASSWORD:?" in environment["KC_BOOTSTRAP_ADMIN_PASSWORD"]
 
 
-def test_compose_ships_keycloak_only_and_stubs_the_rest() -> None:
+def test_compose_ships_keycloak_and_gitea_and_stubs_the_rest() -> None:
+    """W3 uncommented Gitea; postgres and mailpit are still stubs."""
     text = (REPO / "compose.yml").read_text()
 
-    assert set(yaml.safe_load(text)["services"]) == {"keycloak"}
-    for later in ("gitea", "postgres", "mailpit"):
+    assert set(yaml.safe_load(text)["services"]) == {"keycloak", "gitea"}
+    for later in ("postgres", "mailpit"):
         assert f"#  {later}:" in text, later
 
 
@@ -162,6 +165,7 @@ def test_makefile_targets_run_the_commands_they_promise() -> None:
     assert "pytest" in makefile_recipe("test")
     assert "docker compose up -d" in makefile_recipe("up")
     assert "docker compose down" in makefile_recipe("down")
+    assert "servers.gitea_mcp.server" in makefile_recipe("gitea-mcp")
     assert "install-profile.sh" in makefile_recipe("dsh-profile")
 
 
