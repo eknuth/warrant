@@ -16,21 +16,33 @@ services:
     image: quay.io/keycloak/keycloak:26.7.3
     # start-dev keeps state in the container's own store and serves plain
     # HTTP, which is what a local stack wants. Nothing here faces a network.
-    command: ["start-dev"]
+    # `--import-realm` reads infra/keycloak/warrant-realm.json on a store
+    # that does not have the realm yet, so `make reset` reproduces it and a
+    # later `make up` leaves it alone.
+    command: ["start-dev", "--import-realm", "--features=parameterized-scopes"]
     ports:
       - "8080:8080"
     environment:
-      # The username is not a secret, so it lives here. The password does not,
-      # and `:?` refuses to start without it.
+      # The username is not a secret, so it lives here. The passwords are not,
+      # and `:?` refuses to start without them.
       # These are the 26.x names. KEYCLOAK_ADMIN and KEYCLOAK_ADMIN_PASSWORD,
       # which most published snippets still show, are ignored from 26.0 on.
       KC_BOOTSTRAP_ADMIN_USERNAME: "admin"
       KC_BOOTSTRAP_ADMIN_PASSWORD: "${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD is not set: add it to .env}"
+      # The realm import resolves `${WARRANT_USER_PASSWORD}` and
+      # `${WARRANT_AGENT_CLIENT_SECRET}` in the JSON below from the
+      # container's environment, so the committed realm file holds a
+      # placeholder and the value stays in `.env`.
+      WARRANT_USER_PASSWORD: "${WARRANT_USER_PASSWORD:?WARRANT_USER_PASSWORD is not set: add it to .env}"
+      WARRANT_AGENT_CLIENT_SECRET: "${WARRANT_AGENT_CLIENT_SECRET:?WARRANT_AGENT_CLIENT_SECRET is not set: add it to .env}"
     volumes:
       # start-dev still writes its store under /opt/keycloak/data, so the
       # realm survives `make down`. `make reset` removes the volume and the
       # store with it.
       - keycloak-data:/opt/keycloak/data
+      # The realm JSON is the system of record. This is the directory
+      # `--import-realm` reads. Read-only: Keycloak only ever reads it.
+      - ./infra/keycloak:/opt/keycloak/data/import:ro
     healthcheck:
       # The image carries no curl, so the check is bash's own TCP redirect.
       # It turns healthy once the HTTP listener accepts connections.
