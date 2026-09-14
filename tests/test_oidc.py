@@ -21,6 +21,7 @@ from warrant.oidc import (
     Claims,
     InvalidToken,
     MissingActClaim,
+    OidcError,
     TokenExpired,
     verify,
 )
@@ -174,11 +175,18 @@ def test_a_token_signed_by_another_key_is_refused(keys: tuple[str, str]) -> None
 
 
 def test_the_refusal_classes_are_distinct() -> None:
-    """An expired token, a wrong audience, and no act are three different errors."""
-    classes = {TokenExpired, AudienceMismatch, MissingActClaim, InvalidToken, ActorMismatch}
+    """Each refusal is its own class, so a caller can tell them apart.
 
-    assert len(classes) == 5
+    The test this replaces asserted `len(set_of_five) == 5`, which is a set
+    literal and cannot fail. What is worth pinning is that the classes a caller
+    catches are siblings rather than a hierarchy, so catching one never
+    swallows another, and that all of them are `OidcError`.
+    """
+    classes = (TokenExpired, AudienceMismatch, MissingActClaim, InvalidToken, ActorMismatch)
+
     for one in classes:
+        assert issubclass(one, OidcError), one
+        assert one is not OidcError, one
         for other in classes:
             if one is not other:
-                assert not issubclass(one, other)
+                assert not issubclass(one, other), (one, other)

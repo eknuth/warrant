@@ -41,23 +41,44 @@ def mappers(client_scope_model: dict[str, Any]) -> list[dict[str, Any]]:
     return client_scope_model.get("protocolMappers", [])
 
 
+def client_mappers(client_id: str) -> list[dict[str, Any]]:
+    """Mappers on the client itself, which apply to every token it gets."""
+    return client(client_id).get("protocolMappers", [])
+
+
+def is_act_mapper(mapper: dict[str, Any]) -> bool:
+    return mapper["protocolMapper"] == "oidc-hardcoded-claim-mapper" and (
+        mapper["config"].get("claim.name") == "act"
+    )
+
+
 def audience_mappers(client_id: str) -> list[str]:
-    return [
+    found = [
         mapper["config"]["included.client.audience"]
         for scope in assigned_scopes(client_id)
         for mapper in mappers(scope)
         if mapper["protocolMapper"] == "oidc-audience-mapper"
     ]
+    # A client-level mapper widens the audience the same way, so it counts.
+    found += [
+        mapper["config"]["included.client.audience"]
+        for mapper in client_mappers(client_id)
+        if mapper["protocolMapper"] == "oidc-audience-mapper"
+    ]
+    return found
 
 
 def act_mappers(client_id: str) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     found = []
     for scope in assigned_scopes(client_id):
         for mapper in mappers(scope):
-            if mapper["protocolMapper"] == "oidc-hardcoded-claim-mapper" and (
-                mapper["config"].get("claim.name") == "act"
-            ):
+            if is_act_mapper(mapper):
                 found.append((scope, mapper))
+    for mapper in client_mappers(client_id):
+        if is_act_mapper(mapper):
+            model = client(client_id)
+            owner = {"name": model["clientId"], "protocolMappers": model["protocolMappers"]}
+            found.append((owner, mapper))
     return found
 
 
@@ -149,6 +170,50 @@ def test_each_agent_has_an_act_mapper_on_a_scope_only_it_has() -> None:
 
 def test_triage_holds_only_the_gitea_audience() -> None:
     assert set(audience_mappers("triage-agent")) == {"gitea-mcp"}
+
+
+def test_no_client_but_the_agents_carries_an_act_mapper() -> None:
+    """The act claim is written by the realm, so every writer has to be known.
+
+    A client-level mapper is the other place one can hide: the scans above read
+    client scopes, and a mapper added on a client itself applies to every token
+    that client gets.
+    """
+    writers = set()
+    for scope in REALM["clientScopes"]:
+        if any(is_act_mapper(mapper) for mapper in mappers(scope)):
+            writers.add(scope["name"])
+    for model in REALM["clients"]:
+        if any(is_act_mapper(mapper) for mapper in client_mappers(model["clientId"])):
+            writers.add(model["clientId"])
+
+    expected = {f"{agent}-obo" for agent in AGENTS}
+    detail = f"act mappers are written by {sorted(writers)}, expected {sorted(expected)}"
+    assert writers == expected, detail
+
+
+def test_an_agent_holds_no_scope_beyond_the_ones_named_for_it() -> None:
+    """Optional scopes are a second way to widen an agent, so they are pinned.
+
+    The default-scope check below would not see `db:read` added as an optional
+    scope, and Keycloak honors an optional scope the caller asks for.
+    """
+    triage_optional = set(client("triage-agent").get("optionalClientScopes", []))
+    support_optional = set(client("support-agent").get("optionalClientScopes", []))
+
+    assert triage_optional == {"task-id"}
+    assert support_optional == {"task-id"}
+    assert not {"postgres-mcp", "mail-mcp"} & set(audience_mappers("triage-agent"))
+
+
+def test_triage_cannot_be_granted_the_db_or_mail_audience_by_scope_mapping() -> None:
+    """A scope mapping is a third way, and the realm grants no scope mappings."""
+    triage = client("triage-agent")
+
+    assert not triage.get("scopeMappings")
+    assert not triage.get("clientScopeMappings")
+    for model in REALM["clients"]:
+        assert not model.get("clientScopeMappings", {}).get("triage-agent"), model["clientId"]
 
 
 def test_support_holds_the_db_and_mail_audiences() -> None:

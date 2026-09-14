@@ -31,11 +31,22 @@ Standard V2 has no actor concept. Its request parameters are `subject_token`, `s
 exchanged token is issued to the requesting client, recorded as `azp`, and carries the same `sub` as
 the subject token.
 
-The only delegation feature is `--features=token-exchange-delegation,parameterized-scopes`. It emits
-`may_act`, not `act`, and the `sub` inside it is the actor's **user** id, not a client id. It also
-requires the user to approve a consent screen at login. It does not issue the claim this project
-needs, so it is not enabled here. Keycloak issue #36203, "Support actor_token for Token Exchange",
-is open and unimplemented: https://github.com/keycloak/keycloak/issues/36203.
+The only built-in delegation feature is `token-exchange-delegation`, which the Keycloak guide
+enables alongside `parameterized-scopes` in the string
+`--features=token-exchange-delegation,parameterized-scopes`. Those are two separate features, and
+only the second is enabled here. The delegation feature emits `may_act`, not `act`, and the `sub`
+inside it is the actor's **user** id, not a client id. It also requires the user to approve a consent
+screen at login. It does not issue the claim this project needs, so it is not enabled. Keycloak issue
+#36203, "Support actor_token for Token Exchange", is open and unimplemented:
+https://github.com/keycloak/keycloak/issues/36203.
+
+`parameterized-scopes` is itself an experimental feature and that has a cost. Keycloak's own log
+line at startup reads `Experimental features enabled: parameterized-scopes:v1`, and the vendor's
+feature list says an experimental feature is not for production and carries no backward
+compatibility guarantee. It was introduced as experimental in Keycloak 21.1 in January 2022, and it
+is still there: issue #46523, "Promote Parameterized Client scopes feature to preview", has been open
+since 2026-02-23. This realm can therefore break on a Keycloak bump, and the break will be in the
+`task_id` claim rather than in the signature or the audience, which are supported features.
 
 ## Options considered
 
@@ -51,6 +62,12 @@ is open and unimplemented: https://github.com/keycloak/keycloak/issues/36203.
 Option 4 does not make Keycloak attest a delegation. It makes Keycloak sign two claims on one token
 and makes Warrant's verifier check that they agree. That is weaker than a real delegation token and
 the cost is stated below.
+
+Option 4 also inherits the `parameterized-scopes` limitation for `task_id`, described under "What
+Keycloak 26.7.3 actually does". Option 1 was rejected partly for resting on an experimental feature;
+option 4 rests on a different experimental feature, and saying so is the point of that section. The
+difference is what the feature is for: `parameterized-scopes` carries a caller-supplied string into
+a claim, while `token-exchange-delegation` would have changed the meaning of the token itself.
 
 ## The mappers
 
@@ -114,7 +131,14 @@ reaches an exchanged access token. Its shape is a compromise: the mapper emits a
 JWT carries `"task_id": ["task-1417"]`. `warrant.oidc.Claims` normalizes a one-element list to the
 string, the same way it normalizes Keycloak's single-string `"aud": "gitea-mcp"` to a list. Callers
 of `verify()` see `task_id` as a string and `aud` as a list; the raw values remain in the signed
-token and are printed by `scripts/token_exchange.py`.
+token and are printed by `scripts/token_exchange.py`. A token carrying more than one `task-id` scope
+is refused rather than truncated, because the mapper's order is not guaranteed and keeping the first
+would key provenance to an arbitrary one of them.
+
+`task_id` is chosen by whoever requests the exchange and Keycloak does not validate it. The scope
+type is `string`, so any value is emitted verbatim, and the same client can exchange again with a
+different value. It is an agent-supplied key for grouping a run's records together. It is never
+evidence that a human named that task, and nothing in Warrant may read it as one.
 
 ## What the `act` claim costs
 
@@ -134,6 +158,39 @@ distinguish "alice asked and triage-agent acted" from "triage-agent exchanged al
 own initiative" from this token alone. That gap closes only when Keycloak implements `actor_token`
 (keycloak#36203). Until then, the honest reading of the chain is: the token is real, the subject is
 real, and the actor is the client the realm configured for this exchange, nothing more.
+
+`act.sub == azp` is a consistency check, not the guard against a foreign actor. Because the mapper
+hardcodes the client's own id and Keycloak sets `azp` to the client that requested the token, the
+equality holds by construction for any token that carries an `act` at all. What actually stops one
+agent from holding another's token is the realm's audience and scope assignment: `support-agent`
+asking for `triage-agent-obo` is refused `403` by Keycloak before a mapper runs. `warrant/oidc.py`
+has no actor allowlist, so it accepts any self-consistent actor the realm ever mints, and a client
+that is later given an `act` mapper would verify too. `tests/test_realm.py` is what keeps the set of
+clients writing `act` to the three agents, including mappers written on a client rather than on a
+scope.
+
+## Three properties of the exchange Warrant does not rely on
+
+These are true of every token this realm issues, and none of them is a defect to fix so much as a
+boundary to know. A later issue that wants provenance from the token has to respect them.
+
+1. **The OBO scope is the agent's, not the human's.** Keycloak does not inherit the subject's scopes
+   into the exchange unless the `downscope-assertion-grant-enforcer` policy executor is applied, and
+   it is not applied here. The exchanged token carries the agent client's scope set, so a token can
+   hold `gitea:write` while the subject token held only `openid`. The authority a resource server
+   sees is the authority of the agent client, and Warrant's policy is where the human's narrower
+   authority has to be enforced.
+2. **The exchanged token outlives the subject token and can be re-minted.** An exchange run against a
+   subject token with 100 seconds left returns a token with a fresh 300-second lifetime, so it
+   outlives the token it came from. The result can then be exchanged again, because `triage-agent` is
+   in its own audience, yielding another fresh five minutes, the same `sid`, and a rewritten
+   `task_id`. The chain extends for as long as a live token exists and the user session lives (idle
+   1800 seconds, maximum 36000 in this realm). If Warrant needs one task per human action, that
+   needs more than the token: it needs a decision about whether `task_id` is per session or per
+   `jti`, made in the issue that consumes it.
+3. **The subject is a user, not necessarily a human.** `scripts/token_exchange.py` uses the resource
+   owner password grant to obtain alice's token, and a service account can hold a subject token the
+   same way. The token says which user it is about; it does not say that a person was involved.
 
 ## Secrets and reproducibility
 
@@ -157,3 +214,13 @@ authorization code with PKCE in a browser instead.
 
 The `token-exchange-delegation` feature is not enabled. No security token service was written. The
 `aud` and `task_id` normalizations are documented above rather than hidden in the verifier.
+
+Two known limits are left for the issues that need them. `support-agent` cannot exchange a token
+today: `console` holds one audience scope, `aud-triage-agent`, so a support-agent exchange is refused
+`403 Client is not within the token audience`. Its scopes and audiences are committed for the shape
+of the realm, and the console needs an audience scope for it when W4 uses it. The subject token also
+carries no `preferred_username` or `email`, because the `console` client's explicit default scope
+list replaces the realm's, so an audit record built from the token has a UUID rather than a name.
+
+Neither is a defect in the exchange itself. Both are recorded here rather than fixed, because fixing
+them changes what a later issue consumes.

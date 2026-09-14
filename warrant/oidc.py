@@ -9,10 +9,25 @@ consistent.
 The delegation chain is a pair of signed claims that must agree. `azp` names
 the client the token was issued to. The `act` claim names the actor the token
 claims to speak for. Keycloak's token exchange has no actor concept, so the
-realm synthesizes `act` with a per-client mapper; see
+realm synthesizes `act` with a mapper on each agent client's own scope; see
 docs/decisions/002-token-exchange.md. `verify()` refuses any token where
-`act.sub` differs from `azp`, which is what stops another client's hardcoded
-`act` from being read as this one's.
+`act.sub` differs from `azp`.
+
+That equality is a consistency check, not the guard against a foreign actor. It
+holds by construction for any token carrying an `act` at all, because the mapper
+hardcodes the client's own id and Keycloak sets `azp` to the client that
+requested the token. What stops one agent from holding another's token is the
+realm's audience and scope assignment: a client that is not in the subject
+token's audience is refused `403` by Keycloak before any mapper runs. `verify()`
+has no actor allowlist, so it accepts any self-consistent actor the realm ever
+mints, and a client later given an `act` mapper would verify too.
+
+What a verified token establishes: the subject is real, because Keycloak
+validated the subject token; the audience and lifetime are Keycloak's; the actor
+was written by the realm rather than supplied by the caller; and the token is
+signed. What it does not establish: that a human asked for this action, that the
+subject is a human rather than a service account, or that `task_id` names a task
+the human chose rather than one the agent named.
 
 Tokens come from the running stack, so `verify()` reaches the issuer's
 discovery and JWKS endpoints once per issuer and caches them for the process.
@@ -23,7 +38,6 @@ claim rules.
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
 from typing import Any
 
 import httpx
@@ -44,7 +58,14 @@ _JWKS: dict[str, dict[str, Any]] = {}
 
 
 class OidcError(Exception):
-    """Base class for every way a token can fail verification."""
+    """Base class for the refusals this module raises about a token.
+
+    A failure to reach the issuer is not one of these: a dead discovery or JWKS
+    endpoint raises `httpx.HTTPError`, and a key that cannot be read raises a
+    `jose` error. Those escape as themselves rather than as an `OidcError`,
+    which is deliberate: a caller can tell "this token is bad" apart from
+    "I could not reach the issuer", and neither one is an accept.
+    """
 
 
 class InvalidToken(OidcError):
@@ -120,8 +141,14 @@ class Claims(BaseModel):
     def _single_task_id(cls, value: object) -> object:
         # The parameterized scope mapper emits a list. An exchanged token has
         # one task, so a one-element list is the value and an empty list is no
-        # task at all.
+        # task at all. More than one is refused rather than truncated: the
+        # caller chooses how many `task-id:<value>` scopes to ask for, and
+        # keeping the first would key provenance to an arbitrary one of them in
+        # an order the mapper does not guarantee.
         if isinstance(value, list):
+            if len(value) > 1:
+                message = f"task_id carries {len(value)} values, at most one is expected: {value!r}"
+                raise ValueError(message)
             return value[0] if value else None
         return value
 
@@ -164,7 +191,6 @@ def verify(
     *,
     key: object | None = None,
     issuer: str | None = None,
-    algorithms: Sequence[str] = ALGORITHMS,
 ) -> Claims:
     """Verify `token` for `audience` and return its normalized claims.
 
@@ -176,6 +202,12 @@ def verify(
 
     `key` and `issuer` default to the running stack. A test passes its own
     public key and issuer so it needs no server.
+
+    The signing algorithms are not a parameter. They are pinned above so no
+    caller can widen them, which matters here: the pinned python-jose has an
+    open DER-key HMAC confusion that a symmetric algorithm in the accepted list
+    would expose. A token whose header names an algorithm outside the pinned
+    set is a `InvalidToken`.
     """
     issuer = issuer or DEFAULT_ISSUER
     signing_key = jwks(issuer) if key is None else key
@@ -184,7 +216,7 @@ def verify(
         payload: dict[str, Any] = jwt.decode(
             token,
             signing_key,
-            algorithms=list(algorithms),
+            algorithms=list(ALGORITHMS),
             audience=audience,
             issuer=issuer,
             options={"verify_aud": True, "verify_iss": True, "verify_exp": True},
