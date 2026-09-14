@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,7 @@ from typing import Any
 import cedarpy
 import pytest
 
-from warrant.engine import DEFAULT_SCHEMA_PATH, CedarEngine
+from warrant.engine import DEFAULT_SCHEMA_PATH, CedarEngine, schema_for
 from warrant.graph import Graph
 from warrant.graph import load as load_graph
 from warrant.log import DecisionLog
@@ -77,7 +78,7 @@ def test_the_shipped_policy_set_denies_by_default(
 def test_the_shipped_schema_parses_and_validates_the_mapping(policy_dir: Any) -> None:
     schema = DEFAULT_SCHEMA_PATH.read_text()
     policy = (
-        '@id("p")\npermit(principal, action == Action::"read", resource)\n'
+        '@id("p")\npermit(principal, action == Action::"gitea.search_code", resource)\n'
         "when { context.provenance.hasExternal && principal.allowedTools.contains(context.tool) };"
     )
 
@@ -110,8 +111,9 @@ def test_external_provenance_is_visible_to_cedar_as_true(
 ) -> None:
     """`context.provenance.hasExternal` is the attribute a policy forbids on."""
     directory = policy_dir(
-        '@id("permit-read")\npermit(principal, action == Action::"read", resource);',
-        '@id("forbid-external")\nforbid(principal, action == Action::"read", resource)\n'
+        '@id("permit-read")\npermit(principal, action == Action::"gitea.search_code", resource);',
+        '@id("forbid-external")\n'
+        'forbid(principal, action == Action::"gitea.search_code", resource)\n'
         "when { context.provenance.hasExternal };",
     )
     engine = engine_for(directory, decision_log, schema_path=None)
@@ -142,7 +144,8 @@ def test_a_policy_can_permit_because_the_attribute_is_true(
 ) -> None:
     """The same attribute read positively, so the test is not only about forbid."""
     directory = policy_dir(
-        '@id("permit-external")\npermit(principal, action == Action::"read", resource)\n'
+        '@id("permit-external")\n'
+        'permit(principal, action == Action::"gitea.search_code", resource)\n'
         "when { context.provenance.hasExternal };"
     )
     external = Provenance(
@@ -171,7 +174,7 @@ def test_the_escalate_pass_uses_the_tool_from_the_context(
     policy_dir: Any, make_request: Any, decision_log: DecisionLog
 ) -> None:
     directory = policy_dir(
-        '@id("escalate-search")\npermit(principal, action == Action::"Escalate", resource)\n'
+        '@id("escalate-search")\npermit(principal, action == Action::"escalate", resource)\n'
         'when { context.tool == "gitea.search_code" };'
     )
 
@@ -185,8 +188,8 @@ def test_a_real_permit_does_not_consult_the_escalate_action(
     policy_dir: Any, make_request: Any, decision_log: DecisionLog, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     directory = policy_dir(
-        '@id("permit-read")\npermit(principal, action == Action::"read", resource);',
-        '@id("escalate-search")\npermit(principal, action == Action::"Escalate", resource);',
+        '@id("permit-read")\npermit(principal, action == Action::"gitea.search_code", resource);',
+        '@id("escalate-search")\npermit(principal, action == Action::"escalate", resource);',
     )
     engine = engine_for(directory, decision_log, schema_path=None)
     actions = count_cedar_actions(monkeypatch)
@@ -195,15 +198,15 @@ def test_a_real_permit_does_not_consult_the_escalate_action(
 
     assert decision.verdict is Verdict.allow
     assert decision.policy_ids == ["permit-read"]
-    assert actions == ["read"]
+    assert actions == ["gitea.search_code"]
 
 
 def test_a_deny_with_an_escalate_permit_escalates(
     policy_dir: Any, make_request: Any, decision_log: DecisionLog, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     directory = policy_dir(
-        '@id("forbid-read")\nforbid(principal, action == Action::"read", resource);',
-        '@id("escalate-search")\npermit(principal, action == Action::"Escalate", resource)\n'
+        '@id("forbid-read")\nforbid(principal, action == Action::"gitea.search_code", resource);',
+        '@id("escalate-search")\npermit(principal, action == Action::"escalate", resource)\n'
         'when { context.tool == "gitea.search_code" };',
     )
     engine = engine_for(directory, decision_log, schema_path=None)
@@ -218,14 +221,14 @@ def test_a_deny_with_an_escalate_permit_escalates(
     assert decision.policy_ids == ["forbid-read", "escalate-search"]
     assert any("forbid-read" in reason for reason in decision.reasons)
     assert any("escalate-search" in reason for reason in decision.reasons)
-    assert actions == ["read", "Escalate"]
+    assert actions == ["gitea.search_code", "escalate"]
 
 
 def test_a_deny_without_an_escalate_permit_stays_a_deny(
     policy_dir: Any, make_request: Any, decision_log: DecisionLog, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     directory = policy_dir(
-        '@id("forbid-read")\nforbid(principal, action == Action::"read", resource);'
+        '@id("forbid-read")\nforbid(principal, action == Action::"gitea.search_code", resource);'
     )
     engine = engine_for(directory, decision_log, schema_path=None)
     actions = count_cedar_actions(monkeypatch)
@@ -234,7 +237,7 @@ def test_a_deny_without_an_escalate_permit_stays_a_deny(
 
     assert decision.verdict is Verdict.deny
     assert decision.policy_ids == ["forbid-read"]
-    assert actions == ["read", "Escalate"]
+    assert actions == ["gitea.search_code", "escalate"]
 
 
 def test_a_forbid_that_matches_every_action_also_forbids_escalation(
@@ -243,7 +246,7 @@ def test_a_forbid_that_matches_every_action_also_forbids_escalation(
     """Cedar's forbid beats every permit, including the escalate permit."""
     directory = policy_dir(
         '@id("forbid-all")\nforbid(principal, action, resource);',
-        '@id("escalate-search")\npermit(principal, action == Action::"Escalate", resource);',
+        '@id("escalate-search")\npermit(principal, action == Action::"escalate", resource);',
     )
 
     decision = engine_for(directory, decision_log, schema_path=None).decide(make_request())
@@ -257,7 +260,7 @@ def test_the_agent_maps_to_principal_with_owner_and_on_behalf_of(
 ) -> None:
     """The agent's owner is the graph's, the on-behalf-of is the verified sub."""
     directory = policy_dir(
-        '@id("owns-and-acts")\npermit(principal, action == Action::"read", resource)\n'
+        '@id("owns-and-acts")\npermit(principal, action == Action::"gitea.search_code", resource)\n'
         'when { principal.owner == Human::"h-alice" && principal.onBehalfOf == Human::"h-bob" };'
     )
     chain = Chain(
@@ -280,7 +283,7 @@ def test_on_behalf_of_is_not_the_owner(
     graph_db: Any, policy_dir: Any, make_request: Any, decision_log: DecisionLog
 ) -> None:
     directory = policy_dir(
-        '@id("wrong-human")\npermit(principal, action == Action::"read", resource)\n'
+        '@id("wrong-human")\npermit(principal, action == Action::"gitea.search_code", resource)\n'
         'when { principal.onBehalfOf == Human::"h-alice" };'
     )
     chain = Chain(
@@ -303,7 +306,8 @@ def test_allowed_tools_and_justification_reach_the_policy(
     graph_db: Any, policy_dir: Any, make_request: Any, decision_log: DecisionLog
 ) -> None:
     directory = policy_dir(
-        '@id("tool-and-justification")\npermit(principal, action == Action::"read", resource)\n'
+        '@id("tool-and-justification")\n'
+        'permit(principal, action == Action::"gitea.search_code", resource)\n'
         "when { principal.allowedTools.contains(context.tool) && context.justificationValid };"
     )
     engine = engine_for(directory, decision_log, schema_path=DEFAULT_SCHEMA_PATH, graph=graph_db)
@@ -319,7 +323,7 @@ def test_a_missing_justification_is_not_valid(
     graph_db: Any, policy_dir: Any, make_request: Any, decision_log: DecisionLog
 ) -> None:
     directory = policy_dir(
-        '@id("justified")\npermit(principal, action == Action::"read", resource)\n'
+        '@id("justified")\npermit(principal, action == Action::"gitea.search_code", resource)\n'
         "when { context.justificationValid };"
     )
     chain = Chain(
@@ -342,7 +346,7 @@ def test_an_expired_justification_is_not_valid(
     graph_db: Any, policy_dir: Any, make_request: Any, decision_log: DecisionLog
 ) -> None:
     directory = policy_dir(
-        '@id("justified")\npermit(principal, action == Action::"read", resource)\n'
+        '@id("justified")\npermit(principal, action == Action::"gitea.search_code", resource)\n'
         "when { context.justificationValid };"
     )
     chain = Chain(
@@ -377,7 +381,7 @@ def test_explain_says_why_without_writing_a_decision(
     policy_dir: Any, make_request: Any, decision_log: DecisionLog
 ) -> None:
     directory = policy_dir(
-        '@id("forbid-read")\nforbid(principal, action == Action::"read", resource);'
+        '@id("forbid-read")\nforbid(principal, action == Action::"gitea.search_code", resource);'
     )
     engine = engine_for(directory, decision_log, schema_path=None)
 
@@ -433,7 +437,7 @@ def test_a_request_cedar_cannot_evaluate_denies_without_escalating(
 ) -> None:
     """A broken request is a deny, not an escalate: escalation answers a deny."""
     directory = policy_dir(
-        '@id("escalate-search")\npermit(principal, action == Action::"Escalate", resource);'
+        '@id("escalate-search")\npermit(principal, action == Action::"escalate", resource);'
     )
     engine = engine_for(directory, decision_log, schema_path=DEFAULT_SCHEMA_PATH)
 
@@ -463,9 +467,9 @@ def test_an_erroring_policy_denies_and_does_not_escalate(
     erroring policy escalate, and the error reached no field of the Decision.
     """
     directory = policy_dir(
-        '@id("broken")\npermit(principal, action == Action::"read", resource)\n'
+        '@id("broken")\npermit(principal, action == Action::"gitea.search_code", resource)\n'
         "when { context.provenance.minTier > 3 };",
-        '@id("escalate-any")\npermit(principal, action == Action::"Escalate", resource);',
+        '@id("escalate-any")\npermit(principal, action == Action::"escalate", resource);',
     )
     engine = engine_for(directory, decision_log, schema_path=None)
     actions = count_cedar_actions(monkeypatch)
@@ -473,7 +477,7 @@ def test_an_erroring_policy_denies_and_does_not_escalate(
     decision = engine.decide(make_request())
 
     assert decision.verdict is Verdict.deny, "an error must not reach a human as a question"
-    assert actions == ["read"], "the escalate pass must not run for an error"
+    assert actions == ["gitea.search_code"], "the escalate pass must not run for an error"
     assert any("error" in reason.lower() for reason in decision.reasons), decision.reasons
 
 
@@ -486,9 +490,9 @@ def test_an_error_is_recorded_even_when_a_permit_matched(
     with no mention of the error.
     """
     directory = policy_dir(
-        '@id("ok")\npermit(principal, action == Action::"read", resource)\n'
+        '@id("ok")\npermit(principal, action == Action::"gitea.search_code", resource)\n'
         'when { context.tool == "gitea.search_code" };',
-        '@id("broken")\npermit(principal, action == Action::"read", resource)\n'
+        '@id("broken")\npermit(principal, action == Action::"gitea.search_code", resource)\n'
         "when { context.provenance.minTier > 3 };",
     )
     engine = engine_for(directory, decision_log, schema_path=None)
@@ -509,7 +513,7 @@ def test_a_write_tool_cannot_be_authorized_as_a_read(
     here asks for a read.
     """
     directory = policy_dir(
-        '@id("read-ok")\npermit(principal, action == Action::"read", resource);',
+        '@id("read-ok")\npermit(principal, action == Action::"gitea.search_code", resource);',
     )
     engine = engine_for(directory, decision_log, schema_path=None, graph=Graph(graph_db.path))
 
@@ -527,7 +531,8 @@ def test_an_unknown_resource_is_not_owned_by_the_requester(
 ) -> None:
     """A resource the graph has never heard of is nobody's, so ownership cannot match."""
     directory = policy_dir(
-        '@id("owner-may-read")\npermit(principal, action == Action::"read", resource)\n'
+        '@id("owner-may-read")\n'
+        'permit(principal, action == Action::"gitea.search_code", resource)\n'
         "when { resource.owner == principal.owner };",
     )
     engine = engine_for(directory, decision_log, schema_path=None, graph=Graph(graph_db.path))
@@ -548,7 +553,8 @@ def test_an_agent_the_graph_does_not_know_cannot_claim_ownership(
     agent the graph has never heard of satisfied it.
     """
     directory = policy_dir(
-        '@id("own-agent-read")\npermit(principal, action == Action::"read", resource)\n'
+        '@id("own-agent-read")\n'
+        'permit(principal, action == Action::"gitea.search_code", resource)\n'
         "when { principal.owner == principal.onBehalfOf };",
     )
     engine = engine_for(directory, decision_log, schema_path=None, graph=Graph(graph_db.path))
@@ -577,8 +583,8 @@ def test_an_escalate_permit_for_another_tool_does_not_escalate_this_one(
     all-tools escalate.
     """
     directory = policy_dir(
-        '@id("forbid-read")\nforbid(principal, action == Action::"read", resource);',
-        '@id("escalate-other")\npermit(principal, action == Action::"Escalate", resource)\n'
+        '@id("forbid-read")\nforbid(principal, action == Action::"gitea.search_code", resource);',
+        '@id("escalate-other")\npermit(principal, action == Action::"escalate", resource)\n'
         'when { context.tool == "gitea.get_file" };',
     )
     engine = engine_for(directory, decision_log, schema_path=None)
@@ -601,3 +607,69 @@ def test_a_decision_names_the_mode_that_produced_it(
     assert decision.mode == "full"
     line = decision_log.read(decision.request.chain.task_id)[0]
     assert line.mode == "full"
+
+
+def test_the_ticket_forbid_refuses_the_comment_exactly_as_written(
+    policy_dir: Any, make_request: Any, decision_log: DecisionLog
+) -> None:
+    """W6's acceptance criterion 2, with the policy spelled the way it wrote it.
+
+    The criterion names `Action::"gitea.create_issue_comment"` as the action. In
+    the three-kind model that named an action no request carried, so the forbid
+    was inert and the refusal came from the default deny instead. With one action
+    per tool the tool is the action scope, and the reason the agent receives is
+    the forbid's own.
+
+    Run against the engine before the change, this policy set returned `allow`
+    with `permit matched: permit-write`, which is the defect in one line.
+    """
+    directory = policy_dir(
+        '@id("permit-write")\npermit(principal, action in Action::"write", resource);',
+        '@id("forbid-comment")\nforbid(principal, action == '
+        'Action::"gitea.create_issue_comment", resource);',
+    )
+    engine = engine_for(directory, decision_log)
+
+    denied = engine.decide(
+        make_request(tool="gitea.create_issue_comment", action_kind=ActionKind.write)
+    )
+    allowed = engine.decide(make_request(tool="gitea.commit_file", action_kind=ActionKind.write))
+
+    assert denied.verdict is Verdict.deny
+    assert denied.policy_ids == ["forbid-comment"], "the forbid fired, not the default deny"
+    assert "forbid matched" in denied.reasons[0]
+    assert allowed.verdict is Verdict.allow, "the forbid is scoped to one tool"
+
+
+def test_a_kind_rule_reaches_every_tool_of_that_kind(
+    policy_dir: Any, make_request: Any, decision_log: DecisionLog
+) -> None:
+    """`action in Action::"write"` is the membership the schema generates.
+
+    A rule about a kind has to keep working, because that is how W7 writes the
+    scope and taint rules: one rule per kind rather than one per tool.
+    """
+    directory = policy_dir(
+        '@id("permit-write")\npermit(principal, action in Action::"write", resource);'
+    )
+    engine = engine_for(directory, decision_log)
+
+    for tool in ("gitea.commit_file", "gitea.create_branch", "gitea.open_pull_request"):
+        decision = engine.decide(make_request(tool=tool, action_kind=ActionKind.write))
+
+        assert decision.verdict is Verdict.allow, tool
+
+    read = engine.decide(make_request(tool="gitea.get_issue", action_kind=ActionKind.read))
+
+    assert read.verdict is Verdict.deny, "a write permit does not reach a read tool"
+
+
+def test_the_committed_schema_is_the_one_the_graph_generates(graph_db: Graph) -> None:
+    """The committed file is generated, and this is what keeps it current.
+
+    The schema is committed so a reader can see the action surface, and the
+    engine generates it from the graph at load. A tool added to `infra/graph.yml`
+    without regenerating the file would pass every policy test and fail on a
+    deployment that was given the graph, so the two are compared here instead.
+    """
+    assert json.loads(DEFAULT_SCHEMA_PATH.read_text()) == schema_for(graph_db)
