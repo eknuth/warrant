@@ -102,13 +102,14 @@ for tool servers. A new server needs a line in that rule before its writes can p
 a `requiredScopes` set the engine computes into the context, would make the rule generic and would
 move the policy's meaning into Python, which the ticket asks not to do.
 
-## The mail tool is `mail.send`, not `mail.send_reply`
+## The mail rule waited for the mail row
 
-The ticket names `mail.send_reply` in the exfil rule. No graph row declares that tool, and the
-generated schema refuses it at load, so the rule names `mail.send`, the one mail send tool this graph
-has. A policy for a tool the graph does not have is dead text, which is the failure the load-time
-validation exists to catch. When a reply tool lands and the graph gains its row, the rule gains the
-name.
+The ticket names `mail.send_reply` in the exfil rule. No graph row declared that tool when W7
+landed, and the generated schema refuses an action it does not declare at load, so the rule named
+`mail.send`, the placeholder mail send row the graph held at the time. A policy for a tool the graph
+does not have is dead text, which is the failure the load-time validation exists to catch. W9 added
+the mail server and replaced the placeholders with `mail.list_inbox`, `mail.get_message`, and
+`mail.send_reply`, so the rule now names `mail.send_reply`.
 
 ## The escalation group comes from the token
 

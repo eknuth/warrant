@@ -247,7 +247,7 @@ class Graph:
         """The resource row whose `name` is `name`, optionally of `kind`.
 
         A tool call carries a name (`acme/widgets`, `public.orders`,
-        `support@acme.example`) while the engine and the policies key on the
+        `support@acme.test`) while the engine and the policies key on the
         graph's id. This is that lookup. With two rows sharing a name and no
         kind to tell them apart, the lowest id wins rather than an arbitrary
         one, so the same call resolves the same way on every run.

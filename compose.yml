@@ -3,9 +3,8 @@
 # W1 ships Keycloak, the identity provider every later service authenticates
 # against. W3 adds Gitea, the forge the MCP server is a resource server in
 # front of. W8 adds Postgres, the support database the second resource server
-# reads and writes. Mailpit (W9) arrives with the issue that needs it; its block
-# is commented at the bottom so the shape of the stack is visible before the
-# service is.
+# reads and writes. W9 adds Mailpit, the mailbox the third resource server sends
+# to and reads, so every message it sends can be inspected afterwards.
 #
 # `docker compose` reads `.env` from this directory for every value below, so
 # credentials live in `.env` and never in this file. `.env.example` lists the
@@ -178,6 +177,58 @@ services:
       postgres:
         condition: service_healthy
 
+  # --- W9 --------------------------------------------------------------------
+  # The mailbox. Every message the mail resource server sends lands here, so what
+  # left the building can be read afterwards with no model in the loop. Mailpit
+  # speaks plain SMTP and its HTTP API and web UI are on 8025.
+  #
+  # SMTP is `expose`d rather than published: only the compose network needs it,
+  # and the mail server inside it is the only sender. The HTTP port is published
+  # because the grader and the screenshots read the mailbox from the host.
+  #
+  # The image is not pinned to a patch the way Gitea and Keycloak are. Its two
+  # surfaces are standard SMTP and a versioned HTTP API, there is no credential
+  # behind it, and the mail server's client reads both rather than a version
+  # string. A bump is a change to this line alone.
+  mailpit:
+    image: axllent/mailpit
+    ports:
+      - "8025:8025"   # http api and web ui
+    expose:
+      - "1025"        # smtp, for the compose network only
+    healthcheck:
+      # The image carries busybox wget and no curl. `/livez` answers 200 once the
+      # HTTP listener is serving, which is what `--wait` and the mail server wait
+      # for.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8025/livez"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  # The mail resource server. Same image and the same network shape as the gitea
+  # and postgres ones: one built image, `expose` instead of `ports`, and the
+  # token issuer overridden for the compose network. The SMTP host and the
+  # Mailpit API URL name the service above, which is the only change from the
+  # code's host-side defaults.
+  mail-mcp:
+    build:
+      context: .
+    image: warrant-local:latest
+    command: ["python", "-m", "servers.mail_mcp.server"]
+    env_file: [.env]
+    environment:
+      SMTP_HOST: "mailpit"
+      MAIL_URL: "http://mailpit:8025"
+      MAIL_MCP_HOST: "0.0.0.0"
+      MAIL_MCP_PORT: "9103"
+      WARRANT_OIDC_ISSUER: "http://keycloak:8080/realms/warrant"
+    expose:
+      - "9103"
+    depends_on:
+      mailpit:
+        condition: service_healthy
+
   warrant:
     build:
       context: .
@@ -198,6 +249,8 @@ services:
         condition: service_started
       postgres-mcp:
         condition: service_started
+      mail-mcp:
+        condition: service_started
 
 volumes:
   keycloak-data:
@@ -207,12 +260,6 @@ volumes:
 # --- later issues, commented until the issue that needs them ---------------
 # Each block is a complete service definition. Uncommenting it and adding the
 # volume it names is the whole change.
-#
-#  mailpit:
-#    image: axllent/mailpit
-#    ports:
-#      - "1025:1025"   # smtp
-#      - "8025:8025"   # web ui
 #
 # --- W16 and W22, which add no compose service ------------------------------
 # The adjudicator and its human queue (W16) and the second model family (W22)

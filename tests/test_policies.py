@@ -134,16 +134,16 @@ def test_a_policy_that_names_an_unknown_action_is_refused_at_load(
 ) -> None:
     """The action surface is the graph's, so an absent tool name is a load error.
 
-    This is why `40-exfil.cedar` names `mail.send`: the ticket wrote
-    `mail.send_reply`, which no tool row declares, and a policy that names it
-    would fail validation here rather than refuse anything.
+    `mail.search` and `mail.send` were the placeholder rows before the W9 server
+    existed. They are gone, so a policy that still names one fails validation
+    here rather than refusing anything.
     """
     directory = policy_dir_for(
         tmp_path / "policies",
-        '@id("unknown")\npermit(principal, action == Action::"mail.send_reply", resource);',
+        '@id("unknown")\npermit(principal, action == Action::"mail.send", resource);',
     )
 
-    with pytest.raises(PolicyValidationError, match="mail.send_reply"):
+    with pytest.raises(PolicyValidationError, match="mail.send"):
         CedarEngine(policies_dir=directory, decision_log=decision_log)
 
 
@@ -489,7 +489,7 @@ def test_ownership_does_not_let_one_person_drive_anothers_agent(
     # alice's agent against his own mailbox, reaching a tool that agent does not
     # hold.
     deputy = _request(
-        sub="h-bob", act="triage-agent", tool="mail.search", resource="mailbox-support"
+        sub="h-bob", act="triage-agent", tool="mail.list_inbox", resource="mailbox-support"
     )
     shipped = CedarEngine(policies_dir=POLICIES, graph=graph_db, decision_log=decision_log).decide(
         deputy

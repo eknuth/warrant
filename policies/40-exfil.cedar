@@ -3,15 +3,13 @@
 // `argsTouchSecret`. These two tools are the ones that put text in front of
 // somebody outside the task.
 //
-// The ticket names `mail.send_reply` for the mail side. This graph has one mail
-// send tool, `mail.send`, and a policy that names an action the generated
-// schema does not declare fails validation at load, so the rule names the tool
-// the graph holds. When W9 lands a reply tool and the graph gains its row, this
-// line gains the name.
+// W7 named `mail.send` here because that was the only mail send row the graph
+// held. W9 landed the real tool, `mail.send_reply`, and replaced the row, so the
+// rule names it.
 
 @id("secret-in-args")
 forbid(principal, action, resource)
 when {
   context.argsTouchSecret &&
-  (action == Action::"mail.send" || action == Action::"gitea.create_issue_comment")
+  (action == Action::"mail.send_reply" || action == Action::"gitea.create_issue_comment")
 };

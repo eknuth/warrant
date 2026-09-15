@@ -105,7 +105,9 @@ def extract_resource(resource_kind: str, args: Mapping[str, Any]) -> str | None:
         # `name` of exactly one graph row; `resolve_resource` refuses a tie.
         return _first(args.get("customer_id")) or _first(args.get("query"))
     if resource_kind == MAILBOX:
-        return _first(args.get("to"))
+        # `send_reply` names its recipient `to`; the two reads name the mailbox
+        # they open. The rows in the graph are the same either way.
+        return _first(args.get("to")) or _first(args.get("mailbox"))
     return None
 
 
@@ -125,7 +127,7 @@ def resolve_resource(graph: Graph | None, resource_kind: str, name: str | None) 
 
     Name and id share one namespace in the graph, so a name that misses on the
     tool's kind can still be a row's id under another kind. Passing that through
-    would let the engine resolve the row: a `mail.send` whose `to` is
+    would let the engine resolve the row: a `mail.send_reply` whose `to` is
     `table-orders` would be decided against the confidential table of that id,
     with an owner and a classification the caller never named. A string that is
     some row's id under the wrong kind is prefixed so it names no row at all and

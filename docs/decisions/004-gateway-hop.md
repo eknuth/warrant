@@ -7,7 +7,7 @@ The ticket cites this file as `004-gateway-hop.md`. W6 is the issue that made th
 ## Decision
 
 Warrant is an MCP server on `:9100/mcp` and the only MCP endpoint an agent reaches. It re-exports
-each upstream server's tools under a prefix (`gitea.get_issue`, `db.get_ticket`, `mail.send`), verifies
+each upstream server's tools under a prefix (`gitea.get_issue`, `db.get_ticket`, `mail.send_reply`), verifies
 the incoming token for the `warrant` audience, decides every call, and forwards allowed calls to the
 upstream the graph names.
 
@@ -136,7 +136,7 @@ it true rather than nearly true.
 
 The graph's agent ids are now the identity provider's client ids (`triage-agent`, `support-agent`,
 `orphan-agent`) and its tool ids are the gateway's re-exports (`gitea.get_issue`, `db.get_ticket`,
-`mail.send`). Before this, the graph held `agent-triage` and `gitea.search`, and the gateway would
+`mail.send_reply`). Before this, the graph held `agent-triage` and `gitea.search`, and the gateway would
 have found no agent for `act.sub=triage-agent` and no action kind for the tool it was asked to
 forward. `python -m warrant.graph load` upserts and does not delete, so a `warrant.db` written from
 the old seed keeps the old rows beside the new ones. The database is gitignored and rebuilt from
@@ -207,7 +207,7 @@ and all ten are fixed here, because the ones that looked small were the same kin
   the call was accepted: an unlogged crash instead of a refusal. `Chain` refuses such an id where
   the claim enters, and the gateway answers with a tool error.
 - A resource name that collided with the id of a row of another kind resolved to that row, so a
-  `mail.send` whose `to` was `table-orders` was decided against the confidential table. A name that
+  `mail.send_reply` whose `to` was `table-orders` was decided against the confidential table. A name that
   is some row's id under the wrong kind now resolves to nothing at all.
 - `upstream_ms` counted the token exchange as well as the upstream call, so a slow issuer read as a
   slow upstream. The clock starts after the exchange.

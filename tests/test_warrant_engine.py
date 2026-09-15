@@ -325,7 +325,7 @@ def test_allowed_tools_and_justification_reach_the_policy(
     engine = engine_for(directory, decision_log, schema_path=DEFAULT_SCHEMA_PATH, graph=graph_db)
 
     allowed = engine.decide(make_request())
-    other_tool = engine.decide(make_request(tool="mail.send"))
+    other_tool = engine.decide(make_request(tool="mail.send_reply"))
 
     assert allowed.verdict is Verdict.allow
     assert other_tool.verdict is Verdict.deny
