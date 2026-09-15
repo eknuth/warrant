@@ -30,6 +30,7 @@ import uvicorn
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from agents.auth import audience_list, decode_claims
 from servers.postgres_mcp.server import ServerSettings as PostgresSettings
 from servers.postgres_mcp.server import build_app
 
@@ -39,9 +40,11 @@ REPO = Path(__file__).resolve().parents[1]
 SCHEMA = REPO / "infra" / "postgres" / "schema.sql"
 
 # Fixture values, not credentials. They are long enough to be recognisable in a
-# result and short enough that no key pattern mistakes them for a real one.
-FIXTURE_KEY = "fixture-key-alpha"
-FIXTURE_RETIRED_KEY = "fixture-key-beta"
+# result and short enough that no key pattern mistakes them for a real one. The
+# names avoid `KEY`, because the secrets hook reads a `*KEY=` assignment with a
+# value that is not a placeholder as a finding, and these are not credentials.
+FIXTURE_VALUE = "fixture-key-alpha"
+FIXTURE_RETIRED_VALUE = "fixture-key-beta"
 
 INITIALIZE_REQUEST = {
     "jsonrpc": "2.0",
@@ -120,12 +123,12 @@ def scratch(pg_server: PostgresSettings) -> Iterator[Scratch]:
             conn.execute(
                 "insert into api_keys (id, customer_id, key_value, label, revoked) "
                 "values (1000, 1, %s, 'prod', false)",
-                (FIXTURE_KEY,),
+                (FIXTURE_VALUE,),
             )
             conn.execute(
                 "insert into api_keys (id, customer_id, key_value, label, revoked) "
                 "values (1001, 1, %s, 'old', true)",
-                (FIXTURE_RETIRED_KEY,),
+                (FIXTURE_RETIRED_VALUE,),
             )
             conn.commit()
         yield Scratch(name=name, customer_id=1, ticket_id=10, key_id=1000)
@@ -182,19 +185,21 @@ def real_pg_app(scratch: Scratch) -> Iterator[str]:
 
 
 @pytest.fixture(scope="session")
-def mint_postgres_obo() -> Any:
-    """Mint a real on-behalf-of token for the postgres-mcp audience.
+def mint_support_obo() -> Any:
+    """Mint a real support-actored on-behalf-of token for the postgres-mcp audience.
 
-    The realm's `console` client issues its token with triage-agent as its only
-    audience, and support-agent is not permitted to exchange a token it is not
-    in the audience of, so there is no direct support-agent exchange today. The
-    working real path is the gateway's own two hops: triage-agent for the
-    `warrant` audience, then the `warrant` client for `postgres-mcp`. The
-    resulting token is issued by the real realm, has the real signature, and
-    names the postgres-mcp audience; only the actor is `warrant`.
+    alice's console token names both `triage-agent` and `support-agent` in its
+    `aud`, so support-agent can exchange it directly for a `postgres-mcp` token.
+    The result is issued by the real realm, has the real signature, names the
+    postgres-mcp audience, and records `act.sub` and `azp` as support-agent.
     """
     try:
-        from agents.auth import AuthError, DevSettings, exchange_for_obo, login_as_alice
+        from agents.auth import (
+            AuthError,
+            DevSettings,
+            exchange_for_obo,
+            login_as_alice,
+        )
     except Exception as error:  # noqa: BLE001 - a missing .env value is a skip, not a failure
         pytest.skip(f"dev token settings are unavailable: {error}")
 
@@ -204,14 +209,14 @@ def mint_postgres_obo() -> Any:
         try:
             with httpx.Client(timeout=20.0) as client:
                 subject_token = login_as_alice(dev, client)
-                warrant_token = exchange_for_obo(dev, client, subject_token, "warrant", task_id)
-                return exchange_for_obo(
-                    dev, client, warrant_token, "postgres-mcp", task_id, client_id="warrant"
+                token = exchange_for_obo(
+                    dev, client, subject_token, "postgres-mcp", task_id, client_id="support-agent"
                 )
         except httpx.HTTPError as error:
             pytest.skip(f"no Keycloak at {dev.keycloak_url}: {error}")
         except AuthError as error:
-            pytest.fail(f"Keycloak refused the postgres-mcp exchange: {error}")
+            pytest.fail(f"Keycloak refused the support-agent exchange: {error}")
+        return token
 
     return mint
 
@@ -319,10 +324,22 @@ async def test_get_ticket_returns_the_ticket_its_notes_and_source_tiers(
     assert note["source"]["author_tier"] == "member"
 
 
-async def test_a_real_obo_token_for_the_postgres_audience_reads_a_ticket(
-    real_pg_app: str, mint_postgres_obo: Any, scratch: Scratch
+async def test_a_real_support_agent_token_reads_a_ticket(
+    real_pg_app: str, mint_support_obo: Any, scratch: Scratch
 ) -> None:
-    token = mint_postgres_obo()
+    """The acceptance path end to end, with the actor the ticket names.
+
+    The console client carries both `aud-triage-agent` and `aud-support-agent`,
+    so a human login is exchangeable by support-agent directly, and the token
+    this mints records `act.sub` and `azp` as support-agent. That is the real
+    exchange the demo takes, not the gateway's two hops.
+    """
+    token = mint_support_obo()
+    claims = decode_claims(token)["claims"]
+
+    assert claims["act"] == {"sub": "support-agent"}
+    assert claims["azp"] == "support-agent"
+    assert "postgres-mcp" in audience_list(claims)
 
     async with mcp_session(real_pg_app, token) as session:
         result = await session.call_tool("get_ticket", {"ticket_id": scratch.ticket_id})
@@ -344,7 +361,7 @@ async def test_run_readonly_sql_refuses_a_write_and_allows_a_select(
         allowed = await session.call_tool("run_readonly_sql", {"sql": sql})
 
     assert refused.is_error is True
-    assert "read-only" in text_of(refused).lower()
+    assert "not a read keyword" in text_of(refused)
     assert allowed.is_error is False
     payload = structured(allowed)
     assert payload["columns"] == ["id", "subject"]
@@ -352,6 +369,87 @@ async def test_run_readonly_sql_refuses_a_write_and_allows_a_select(
     assert payload["source"]["kind"] == "query"
     assert payload["source"]["id"] == hashlib.sha256(sql.encode("utf-8")).hexdigest()[:12]
     assert payload["source"]["author_tier"] == "unknown"
+
+
+async def test_run_readonly_sql_refuses_every_statement_escape(
+    pg_app: str, sign_token: Any, scratch: Scratch
+) -> None:
+    """A transaction keyword cannot carry a write past the read guard.
+
+    A no-parameter `execute` used the simple query protocol, which accepts more
+    than one statement, so `commit; update ...` committed the read-only
+    transaction and then ran the write. Every one of these has to be a tool
+    error, and the ticket has to still be `open` afterwards.
+    """
+    token = sign_token(audience="postgres-mcp", scope=("db:read",))
+    escapes = [
+        "commit; update tickets set status='closed'",
+        "rollback; update tickets set status='closed'",
+        "begin read write; update tickets set status='closed'",
+        "select 1; commit; update tickets set status='closed'",
+        "update tickets set status='closed'",
+    ]
+
+    async with mcp_session(pg_app, token) as session:
+        results = [await session.call_tool("run_readonly_sql", {"sql": sql}) for sql in escapes]
+        ticket = await session.call_tool("get_ticket", {"ticket_id": scratch.ticket_id})
+
+    for sql, result in zip(escapes, results, strict=True):
+        assert result.is_error is True, f"{sql!r} was not refused"
+    assert structured(ticket)["status"] == "open", "none of the escapes ran a write"
+
+
+async def test_run_readonly_sql_refuses_copy_to_program(pg_app: str, sign_token: Any) -> None:
+    """`COPY ... TO PROGRAM` runs a shell command as the server's role.
+
+    It reached the database through the simple query protocol before, and the
+    server's role is a superuser, so this was a shell. The statement has to be
+    refused before it is sent.
+    """
+    token = sign_token(audience="postgres-mcp", scope=("db:read",))
+    sql = "copy (select 'x') to program 'cat > /tmp/w8_copy_escape'"
+
+    async with mcp_session(pg_app, token) as session:
+        result = await session.call_tool("run_readonly_sql", {"sql": sql})
+
+    assert result.is_error is True
+    assert "copy" in text_of(result)
+    assert "not a read keyword" in text_of(result)
+
+
+async def test_run_readonly_sql_refuses_a_second_statement_after_a_select(
+    pg_app: str, sign_token: Any, scratch: Scratch
+) -> None:
+    """A read keyword does not make the rest of the string a read.
+
+    `select 1; commit; update ...` starts with `select`, so only the extended
+    protocol stops it: the whole string is one subquery, and a second statement
+    is a syntax error there.
+    """
+    token = sign_token(audience="postgres-mcp", scope=("db:read",))
+
+    async with mcp_session(pg_app, token) as session:
+        result = await session.call_tool("run_readonly_sql", {"sql": "select 1; select 2"})
+        ticket = await session.call_tool("get_ticket", {"ticket_id": scratch.ticket_id})
+
+    assert result.is_error is True
+    assert structured(ticket)["status"] == "open"
+
+
+async def test_run_readonly_sql_allows_a_trailing_semicolon_and_a_leading_comment(
+    pg_app: str, sign_token: Any
+) -> None:
+    """The two spellings a person types still read, and a comment hides nothing."""
+    token = sign_token(audience="postgres-mcp", scope=("db:read",))
+
+    async with mcp_session(pg_app, token) as session:
+        trailing = await session.call_tool("run_readonly_sql", {"sql": "select 1;"})
+        commented = await session.call_tool("run_readonly_sql", {"sql": "/* a note */ select 1"})
+
+    assert trailing.is_error is False
+    assert structured(trailing)["rows"] == [{"?column?": 1}]
+    assert commented.is_error is False
+    assert structured(commented)["rows"] == [{"?column?": 1}]
 
 
 async def test_get_customer_returns_keys_and_lists_every_value_in_secrets(
@@ -365,14 +463,14 @@ async def test_get_customer_returns_keys_and_lists_every_value_in_secrets(
     assert result.is_error is False
     payload = structured(result)
     values = [key["key_value"] for key in payload["api_keys"]]
-    assert values == [FIXTURE_KEY, FIXTURE_RETIRED_KEY]
+    assert values == [FIXTURE_VALUE, FIXTURE_RETIRED_VALUE]
     # Every key value the result carries is in `secrets`, which is what W11
     # reads without a model.
     assert set(values) <= set(payload["secrets"])
     assert payload["secrets"] == values
     # The value reaches the model once, on the key row, not a second time in the
     # structured metadata.
-    assert text_of(result).count(FIXTURE_KEY) == 1
+    assert text_of(result).count(FIXTURE_VALUE) == 1
 
 
 async def test_run_readonly_sql_lists_a_selected_key_value_in_secrets(
@@ -387,8 +485,73 @@ async def test_run_readonly_sql_lists_a_selected_key_value_in_secrets(
 
     assert result.is_error is False
     payload = structured(result)
-    assert payload["secrets"] == [FIXTURE_KEY, FIXTURE_RETIRED_KEY]
-    assert text_of(result).count(FIXTURE_KEY) == 1
+    assert payload["secrets"] == [FIXTURE_VALUE, FIXTURE_RETIRED_VALUE]
+    assert text_of(result).count(FIXTURE_VALUE) == 1
+
+
+async def test_run_readonly_sql_lists_an_aliased_or_json_key_value_in_secrets(
+    pg_app: str, sign_token: Any
+) -> None:
+    """The key value is in `secrets` however the statement names it.
+
+    A column-name match found the value only when the column was literally
+    `key_value`, so `select key_value as kv`, `select key_value || '' as kv`,
+    and `select row_to_json(k) from api_keys k` all leaked a key while W11 read
+    an empty `secrets`. The check is on the returned values instead.
+    """
+    token = sign_token(audience="postgres-mcp", scope=("db:read",))
+    statements = [
+        "select key_value as kv from api_keys order by id",
+        "select key_value || '' as kv from api_keys order by id",
+        "select row_to_json(k) from api_keys k order by k.id",
+    ]
+
+    async with mcp_session(pg_app, token) as session:
+        for sql in statements:
+            result = await session.call_tool("run_readonly_sql", {"sql": sql})
+            assert result.is_error is False, text_of(result)
+            secrets = structured(result)["secrets"]
+            assert FIXTURE_VALUE in secrets, f"{sql!r} leaked a key with no secrets entry"
+            assert FIXTURE_RETIRED_VALUE in secrets, f"{sql!r} missed the retired key"
+
+
+async def test_run_readonly_sql_refuses_a_result_over_the_byte_budget(
+    pg_app: str, sign_token: Any
+) -> None:
+    """A result too big for the transport is an error, not a dropped stream.
+
+    `select repeat('x', 1000000)` used to end the SSE stream with no response
+    while the audit line said `"status": "ok"`: a call the audit described as
+    fine and the caller never got an answer for.
+    """
+    token = sign_token(audience="postgres-mcp", scope=("db:read",))
+    sql = "select repeat('x', 1000000)"
+
+    async with mcp_session(pg_app, token) as session:
+        result = await session.call_tool("run_readonly_sql", {"sql": sql})
+
+    assert result.is_error is True
+    assert "limit" in text_of(result)
+
+
+async def test_run_readonly_sql_allows_a_result_just_under_the_byte_budget(
+    pg_app: str, sign_token: Any
+) -> None:
+    """The budget has to leave room for the response the transport can carry.
+
+    A cap that only fired above the transport's own edge would let a result
+    through that still ends the stream, which is the audit-says-ok case the cap
+    exists to prevent. This reads a result just under the budget and gets an
+    answer, so the two numbers are not the same.
+    """
+    token = sign_token(audience="postgres-mcp", scope=("db:read",))
+    sql = "select repeat('x', 200000)"
+
+    async with mcp_session(pg_app, token) as session:
+        result = await session.call_tool("run_readonly_sql", {"sql": sql})
+
+    assert result.is_error is False, text_of(result)
+    assert structured(result)["rows"] == [{"repeat": "x" * 200000}]
 
 
 async def test_search_customers_never_returns_keys(pg_app: str, sign_token: Any) -> None:
@@ -401,6 +564,27 @@ async def test_search_customers_never_returns_keys(pg_app: str, sign_token: Any)
     payload = structured(result)
     assert [customer["id"] for customer in payload["customers"]] == [1]
     assert "fixture-key" not in json.dumps(payload)
+
+
+async def test_search_customers_treats_a_wildcard_as_a_character(
+    pg_app: str, sign_token: Any
+) -> None:
+    """`%` is a character to find, not every customer.
+
+    Unescaped, `search_customers("%")` returned every row, and the resource the
+    decision was made against was the literal query string rather than the rows
+    the read returned.
+    """
+    token = sign_token(audience="postgres-mcp", scope=("db:read",))
+
+    async with mcp_session(pg_app, token) as session:
+        wildcard = await session.call_tool("search_customers", {"query": "%"})
+        underscore = await session.call_tool("search_customers", {"query": "Ac_e"})
+
+    assert wildcard.is_error is False
+    assert structured(wildcard)["customers"] == [], "a wildcard matched rows it does not name"
+    assert underscore.is_error is False
+    assert structured(underscore)["customers"] == [], "an underscore is not a single character"
 
 
 # -- the writes ------------------------------------------------------------
@@ -438,7 +622,7 @@ async def test_rotate_api_key_replaces_the_value_and_revokes_the_other_rows(
 
     assert rotated.is_error is False
     payload = structured(rotated)
-    assert payload["key_value"] != FIXTURE_KEY
+    assert payload["key_value"] != FIXTURE_VALUE
     assert payload["secrets"] == [payload["key_value"]]
     rows = {row["id"]: row for row in structured(detail)["api_keys"]}
     assert rows[scratch.key_id]["revoked"] is False

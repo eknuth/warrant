@@ -139,15 +139,41 @@ def test_tool_result_carries_a_payload_with_no_secrets_whole() -> None:
     assert "acme" in result.content[0].text
 
 
-def test_secrets_in_collects_every_key_value_in_row_order() -> None:
+def test_secrets_in_collects_every_known_key_value_in_row_order() -> None:
     rows = [
         {"id": 1, "key_value": "alpha"},
         {"id": 2, "key_value": "beta"},
         {"id": 3, "key_value": None},
     ]
 
-    assert secrets_in(["id", "key_value"], rows) == ["alpha", "beta"]
-    assert secrets_in(["id"], rows) == []
+    assert secrets_in(["id", "key_value"], rows, ["alpha", "beta", "gamma"]) == [
+        "alpha",
+        "beta",
+    ]
+    assert secrets_in(["id"], rows, ["alpha"]) == []
+    assert secrets_in(["id", "key_value"], rows, []) == [], "no known keys, nothing listed"
+
+
+def test_secrets_in_finds_a_key_under_an_alias_or_inside_a_json_object() -> None:
+    """The key value reaches the model under any name, so the check is on values.
+
+    A column-name match found nothing for `select key_value as kv`, for
+    `select key_value || '' as kv`, or for `select row_to_json(k) from api_keys
+    k`, so W11 saw an empty `secrets` for a read that leaked a key.
+    """
+    aliased = [{"kv": "alpha"}]
+    concatenated = [{"kv": "alpha"}]
+    as_json = [{"row_to_json": '{"id": 1, "key_value": "alpha"}'}]
+
+    assert secrets_in(["kv"], aliased, ["alpha", "beta"]) == ["alpha"]
+    assert secrets_in(["kv"], concatenated, ["alpha", "beta"]) == ["alpha"]
+    assert secrets_in(["row_to_json"], as_json, ["alpha", "beta"]) == ["alpha"]
+
+
+def test_secrets_in_does_not_list_a_key_the_result_does_not_carry() -> None:
+    rows = [{"id": 1, "name": "Acme"}]
+
+    assert secrets_in(["id", "name"], rows, ["alpha"]) == []
 
 
 def test_query_source_ids_the_statement_by_digest() -> None:
