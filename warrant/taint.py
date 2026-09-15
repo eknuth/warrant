@@ -34,16 +34,19 @@ in any file read. A write or send whose argument strings contain a secret as a
 substring, URL-encoded, or base64-encoded sets `argsTouchSecret`, matched without
 regard to case.
 
-The plain values live in this object and nowhere else. Every secret also has a
-SHA-256 digest, and the digest is what a decision line carries. A sample of
-source text that contains a secret is redacted before it is recorded, without
-regard to case, and a resource that is a secret is replaced with its digest
-before it enters the request. A resource that is a key-shaped value is redacted
-whether or not the task read it first, so the call that first names a key keeps
-it out of the log. The one value that can still reach a line is a non-key-shaped
-value that a read's own argument names before that read reveals it: at decision
-time the value is not in the secret set and is not key-shaped. The next call has
-it. `docs/provenance.md` states that limit.
+The plain values live in this object and nowhere else. A secret is keyed on its
+case-folded spelling and has one SHA-256 digest, over that spelling, so two
+spellings of one value are one secret and a sample's digest is the same in every
+process. The digest is what a decision line carries. A sample of source text
+that contains a secret is redacted before it is recorded, without regard to
+case, and a resource that is a secret is replaced with its digest before it
+enters the request. A resource that is a key-shaped value is redacted and added
+to the secret set, whether or not the task read it first, so the call that first
+names a key keeps it out of the resource field and out of every later sample.
+The one value that can still reach a line is a non-key-shaped value that a read's
+own argument names before that read reveals it: at decision time the value is
+not in the secret set and is not key-shaped. `docs/provenance.md` states that
+limit.
 """
 
 from __future__ import annotations
@@ -73,11 +76,14 @@ _ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\s*[=:]\s*\"?([^\s\"',\\]{8
 # names, plus a length floor that keeps a bare prefix from being a secret.
 _KEY_SHAPED = re.compile(r"(?:sk_live_|ghp_)[A-Za-z0-9_]{4,}|AKIA[A-Z0-9]{8,}")
 
-# The prefixes a key-shaped value carries. The harvest above wants a longer tail
-# so a bare prefix is not a secret. The resource check uses the prefix alone,
-# because a resource that carries the prefix at all must not reach the log, and
-# the acceptance fixture `sk_live_abc` is shorter than the harvest's floor.
-_KEY_PREFIX = re.compile(r"sk_live_|ghp_|AKIA", re.IGNORECASE)
+# A key-shaped value as a whole resource. Case-sensitive, so `nakia@acme.test`
+# and `acme/akia-vault` are ordinary names rather than keys: a case-insensitive
+# or unbounded match made any id carrying `akia` an unknown resource, which is
+# fail-open for a confidential row. The left boundary keeps an embedded fragment
+# from matching, and the tail floor is one character so `sk_live_abc` redacts.
+_KEY_RESOURCE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:sk_live_[A-Za-z0-9_]+|ghp_[A-Za-z0-9_]+|AKIA[A-Z0-9_]+)"
+)
 
 # A file whose name says it holds secrets, matched against the path inside the
 # source id. `secrets*` is a basename prefix; `.env` may be a name or a suffix.
@@ -122,7 +128,10 @@ class TaskState:
     task_id: str
     taint: Taint = field(default_factory=current_taint)
     sources: dict[str, ReadSource] = field(default_factory=dict)
-    # The plain values, in memory only. `secret_digests` is what a log may carry.
+    # Keyed on the case-folded value, so two spellings of one value are one
+    # secret with one digest and a sample's digest does not depend on set order.
+    # The plain values are in memory only; `secret_digests` is what a log may
+    # carry, and it is over the folded spelling.
     secrets: set[str] = field(default_factory=set)
     secret_digests: dict[str, str] = field(default_factory=dict)
     named_targets: set[ResourceRef] = field(default_factory=set)
@@ -137,7 +146,7 @@ class TaskState:
         *,
         payload: Any,
         sources: Sequence[Source] = (),
-        records: Sequence[Any] = (),
+        records: Sequence[tuple[Source, Any]] = (),
     ) -> None:
         """Record one forwarded read: its sources, its text, and its secrets.
 
@@ -146,16 +155,20 @@ class TaskState:
         and the issue's words are what a later write would be quoting whichever
         block the words sat in.
 
-        `records` is the record each source block sat in, in the same order as
-        `sources`. The file harvest reads the record's own text field, not the
-        whole result: the result carries the provenance block, and a block whose
-        id names `.env` is metadata rather than a value the file held.
+        `records` is every source block occurrence paired with the record it sat
+        in, repeats included, because a code search returns several matches in
+        one file and each match's snippet can hold a key. The harvest reads the
+        record's own text field, not the whole result: the result carries the
+        provenance block, and a block whose id names `.env` is metadata rather
+        than a value the file held. A caller that passes only `sources` gets the
+        payload as each source's record, so the harvest is never silently empty.
         """
         raw = dump(payload)
         text = normalize(raw)
         for source in sources:
             self.sources[source.id] = ReadSource(source=source, text=text)
-        self._harvest(payload, sources, records)
+        harvest = list(records) or [(source, payload) for source in sources]
+        self._harvest(payload, harvest)
 
     def name_target(self, kind: str, name: str) -> None:
         """Name the task's target from the first call that resolves a resource."""
@@ -269,18 +282,28 @@ class TaskState:
     def redact(self, text: str) -> str:
         """Replace every known secret value in `text` with its digest.
 
-        Longest value first, so a secret that contains a shorter one is replaced
-        whole. The replace is case-insensitive: a sample of source text is
-        normalized to lower case, so a mixed-case secret would otherwise reach
-        the log in its folded spelling. The result is what a decision log may
-        carry.
+        One pass over the original text, with a single alternation of every form
+        longest first. Writing digests into the text and then re-scanning it
+        would let a later secret match inside an already-written digest, and an
+        auditor's hash of the value would not find the line.
+
+        The match is case-insensitive and by substring, so a sample of source
+        text, which is normalized to lower case, is redacted even when the
+        secret's spelling was mixed. Redacting by substring can replace a value
+        that appears inside an unrelated word or id; that over-redaction is the
+        safe direction and `docs/provenance.md` says so.
         """
-        for secret in sorted(self.secrets, key=len, reverse=True):
+        forms: dict[str, str] = {}
+        for secret in self.secrets:
             digest = self.secret_digests[secret]
             for form in secret_forms(secret):
                 if form:
-                    text = re.sub(re.escape(form), digest, text, flags=re.IGNORECASE)
-        return text
+                    forms[form.casefold()] = digest
+        if not forms:
+            return text
+        alternation = "|".join(re.escape(form) for form in sorted(forms, key=len, reverse=True))
+        pattern = re.compile(alternation, re.IGNORECASE)
+        return pattern.sub(lambda match: forms[match.group(0).casefold()], text)
 
     def redact_resource(self, value: str) -> str:
         """The digest for a resource value that is a secret, else the value.
@@ -290,9 +313,12 @@ class TaskState:
         `repo-acme-widgets` because `acme-widgets` is a known secret would
         corrupt the id and move the task's named target.
 
-        A value that carries a key-shaped token is redacted whether or not the
-        token has been harvested, because the call that first names a key has to
-        keep it out of the log too. The digest is over the value as given.
+        A key-shaped value is redacted whether or not it has been harvested, and
+        it is added to the secret set with its digest, so the call that first
+        names a key keeps it out of the resource field and out of every later
+        sample. The key-shaped check is case-sensitive and anchored at a left
+        boundary, so `nakia@acme.test` and `acme/akia-vault` stay ordinary
+        names.
 
         The one ordering limit left is a non-key-shaped value that a read's own
         argument names before that read reveals it: at decision time the secret
@@ -304,17 +330,20 @@ class TaskState:
             return value
         folded = value.casefold()
         for secret, digest in self.secret_digests.items():
-            if secret.casefold() == folded:
+            if secret == folded:
                 return digest
-        if _KEY_PREFIX.search(value):
-            return secret_digest(value)
+        if _KEY_RESOURCE.search(value):
+            self._add_secret(value)
+            return self.secret_digests[value.casefold()]
         return value
 
-    def _harvest(self, payload: Any, sources: Sequence[Source], records: Sequence[Any]) -> None:
-        """Collect secrets from the result's metadata and from any file read.
+    def _harvest(self, payload: Any, records: Sequence[tuple[Source, Any]]) -> None:
+        """Collect secrets from the result's metadata and from every file record.
 
         The `secrets` list is read from the whole payload, wherever it sits. A
-        file's own values are read from that file's text field only. The whole
+        file's own values are read from that file's text field, and every record
+        is visited rather than one per source id, because a code search returns
+        several matches in one file and each snippet can hold a key. The whole
         result also carries the provenance block, and a block whose id names a
         secret file (`acme/widgets:.env@main`) is metadata: scanning the whole
         result harvested that id and then every later write that mentioned it
@@ -322,10 +351,9 @@ class TaskState:
         """
         for value in values_under(payload, "secrets"):
             self._add_secret(value)
-        for index, source in enumerate(sources):
+        for source, record in records:
             if not _is_file_source(source):
                 continue
-            record = records[index] if index < len(records) else None
             text = file_text_of(record)
             if not text:
                 continue
@@ -336,20 +364,26 @@ class TaskState:
                     self._add_secret(value, minimum=MIN_FILE_VALUE_LENGTH)
 
     def _add_secret(self, value: Any, *, minimum: int = 1) -> None:
+        """Add one secret, keyed on its case-folded spelling.
+
+        One digest per folded value, so two spellings of the same value are one
+        secret and a sample's digest is the same in every process. The digest is
+        over the folded spelling.
+        """
         if not isinstance(value, str):
             return
-        value = value.strip()
-        if len(value) < minimum:
+        folded = value.strip().casefold()
+        if len(folded) < minimum:
             return
-        self.secrets.add(value)
-        self.secret_digests.setdefault(value, secret_digest(value))
+        self.secrets.add(folded)
+        self.secret_digests.setdefault(folded, secret_digest(folded))
 
     def _secret_matches(self, strings: Sequence[str]) -> list[str]:
         """The task's secrets that any argument string carries, in sorted order.
 
-        The comparison is case-insensitive, because a case-folded spelling is
-        still the same value. A body that carries `sk_live_abcdef` for a task
-        whose secret is `Sk_Live_AbCdEf` is treated as carrying the secret.
+        The comparison is case-insensitive, and the encoded forms are computed
+        from the folded value, so a body that carries the base64 of the folded
+        spelling matches as well as the plain spelling.
         """
         folded = [text.casefold() for text in strings]
         matched: list[str] = []
@@ -436,10 +470,10 @@ def file_text_of(record: Any) -> str:
     """The file text in a gitea file record, or an empty string.
 
     `FileContent` carries the text in `content` and a `search_code` match carries
-    its line in `snippet`. The rest of the record and its provenance block are
-    not scanned. A search result whose block sits under a list keeps the list's
-    parent as its record, so a match there contributes no text; that is a miss
-    rather than a false positive.
+    its line in `snippet`. Every match's record is the match itself, so a search
+    hit's snippet is harvested. The rest of the record and its provenance block
+    are not scanned. A record with neither field, such as a `commit_file` result,
+    contributes no text.
     """
     if not isinstance(record, Mapping):
         return ""

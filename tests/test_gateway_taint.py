@@ -153,6 +153,47 @@ def inbox_payload(*, sender: str = "stranger@other.test") -> dict[str, Any]:
     }
 
 
+def inbox_payload_echoing(mailbox: str) -> dict[str, Any]:
+    """An inbox result whose mailbox field carries the value the call named."""
+    return {
+        "mailbox": mailbox,
+        "messages": [
+            {
+                "id": "m1",
+                "from_address": "desk@acme.test",
+                "source": {
+                    "system": "mail",
+                    "kind": "message",
+                    "id": "m1",
+                    "author": "desk@acme.test",
+                    "author_tier": "member",
+                },
+            }
+        ],
+    }
+
+
+def file_source_block(path: str, *, author: str = "bob", tier: str = "member") -> dict[str, Any]:
+    return {
+        "system": "gitea",
+        "kind": "file",
+        "id": f"acme/widgets:{path}@main",
+        "author": author,
+        "author_tier": tier,
+    }
+
+
+def graph_with_resources(tmp_path: Path, *resources: dict[str, Any]) -> Graph:
+    """The shipped seed plus test-local resource rows, in a fresh database."""
+    import yaml
+
+    data = yaml.safe_load(SEED.read_text(encoding="utf-8"))
+    data["resources"].extend(resources)
+    seed = tmp_path / "graph.yml"
+    seed.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return load_graph(seed, tmp_path / "warrant.db")
+
+
 def build(
     tmp_path: Path,
     graph: Graph,
@@ -635,6 +676,100 @@ async def test_a_mixed_case_secret_is_redacted_from_every_file(
         assert mixed.casefold() not in text, path
 
 
+async def test_a_second_match_in_one_file_is_harvested_and_kept_out_of_the_log(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """A code search returns several matches in one file; the later key counts too.
+
+    The ledger dedupes the two matches into one source, and the harvest used to
+    see only that one entry, so a key in the second match was never a secret and
+    a later write carrying it logged it plain.
+    """
+    first = {
+        "path": ".env",
+        "line": 1,
+        "snippet": "STRIPE=sk_live_aaaa1111",
+        "source": file_source_block(".env"),
+    }
+    second = {
+        "path": ".env",
+        "line": 2,
+        "snippet": "GITHUB=ghp_bbbb2222",
+        "source": file_source_block(".env"),
+    }
+    payload = {"query": "key", "matches": [first, second], "truncated": False}
+    gateway, engine = build(tmp_path, graph_db, payload, servers=[GITEA])
+
+    await gateway.call_tool(
+        "gitea.search_code",
+        {"repo": "acme/widgets", "query": "key"},
+        claims=claims_for(scope="gitea:read"),
+        token="",
+    )
+    await gateway.call_tool(
+        "gitea.create_issue_comment",
+        {"repo": "acme/widgets", "number": 1, "body": "the second key is ghp_bbbb2222"},
+        claims=claims_for(scope="gitea:read gitea:write"),
+        token="",
+    )
+
+    assert len(gateway.ledger.get("task-1", "triage-agent").sources) == 1, "one file, one source"
+    request = request_for(engine, "gitea.create_issue_comment")
+    assert request.args_touch_secret is True
+    rendered = str(request.overlap_details)
+    assert "ghp_bbbb2222" not in rendered
+    assert "sk_live_aaaa1111" not in rendered
+    for path in (tmp_path / "runs").rglob("*"):
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        assert "ghp_bbbb2222" not in text, path
+        assert "sk_live_aaaa1111" not in text, path
+
+
+async def test_a_key_shaped_resource_becomes_a_secret_for_the_next_call(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """The read that names a key registers it, so the next call's body is caught."""
+    key = "sk_live_abcd1234"
+    runs = tmp_path / "runs"
+    log = DecisionLog(runs)
+    engine = CedarEngine(graph=graph_db, decision_log=log)
+    gateway = make_gateway(
+        tmp_path,
+        graph_db,
+        engine,
+        servers=[GITEA, MAIL],
+        upstream=FakeUpstream(result=tool_result(inbox_payload_echoing(key))),
+    )
+    lead = {
+        "sub": "h-carol",
+        "act": "support-lead-agent",
+        "scope": "db:read mail:send",
+        "groups": ["support-leads"],
+    }
+
+    await gateway.call_tool(
+        "mail.list_inbox", {"mailbox": key}, claims=claims_for(**lead), token=""
+    )
+    result = await gateway.call_tool(
+        "mail.send_reply",
+        {"to": "stranger@other.test", "subject": "key", "body": f"the key is {key}"},
+        claims=claims_for(**lead),
+        token="",
+    )
+
+    read = log.read("task-1")[0]
+    assert read.request.resource == "sha256:" + hashlib.sha256(key.encode()).hexdigest()
+    carrying = log.read("task-1")[-1]
+    assert carrying.request.args_touch_secret is True
+    assert "secret-in-args" in carrying.policy_ids
+    assert result.is_error is True
+    for path in runs.rglob("*"):
+        if path.is_file():
+            assert key not in path.read_text(encoding="utf-8"), path
+
+
 # -- the named target -------------------------------------------------------
 
 
@@ -856,3 +991,64 @@ async def test_a_gateway_read_of_an_instruction_file_from_a_member_is_member(
 
     sources = gateway.ledger.get("task-1", "triage-agent").sources
     assert sources[0].author_tier.value == "member"
+
+
+async def test_a_name_carrying_a_key_prefix_keeps_its_graph_row_and_verdict(
+    tmp_path: Path,
+) -> None:
+    """`acme/akia-vault` is a repo. A case-insensitive prefix match made it a secret.
+
+    That turned the row into an unknown resource, so `tainted-visibility` could
+    not see its confidential classification and the read was allowed: the
+    fail-open direction. The row is test-local, so `infra/graph.yml` is untouched.
+    """
+    resource = {
+        "id": "repo-acme-akia-vault",
+        "kind": "repo",
+        "name": "acme/akia-vault",
+        "owner_human_id": "h-alice",
+        "sensitivity": "confidential",
+    }
+    other = {
+        "id": "repo-acme-other-vault",
+        "kind": "repo",
+        "name": "acme/other-vault",
+        "owner_human_id": "h-alice",
+        "sensitivity": "confidential",
+    }
+    with graph_with_resources(tmp_path, resource, other) as graph:
+        log = DecisionLog(tmp_path / "runs")
+        engine = CedarEngine(graph=graph, decision_log=log)
+        gateway = make_gateway(
+            tmp_path,
+            graph,
+            engine,
+            servers=[GITEA],
+            upstream=FakeUpstream(result=tool_result(issue_payload())),
+        )
+        claims = claims_for(sub="h-alice", act="triage-agent", scope="gitea:read")
+
+        await gateway.call_tool(
+            "gitea.get_issue", {"repo": "acme/widgets", "number": 1}, claims=claims, token=""
+        )
+        await gateway.call_tool(
+            "gitea.get_file",
+            {"repo": "acme/akia-vault", "path": "README.md"},
+            claims=claims,
+            token="",
+        )
+        await gateway.call_tool(
+            "gitea.get_file",
+            {"repo": "acme/other-vault", "path": "README.md"},
+            claims=claims,
+            token="",
+        )
+
+    reads = [
+        decision for decision in log.read("task-1") if decision.request.tool == "gitea.get_file"
+    ]
+    akia, same = reads
+    assert akia.request.resource == "repo-acme-akia-vault", "the graph row survives"
+    assert "tainted-visibility" in akia.policy_ids
+    assert same.request.resource == "repo-acme-other-vault"
+    assert "tainted-visibility" in same.policy_ids

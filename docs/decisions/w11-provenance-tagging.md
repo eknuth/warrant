@@ -76,26 +76,38 @@ of the line can see both what was read and that the task rule was switched off.
 ## Secrets are digests in the log and values only in memory
 
 `warrant/taint.py` keeps the plain secret values in the `TaskState` and a
-SHA-256 digest of each one. `overlapDetails` carries the digest for a secret hit,
-a sample of source text that contains a secret is redacted before it is recorded,
-and a resolved resource that is a secret is replaced with its digest before the
-request is built. The scan needs the value and the log must not have it, so the
-two are separate from the point the value enters the state.
+SHA-256 digest of each one. A secret is keyed on its case-folded spelling with
+one digest over that spelling, so two spellings of one value cannot log two
+digests depending on set order. `overlapDetails` carries the digest for a secret
+hit, a sample of source text that contains a secret is redacted before it is
+recorded, and a resolved resource that is a secret is replaced with its digest
+before the request is built. The scan needs the value and the log must not have
+it, so the two are separate from the point the value enters the state.
 
-Redaction is whole-value and case-insensitive rather than a substring replace.
-A substring replace over `repo-acme-widgets` with `acme-widgets` in the secret
-set rewrote the id to `repo-<digest>`, which moved the task's named target and
-refused an honest write. A value that carries a key-shaped token is redacted
-whether or not it was harvested, so the call that first names a key keeps it out
-of the log. The one value that can still reach a line is a non-key-shaped value a
-read's own argument names before that read reveals it; at decision time it is in
-neither the secret set nor the key shapes. `docs/provenance.md` states that
-limit.
+Resource redaction is whole-value, case-insensitive equality or a key-shaped
+match, and never a substring replace. A substring replace over
+`repo-acme-widgets` with `acme-widgets` in the secret set rewrote the id to
+`repo-<digest>`, which moved the task's named target and refused an honest write.
+A key-shaped resource is added to the secret set on the call that names it, so it
+is redacted whether or not it was harvested and no later sample carries it. The
+key-shaped check is case-sensitive and anchored, because a case-insensitive
+prefix match made `acme/akia-vault` an unknown resource and let a confidential
+read through. Sample redaction is a single pass over the original text, so a
+digest already written is not re-scanned, and it is by substring, which can
+over-redact an unrelated word: the safe direction.
+
+The one value that can still reach a line is a non-key-shaped value a read's own
+argument names before that read reveals it; at decision time it is in neither the
+secret set nor the key shapes, and a repeated call before any read reveals it
+logs it again. The leak lasts until some read reveals the value, and every later
+call redacts it. `docs/provenance.md` states that limit.
 
 The file harvest reads a file record's own `content` (or a code match's
-`snippet`) rather than the whole result. Scanning the whole result harvested a
-source block's `id`, so `acme/widgets:.env@main` became a secret and every later
-write that mentioned it was a secret hit.
+`snippet`) rather than the whole result, and it visits every match rather than
+one per source id, because a code search returns several matches in one file.
+Scanning the whole result harvested a source block's `id`, so
+`acme/widgets:.env@main` became a secret and every later write that mentioned it
+was a secret hit.
 
 ## `TAINT` is separate from `WARRANT_MODE`
 

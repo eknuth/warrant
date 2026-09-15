@@ -41,7 +41,7 @@ def external_issue(make_source: MakeSource) -> Source:
 
 def read(state: TaskState, source: Source, payload: dict[str, object]) -> None:
     """One read where the source block sits in the payload itself."""
-    state.on_read(payload=payload, sources=[source], records=[payload])
+    state.on_read(payload=payload, sources=[source], records=[(source, payload)])
 
 
 def test_a_quote_of_an_external_source_is_an_external_overlap(
@@ -198,11 +198,28 @@ def test_a_secret_file_read_harvests_its_text_field_not_its_metadata(
     }
     source = make_source(system="gitea", kind="file", id="acme/widgets:.env@main")
 
-    state.on_read(payload=payload, sources=[source], records=[payload])
+    state.on_read(payload=payload, sources=[source], records=[(source, payload)])
 
     assert "acme-widgets" in state.secrets
     assert ".env@main" not in state.secrets
     assert "acme/widgets:.env@main" not in state.secrets
+
+
+def test_every_match_in_one_file_is_harvested(make_source: MakeSource) -> None:
+    """A code search returns several matches in one file; the second key counts too."""
+    state = TaskState(task_id="task-1")
+    source = make_source(system="gitea", kind="file", id="acme/widgets:.env@main")
+    first = {"path": ".env", "line": 1, "snippet": "STRIPE=sk_live_aaaa1111"}
+    second = {"path": ".env", "line": 2, "snippet": "GITHUB=ghp_bbbb2222"}
+
+    state.on_read(
+        payload={"query": "key", "matches": [first, second], "truncated": False},
+        sources=[source],
+        records=[(source, first), (source, second)],
+    )
+
+    assert "sk_live_aaaa1111" in state.secrets
+    assert "ghp_bbbb2222" in state.secrets
 
 
 def test_redact_resource_leaves_an_id_that_merely_contains_a_secret() -> None:
@@ -215,23 +232,61 @@ def test_redact_resource_leaves_an_id_that_merely_contains_a_secret() -> None:
 
 
 def test_redact_resource_redacts_a_key_shaped_value_before_a_harvest() -> None:
-    """The call that first names a key keeps it out of the log."""
+    """The call that first names a key keeps it out of the log, and registers it."""
     state = TaskState(task_id="task-1")
 
     assert state.secrets == set()
     assert state.redact_resource("sk_live_abc").startswith("sha256:")
+    assert state.secrets == {"sk_live_abc"}
     assert state.redact_resource("repo-acme-widgets") == "repo-acme-widgets"
 
 
-def test_the_sample_redaction_ignores_case() -> None:
+def test_a_name_that_merely_contains_a_key_prefix_is_not_redacted() -> None:
+    """The key-shaped check is case-sensitive and anchored, so `akia` is a name."""
+    state = TaskState(task_id="task-1")
+
+    assert state.redact_resource("nakia@acme.test") == "nakia@acme.test"
+    assert state.redact_resource("acme/akia-vault") == "acme/akia-vault"
+    assert state.redact_resource("repo-acme-akia-vault") == "repo-acme-akia-vault"
+    assert state.redact_resource("sk_live_abc").startswith("sha256:")
+
+
+def test_the_sample_redaction_ignores_case_and_folds_the_digest() -> None:
     """A normalized sample holds the folded spelling of a mixed-case secret."""
     state = TaskState(task_id="task-1")
-    state.on_read(payload={"secrets": ["Sk_Live_AbC"]})
+    state.on_read(payload={"secrets": ["Sk_Live_AbCdEf"]})
 
-    redacted = state.redact("the key is sk_live_abc in the log")
+    redacted = state.redact("the key is sk_live_abcdef in the log")
 
-    assert "sk_live_abc" not in redacted
-    assert state.secret_digests["Sk_Live_AbC"] in redacted
+    assert "sk_live_abcdef" not in redacted
+    assert state.secret_digests["sk_live_abcdef"] in redacted
+
+
+def test_a_folded_secret_matches_the_base64_of_its_folded_spelling(
+    make_request: MakeRequest,
+) -> None:
+    """The encoded forms are computed from the folded value, not the spelling read."""
+    secret = "Sk_Live_AbCdEf"
+    folded = secret.casefold()
+    state = TaskState(task_id="task-1")
+    state.on_read(payload={"secrets": [secret]})
+    request = make_request(action_kind=ActionKind.send, tool="mail.send_reply")
+
+    packed = base64.b64encode(folded.encode()).decode()
+    context = state.context_for(request, {"body": f"the key is {packed}"})
+
+    assert context["args_touch_secret"] is True
+
+
+def test_redaction_does_not_rescan_a_digest_it_wrote() -> None:
+    """A short secret that is a substring of `sha256:` must not split a digest."""
+    state = TaskState(task_id="task-1")
+    state.on_read(payload={"secrets": ["sh", "a"]})
+
+    redacted = state.redact("a sha256:value")
+
+    assert state.secret_digests["sh"] in redacted
+    assert state.secret_digests["a"] in redacted
 
 
 def test_a_logged_sample_is_redacted_of_a_secret_it_contains(

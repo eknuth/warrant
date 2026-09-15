@@ -116,20 +116,36 @@ argument value, including the one that names the call's resource. The overlap
 scan drops the resource value so a write does not overlap its own target; the
 secret scan cannot drop it, because a secret used as the resource name is a leak.
 
-The plain values stay in the process. Each one also has a SHA-256 digest, and the
-digest is what a decision line carries. A sample of source text that contains a
-secret is redacted before it is recorded, without regard to case. A resolved
-resource is replaced with its digest when the whole value is a secret the task
-has read, or when the value carries a key-shaped token whether or not the task
-read it first, so the call that first names a key writes the digest. A resource
-id that contains a secret only as a substring is left alone: redacting
-`repo-acme-widgets` because `acme-widgets` is a secret would corrupt the id and
-move the task's named target.
+The plain values stay in the process. A secret is keyed on its case-folded
+spelling and has one SHA-256 digest, over that spelling, so two spellings of one
+value are one secret and the digest a line carries does not depend on the order
+the process happens to walk its set. The digest is what a decision line carries.
+A sample of source text that contains a secret is redacted before it is
+recorded, without regard to case, and the encoded forms are computed from the
+folded value so a folded key is covered in its substring, URL-encoded, and
+base64 spellings. The redaction is by substring, so a secret that appears inside
+an unrelated word or id is replaced too; that over-redaction is the safe
+direction.
+
+A resolved resource is replaced with its digest when the whole value is a secret
+the task has read, or when the value is a key-shaped value, whether or not the
+task read it first. A key-shaped resource is added to the secret set on that
+call, so the call that first names a key writes the digest in the resource field
+and no later sample carries the key. A resource id that contains a secret only as
+a substring is left alone: redacting `repo-acme-widgets` because
+`acme-widgets` is a secret would corrupt the id and move the task's named target.
+The key-shaped check is case-sensitive and anchored at a token boundary, so
+`nakia@acme.test` and `acme/akia-vault` are ordinary names and keep the row and
+the verdict the graph gives them.
 
 One ordering limit is left, and it is not closed. A non-key-shaped value that a
 read's own argument names is not in the secret set at the moment that read is
-decided, so that one line carries the value. The read's result adds it to the
-set, and every later call redacts it.
+decided, so that one line carries the value, and a repeated call before any read
+reveals the value logs it again each time. The leak lasts until some read reveals
+the value: the read's result adds it to the set, and every later call redacts it.
+A key-shaped value a read names somewhere that is not the resource stays out of
+the resource field and is not added to the set, so it can still reach a later
+overlap sample until some read harvests it.
 
 ## One `TaskState` per task and actor
 

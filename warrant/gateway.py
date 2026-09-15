@@ -198,13 +198,17 @@ def digest(value: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def extract_sources(payload: Any) -> list[tuple[dict[str, Any], Any]]:
+def extract_sources(payload: Any, *, dedupe: bool = True) -> list[tuple[dict[str, Any], Any]]:
     """Every provenance block in a tool result, with the record that carried it.
 
-    A block already found is not walked again, and two blocks with the same
-    system, kind, and id are one entry, so a repeated read does not duplicate
-    the ledger. The second element is the record the block sat in, which is what
-    its digest is taken over.
+    The record is the mapping that directly holds the block, so a code-search
+    match's record is the match and its `snippet` is available to the harvest.
+    A block already found is not walked again.
+
+    With `dedupe`, two blocks with the same system, kind, and id are one entry,
+    which is what the ledger wants. The harvest passes false: a code search can
+    return several matches in one file, each with its own snippet, and a key in
+    the second match is still a secret.
     """
     found: list[tuple[dict[str, Any], Any]] = []
     seen: set[tuple[Any, Any, Any]] = set()
@@ -213,15 +217,19 @@ def extract_sources(payload: Any) -> list[tuple[dict[str, Any], Any]]:
         if isinstance(value, dict):
             if SOURCE_KEYS <= set(value):
                 key = (value.get("system"), value.get("kind"), value.get("id"))
-                if key not in seen:
-                    seen.add(key)
-                    found.append((dict(value), parent if parent is not None else value))
+                if dedupe and key in seen:
+                    return
+                seen.add(key)
+                found.append((dict(value), parent if parent is not None else value))
                 return
             for item in value.values():
                 walk(item, value)
         elif isinstance(value, (list, tuple)):
             for item in value:
-                walk(item, parent)
+                # The item is its own container, so a block inside a list
+                # element belongs to that element rather than to the list's
+                # parent.
+                walk(item, None)
 
     walk(payload, None)
     return found
@@ -683,16 +691,28 @@ class Gateway:
         not remove.
         """
         payload = payload_of(result)
-        found = extract_sources(payload)
-        sources = [as_source(block, record) for block, record in found]
-        for source in sources:
+        # Every occurrence for the harvest, the deduped set for the ledger. A
+        # code search returns several matches in one file, and the second
+        # match's snippet is a source of secrets too.
+        occurrences = [
+            (as_source(block, record), record)
+            for block, record in extract_sources(payload, dedupe=False)
+        ]
+        recorded: set[tuple[str, str, str]] = set()
+        sources = []
+        for source, _ in occurrences:
+            key = (source.system, source.kind, source.id)
+            if key in recorded:
+                continue
+            recorded.add(key)
+            sources.append(source)
             self.ledger.record(task_id, actor, source)
         if self.mode is Mode.no_provenance:
             return
         self._task_state(task_id, actor).on_read(
             payload=payload,
             sources=sources,
-            records=[record for _, record in found],
+            records=occurrences,
         )
 
     # Decisions the gateway makes itself, and logging -----------------------

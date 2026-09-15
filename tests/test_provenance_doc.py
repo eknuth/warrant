@@ -27,7 +27,8 @@ def test_the_doc_states_the_secret_ordering_limit() -> None:
     text = " ".join(DOC.read_text(encoding="utf-8").split())
 
     assert "ordering limit" in text
-    assert "key-shaped token whether or not the task read it first" in text
+    assert "leak lasts until some read reveals the value" in text
+    assert "over-redaction is the safe direction" in text
 
 
 def test_the_doc_has_no_em_dash() -> None:
