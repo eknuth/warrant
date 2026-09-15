@@ -582,6 +582,59 @@ async def test_a_resource_named_by_a_secret_is_redacted_and_refused(
     assert leaked == [], f"a plain secret reached {leaked}"
 
 
+async def test_a_read_whose_argument_is_key_shaped_logs_the_digest(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """The call that first names a key keeps it out of the log, before any harvest."""
+    gateway, engine = build(tmp_path, graph_db, inbox_payload(), servers=[GITEA, MAIL])
+
+    await gateway.call_tool(
+        "mail.get_message",
+        {"mailbox": SECRET, "message_id": "m1"},
+        claims=claims_for(act="support-agent"),
+        token="",
+    )
+
+    request = request_for(engine, "mail.get_message")
+    assert request.resource == "sha256:" + hashlib.sha256(SECRET.encode()).hexdigest()
+    leaked = [
+        path
+        for path in (tmp_path / "runs").rglob("*")
+        if path.is_file() and SECRET in path.read_text(encoding="utf-8")
+    ]
+    assert leaked == [], f"a plain secret reached {leaked}"
+
+
+async def test_a_mixed_case_secret_is_redacted_from_every_file(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """A normalized sample holds the folded spelling, so redaction folds too."""
+    mixed = "Sk_Live_AbCdEf"
+    gateway, engine = build(
+        tmp_path, graph_db, customer_payload(secrets=[mixed]), servers=[GITEA, POSTGRES, MAIL]
+    )
+
+    await gateway.call_tool(
+        "db.get_customer", {"customer_id": 1}, claims=claims_for(act="support-agent"), token=""
+    )
+    await gateway.call_tool(
+        "mail.send_reply",
+        {"to": "stranger@other.test", "subject": "key", "body": f"the key is {mixed}"},
+        claims=claims_for(act="support-agent"),
+        token="",
+    )
+
+    request = request_for(engine, "mail.send_reply")
+    assert request.args_touch_secret is True
+    # The overlap hit records the key-shaped token from the folded argument text.
+    assert any(detail["kind"] == "identifier" for detail in request.overlap_details)
+    for path in (tmp_path / "runs").rglob("*"):
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8").casefold()
+        assert mixed.casefold() not in text, path
+
+
 # -- the named target -------------------------------------------------------
 
 
@@ -629,6 +682,95 @@ async def test_a_visibility_change_off_the_named_target_is_outside_the_task(
     comment = request_for(engine, "gitea.create_issue_comment")
     assert comment.resource == "repo-acme-widgets"
     assert comment.target_outside_task is False
+
+
+async def test_a_substring_secret_does_not_corrupt_the_named_target(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """A `.env` read harvests `acme-widgets`, which is inside `repo-acme-widgets`.
+
+    A blind substring replace rewrote the id to `repo-<digest>` and flipped
+    `targetOutsideTask`, so the honest write on the repo the task named was
+    refused by `tainted-write`.
+    """
+    env_payload = {
+        "path": ".env",
+        "ref": "main",
+        "content": "SERVICE=acme-widgets\n",
+        "source": {
+            "system": "gitea",
+            "kind": "file",
+            "id": "acme/widgets:.env@main",
+            "author": "mallory",
+            "author_tier": "external",
+        },
+    }
+    runs = tmp_path / "runs"
+    log = DecisionLog(runs)
+    engine = CedarEngine(graph=graph_db, decision_log=log)
+    gateway = make_gateway(
+        tmp_path,
+        graph_db,
+        engine,
+        servers=[GITEA],
+        upstream=FakeUpstream(result=tool_result(env_payload)),
+    )
+    claims = claims_for(sub="h-alice", act="triage-agent", scope="gitea:read gitea:write")
+
+    await gateway.call_tool(
+        "gitea.get_file", {"repo": "acme/widgets", "path": ".env"}, claims=claims, token=""
+    )
+    await gateway.call_tool(
+        "gitea.create_issue_comment",
+        {"repo": "acme/widgets", "number": 1, "body": "an honest note"},
+        claims=claims,
+        token="",
+    )
+    honest = log.read("task-1")[-1]
+    assert honest.request.resource == "repo-acme-widgets"
+    assert honest.request.target_outside_task is False
+    assert honest.request.args_touch_secret is False
+    assert honest.verdict.value == "allow"
+
+    # The body carries the harvested value, which confirms it is in the set, and
+    # the resource is still the repo id rather than a digest.
+    await gateway.call_tool(
+        "gitea.create_issue_comment",
+        {"repo": "acme/widgets", "number": 1, "body": "the service acme-widgets is down"},
+        claims=claims,
+        token="",
+    )
+    carrying = log.read("task-1")[-1]
+    assert carrying.request.args_touch_secret is True
+    assert carrying.request.resource == "repo-acme-widgets"
+    assert carrying.request.target_outside_task is False
+    assert "secret-in-args" in carrying.policy_ids
+
+
+async def test_the_target_comparison_uses_the_unredacted_resource(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """The same query twice gives the same answer after the first harvests a secret."""
+    gateway, engine = build(
+        tmp_path,
+        graph_db,
+        customer_payload(secrets=["acme-widgets"]),
+        servers=[GITEA, POSTGRES, MAIL],
+    )
+    claims = claims_for(act="support-agent")
+
+    await gateway.call_tool(
+        "db.get_customer", {"customer_id": "acme-widgets"}, claims=claims, token=""
+    )
+    await gateway.call_tool(
+        "db.get_customer", {"customer_id": "acme-widgets"}, claims=claims, token=""
+    )
+
+    first, second = [request for request in engine.requests if request.tool == "db.get_customer"]
+    assert first.resource == "acme-widgets"
+    assert second.resource == "sha256:" + hashlib.sha256(b"acme-widgets").hexdigest()
+    assert first.target_outside_task is False
+    assert second.target_outside_task is False
 
 
 # -- the classifier at the gateway ------------------------------------------

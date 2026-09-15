@@ -31,13 +31,19 @@ The secret set is filled from three places: the `secrets` list a database result
 carries (W8's metadata), the values in a file whose name says it holds secrets
 (`*.env`, `secrets*`), and key-shaped tokens (`sk_live_`, `ghp_`, `AKIA`) found
 in any file read. A write or send whose argument strings contain a secret as a
-substring, URL-encoded, or base64-encoded sets `argsTouchSecret`.
+substring, URL-encoded, or base64-encoded sets `argsTouchSecret`, matched without
+regard to case.
 
 The plain values live in this object and nowhere else. Every secret also has a
-SHA-256 digest, and the digest is what goes into `overlapDetails` and therefore
-into the decision log. A sample of source text that happens to contain a secret
-is redacted before it is recorded, so the overlap evidence a decision line
-carries holds no value.
+SHA-256 digest, and the digest is what a decision line carries. A sample of
+source text that contains a secret is redacted before it is recorded, without
+regard to case, and a resource that is a secret is replaced with its digest
+before it enters the request. A resource that is a key-shaped value is redacted
+whether or not the task read it first, so the call that first names a key keeps
+it out of the log. The one value that can still reach a line is a non-key-shaped
+value that a read's own argument names before that read reveals it: at decision
+time the value is not in the secret set and is not key-shaped. The next call has
+it. `docs/provenance.md` states that limit.
 """
 
 from __future__ import annotations
@@ -66,6 +72,12 @@ _ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\s*[=:]\s*\"?([^\s\"',\\]{8
 # A key-shaped token in a file read. The same shapes the acceptance criterion
 # names, plus a length floor that keeps a bare prefix from being a secret.
 _KEY_SHAPED = re.compile(r"(?:sk_live_|ghp_)[A-Za-z0-9_]{4,}|AKIA[A-Z0-9]{8,}")
+
+# The prefixes a key-shaped value carries. The harvest above wants a longer tail
+# so a bare prefix is not a secret. The resource check uses the prefix alone,
+# because a resource that carries the prefix at all must not reach the log, and
+# the acceptance fixture `sk_live_abc` is shorter than the harvest's floor.
+_KEY_PREFIX = re.compile(r"sk_live_|ghp_|AKIA", re.IGNORECASE)
 
 # A file whose name says it holds secrets, matched against the path inside the
 # source id. `secrets*` is a basename prefix; `.env` may be a name or a suffix.
@@ -120,19 +132,30 @@ class TaskState:
 
     # -- reading -----------------------------------------------------------
 
-    def on_read(self, *, payload: Any, sources: Sequence[Source] = ()) -> None:
+    def on_read(
+        self,
+        *,
+        payload: Any,
+        sources: Sequence[Source] = (),
+        records: Sequence[Any] = (),
+    ) -> None:
         """Record one forwarded read: its sources, its text, and its secrets.
 
         The text is the whole result, normalized, and every source from the call
         carries it. A result that holds an issue and its comments is one read,
         and the issue's words are what a later write would be quoting whichever
         block the words sat in.
+
+        `records` is the record each source block sat in, in the same order as
+        `sources`. The file harvest reads the record's own text field, not the
+        whole result: the result carries the provenance block, and a block whose
+        id names `.env` is metadata rather than a value the file held.
         """
         raw = dump(payload)
         text = normalize(raw)
         for source in sources:
             self.sources[source.id] = ReadSource(source=source, text=text)
-        self._harvest(payload, sources, raw)
+        self._harvest(payload, sources, records)
 
     def name_target(self, kind: str, name: str) -> None:
         """Name the task's target from the first call that resolves a resource."""
@@ -155,6 +178,7 @@ class TaskState:
         *,
         exclude: Iterable[str] = (),
         resource_kind: str = "",
+        resource: str | None = None,
     ) -> dict[str, Any]:
         """The taint and target fields for one proposed call.
 
@@ -172,7 +196,11 @@ class TaskState:
         that names the resource is exactly the leak that scan exists to catch.
 
         `resource_kind` is the graph's kind for the call, and the target
-        comparison is over the `(kind, name)` pair.
+        comparison is over the `(kind, name)` pair. `resource` is the resolved
+        name before redaction; the comparison uses it so that a target named
+        before a value was harvested as a secret still matches after. When
+        `resource` is None the request's own resource is compared, which is what
+        a caller building a request by hand gets.
         """
         excluded = {normalize(value) for value in exclude}
         all_strings = list(string_values(arguments))
@@ -211,11 +239,12 @@ class TaskState:
                 }
             )
 
+        target_name = request.resource if resource is None else resource
         return {
             "overlap_sources": overlap_sources,
             "overlap_external": overlap_external,
             "args_touch_secret": bool(matched),
-            "target_outside_task": self.target_outside_task(resource_kind, request.resource),
+            "target_outside_task": self.target_outside_task(resource_kind, target_name),
             "overlap_details": details,
         }
 
@@ -241,25 +270,69 @@ class TaskState:
         """Replace every known secret value in `text` with its digest.
 
         Longest value first, so a secret that contains a shorter one is replaced
-        whole. The result is what a decision log may carry.
+        whole. The replace is case-insensitive: a sample of source text is
+        normalized to lower case, so a mixed-case secret would otherwise reach
+        the log in its folded spelling. The result is what a decision log may
+        carry.
         """
         for secret in sorted(self.secrets, key=len, reverse=True):
+            digest = self.secret_digests[secret]
             for form in secret_forms(secret):
                 if form:
-                    text = text.replace(form, self.secret_digests[secret])
+                    text = re.sub(re.escape(form), digest, text, flags=re.IGNORECASE)
         return text
 
-    def _harvest(self, payload: Any, sources: Sequence[Source], raw: str) -> None:
-        """Collect secrets from the result's metadata and from any file read."""
+    def redact_resource(self, value: str) -> str:
+        """The digest for a resource value that is a secret, else the value.
+
+        The equality is whole-value and case-insensitive. A resource id that
+        merely contains a secret as a substring is left alone: redacting
+        `repo-acme-widgets` because `acme-widgets` is a known secret would
+        corrupt the id and move the task's named target.
+
+        A value that carries a key-shaped token is redacted whether or not the
+        token has been harvested, because the call that first names a key has to
+        keep it out of the log too. The digest is over the value as given.
+
+        The one ordering limit left is a non-key-shaped value that a read's own
+        argument names before that read reveals it: at decision time the secret
+        set does not hold it, so the value is not equal to a known secret and
+        not key-shaped, and it reaches that one line. `docs/provenance.md` says
+        so.
+        """
+        if not value:
+            return value
+        folded = value.casefold()
+        for secret, digest in self.secret_digests.items():
+            if secret.casefold() == folded:
+                return digest
+        if _KEY_PREFIX.search(value):
+            return secret_digest(value)
+        return value
+
+    def _harvest(self, payload: Any, sources: Sequence[Source], records: Sequence[Any]) -> None:
+        """Collect secrets from the result's metadata and from any file read.
+
+        The `secrets` list is read from the whole payload, wherever it sits. A
+        file's own values are read from that file's text field only. The whole
+        result also carries the provenance block, and a block whose id names a
+        secret file (`acme/widgets:.env@main`) is metadata: scanning the whole
+        result harvested that id and then every later write that mentioned it
+        was a secret hit.
+        """
         for value in values_under(payload, "secrets"):
             self._add_secret(value)
-        for source in sources:
+        for index, source in enumerate(sources):
             if not _is_file_source(source):
                 continue
-            for token in _KEY_SHAPED.findall(raw):
+            record = records[index] if index < len(records) else None
+            text = file_text_of(record)
+            if not text:
+                continue
+            for token in _KEY_SHAPED.findall(text):
                 self._add_secret(token)
             if _SECRET_FILE.search(source_path(source)):
-                for value in _ENV_ASSIGNMENT.findall(raw):
+                for value in _ENV_ASSIGNMENT.findall(text):
                     self._add_secret(value, minimum=MIN_FILE_VALUE_LENGTH)
 
     def _add_secret(self, value: Any, *, minimum: int = 1) -> None:
@@ -269,18 +342,27 @@ class TaskState:
         if len(value) < minimum:
             return
         self.secrets.add(value)
-        self.secret_digests.setdefault(
-            value, "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
-        )
+        self.secret_digests.setdefault(value, secret_digest(value))
 
     def _secret_matches(self, strings: Sequence[str]) -> list[str]:
-        """The task's secrets that any argument string carries, in sorted order."""
+        """The task's secrets that any argument string carries, in sorted order.
+
+        The comparison is case-insensitive, because a case-folded spelling is
+        still the same value. A body that carries `sk_live_abcdef` for a task
+        whose secret is `Sk_Live_AbCdEf` is treated as carrying the secret.
+        """
+        folded = [text.casefold() for text in strings]
         matched: list[str] = []
         for secret in sorted(self.secrets):
-            forms = secret_forms(secret)
-            if any(form and form in text for form in forms for text in strings):
+            forms = [form.casefold() for form in secret_forms(secret) if form]
+            if any(form in text for form in forms for text in folded):
                 matched.append(secret)
         return matched
+
+
+def secret_digest(value: str) -> str:
+    """The SHA-256 digest a logged value is replaced with."""
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def secret_forms(secret: str) -> set[str]:
@@ -348,6 +430,24 @@ def _flatten(value: Any) -> Iterable[Any]:
 def _is_file_source(source: Source) -> bool:
     """Whether a source is a file read, the only read a key-shaped token counts in."""
     return source.kind == "file"
+
+
+def file_text_of(record: Any) -> str:
+    """The file text in a gitea file record, or an empty string.
+
+    `FileContent` carries the text in `content` and a `search_code` match carries
+    its line in `snippet`. The rest of the record and its provenance block are
+    not scanned. A search result whose block sits under a list keeps the list's
+    parent as its record, so a match there contributes no text; that is a miss
+    rather than a false positive.
+    """
+    if not isinstance(record, Mapping):
+        return ""
+    for name in ("content", "snippet"):
+        value = record.get(name)
+        if isinstance(value, str):
+            return value
+    return ""
 
 
 def source_path(source: Source) -> str:

@@ -40,7 +40,8 @@ def external_issue(make_source: MakeSource) -> Source:
 
 
 def read(state: TaskState, source: Source, payload: dict[str, object]) -> None:
-    state.on_read(payload=payload, sources=[source])
+    """One read where the source block sits in the payload itself."""
+    state.on_read(payload=payload, sources=[source], records=[payload])
 
 
 def test_a_quote_of_an_external_source_is_an_external_overlap(
@@ -176,6 +177,61 @@ def test_a_value_in_a_dot_env_read_becomes_a_secret(
     )
 
     assert context["args_touch_secret"] is True
+
+
+def test_a_secret_file_read_harvests_its_text_field_not_its_metadata(
+    make_source: MakeSource,
+) -> None:
+    """The source id names the file. It is metadata, not a value the file held."""
+    state = TaskState(task_id="task-1")
+    payload = {
+        "path": ".env",
+        "ref": "main",
+        "content": "SERVICE=acme-widgets\n",
+        "source": {
+            "system": "gitea",
+            "kind": "file",
+            "id": "acme/widgets:.env@main",
+            "author": "bob",
+            "author_tier": "member",
+        },
+    }
+    source = make_source(system="gitea", kind="file", id="acme/widgets:.env@main")
+
+    state.on_read(payload=payload, sources=[source], records=[payload])
+
+    assert "acme-widgets" in state.secrets
+    assert ".env@main" not in state.secrets
+    assert "acme/widgets:.env@main" not in state.secrets
+
+
+def test_redact_resource_leaves_an_id_that_merely_contains_a_secret() -> None:
+    """Whole-value equality, so a substring secret cannot corrupt a resource id."""
+    state = TaskState(task_id="task-1")
+    state.on_read(payload={"secrets": ["acme-widgets"]})
+
+    assert state.redact_resource("repo-acme-widgets") == "repo-acme-widgets"
+    assert state.redact_resource("acme-widgets").startswith("sha256:")
+
+
+def test_redact_resource_redacts_a_key_shaped_value_before_a_harvest() -> None:
+    """The call that first names a key keeps it out of the log."""
+    state = TaskState(task_id="task-1")
+
+    assert state.secrets == set()
+    assert state.redact_resource("sk_live_abc").startswith("sha256:")
+    assert state.redact_resource("repo-acme-widgets") == "repo-acme-widgets"
+
+
+def test_the_sample_redaction_ignores_case() -> None:
+    """A normalized sample holds the folded spelling of a mixed-case secret."""
+    state = TaskState(task_id="task-1")
+    state.on_read(payload={"secrets": ["Sk_Live_AbC"]})
+
+    redacted = state.redact("the key is sk_live_abc in the log")
+
+    assert "sk_live_abc" not in redacted
+    assert state.secret_digests["Sk_Live_AbC"] in redacted
 
 
 def test_a_logged_sample_is_redacted_of_a_secret_it_contains(

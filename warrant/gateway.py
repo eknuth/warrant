@@ -544,25 +544,27 @@ class Gateway:
             # what keeps `provenance.hasExternal` from firing the task rule.
             provenance = provenance.model_copy(update={"task_taint": False})
         resource_name = extract_resource(row.resource_kind, arguments)
-        resource = resolve_resource(self.graph, row.resource_kind, resource_name)
+        # The resolved name, before redaction. The task's named target and the
+        # `targetOutsideTask` comparison both use it, so a target named before a
+        # value was harvested as a secret still matches after.
+        resolved = resolve_resource(self.graph, row.resource_kind, resource_name)
 
         # The task's named target comes from its first exchange, which here is
         # the first call whose arguments resolve to a resource. `docs/provenance.md`
         # records why the call's arguments name it rather than a token claim.
         state = self._task_state(chain.task_id, chain.act)
-        # A resource whose name is a secret the task read is replaced with the
-        # secret's digest before it enters the request. That value names no row
-        # in the graph, so the engine already treats it as unknown, and the
-        # decision line carries the digest rather than the value. `redact` is a
-        # no-op when no secret matches, so an ordinary resource is untouched.
-        resource = state.redact(resource)
         if not state.targets_named:
-            state.name_target(row.resource_kind, resource)
+            state.name_target(row.resource_kind, resolved)
+        # A resource that is a secret is replaced with its digest before it
+        # enters the request, so the decision line carries the digest and a value
+        # that names no row in the graph. The replacement is whole-value or
+        # key-shaped rather than a substring: `repo-acme-widgets` stays what it
+        # is even when `acme-widgets` is a known secret.
         request = AuthzRequest(
             chain=chain,
             tool=name,
             action_kind=ActionKind(row.action_kind),
-            resource=resource,
+            resource=state.redact_resource(resolved),
             args_digest=args_digest(arguments),
             provenance=provenance,
             ts=self._now(),
@@ -573,6 +575,7 @@ class Gateway:
             arguments,
             exclude=[resource_name or ""],
             resource_kind=row.resource_kind,
+            resource=resolved,
         )
         request.overlap_sources = context["overlap_sources"]
         request.overlap_external = context["overlap_external"]
@@ -680,12 +683,17 @@ class Gateway:
         not remove.
         """
         payload = payload_of(result)
-        sources = [as_source(block, record) for block, record in extract_sources(payload)]
+        found = extract_sources(payload)
+        sources = [as_source(block, record) for block, record in found]
         for source in sources:
             self.ledger.record(task_id, actor, source)
         if self.mode is Mode.no_provenance:
             return
-        self._task_state(task_id, actor).on_read(payload=payload, sources=sources)
+        self._task_state(task_id, actor).on_read(
+            payload=payload,
+            sources=sources,
+            records=[record for _, record in found],
+        )
 
     # Decisions the gateway makes itself, and logging -----------------------
 

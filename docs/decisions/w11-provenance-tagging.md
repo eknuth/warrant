@@ -77,10 +77,25 @@ of the line can see both what was read and that the task rule was switched off.
 
 `warrant/taint.py` keeps the plain secret values in the `TaskState` and a
 SHA-256 digest of each one. `overlapDetails` carries the digest for a secret hit,
-and a sample of source text that contains a secret is redacted before it is
-recorded. That is what makes the "no plain secret in `runs/`" criterion hold
-without weakening the rule: the scan needs the value and the log must not have
-it, so the two are separate from the point the value enters the state.
+a sample of source text that contains a secret is redacted before it is recorded,
+and a resolved resource that is a secret is replaced with its digest before the
+request is built. The scan needs the value and the log must not have it, so the
+two are separate from the point the value enters the state.
+
+Redaction is whole-value and case-insensitive rather than a substring replace.
+A substring replace over `repo-acme-widgets` with `acme-widgets` in the secret
+set rewrote the id to `repo-<digest>`, which moved the task's named target and
+refused an honest write. A value that carries a key-shaped token is redacted
+whether or not it was harvested, so the call that first names a key keeps it out
+of the log. The one value that can still reach a line is a non-key-shaped value a
+read's own argument names before that read reveals it; at decision time it is in
+neither the secret set nor the key shapes. `docs/provenance.md` states that
+limit.
+
+The file harvest reads a file record's own `content` (or a code match's
+`snippet`) rather than the whole result. Scanning the whole result harvested a
+source block's `id`, so `acme/widgets:.env@main` became a secret and every later
+write that mentioned it was a secret hit.
 
 ## `TAINT` is separate from `WARRANT_MODE`
 

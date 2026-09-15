@@ -1,8 +1,8 @@
 """The provenance design doc, which the README lifts when W18 lands.
 
-The doc is a deliverable, so its two required properties are pinned here: the
-section heading the README will lift, the paraphrase miss stated as a miss, and
-the house rule that prose carries no em dash.
+The doc is a deliverable, so what it promises is pinned here: the section
+heading the README will lift, the paraphrase miss stated as a miss, the secret
+ordering limit it names, and the house rule that prose carries no em dash.
 """
 
 from __future__ import annotations
@@ -20,6 +20,14 @@ def test_the_doc_has_the_section_the_readme_lifts() -> None:
     section = text.split(HEADING, 1)[1]
     assert "does not catch a paraphrase" in section
     assert "sees data flow through the model" in section
+
+
+def test_the_doc_states_the_secret_ordering_limit() -> None:
+    """The doc names the one value the redaction cannot reach, rather than claiming none."""
+    text = " ".join(DOC.read_text(encoding="utf-8").split())
+
+    assert "ordering limit" in text
+    assert "key-shaped token whether or not the task read it first" in text
 
 
 def test_the_doc_has_no_em_dash() -> None:

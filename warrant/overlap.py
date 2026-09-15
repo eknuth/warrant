@@ -219,10 +219,11 @@ def identifiers(text: str) -> list[str]:
 
 
 def _repo_shaped(token: str) -> bool:
-    """Whether a `left/right` token is an identifier rather than a word pair."""
-    left, separator, right = token.partition("/")
-    if not separator:
-        return False
+    """Whether a `left/right` token is an identifier rather than a word pair.
+
+    The caller only passes a `_REPO` match, so the separator is always there.
+    """
+    left, _, right = token.partition("/")
     return not (left in _COMMON_WORDS and right in _COMMON_WORDS)
 
 

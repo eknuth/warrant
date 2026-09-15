@@ -116,13 +116,20 @@ argument value, including the one that names the call's resource. The overlap
 scan drops the resource value so a write does not overlap its own target; the
 secret scan cannot drop it, because a secret used as the resource name is a leak.
 
-The plain values stay in the process. Each one also has a SHA-256 digest, and
-the digest is what the decision log carries. A sample of source text that
-contains a secret is redacted before it is recorded, and a resolved resource that
-contains a secret is replaced with its digest before it enters the request, so
-the audit line for the call carries the digest and a resource that names no row
-in the graph. A file under the run directory therefore carries no plain secret
-value.
+The plain values stay in the process. Each one also has a SHA-256 digest, and the
+digest is what a decision line carries. A sample of source text that contains a
+secret is redacted before it is recorded, without regard to case. A resolved
+resource is replaced with its digest when the whole value is a secret the task
+has read, or when the value carries a key-shaped token whether or not the task
+read it first, so the call that first names a key writes the digest. A resource
+id that contains a secret only as a substring is left alone: redacting
+`repo-acme-widgets` because `acme-widgets` is a secret would corrupt the id and
+move the task's named target.
+
+One ordering limit is left, and it is not closed. A non-key-shaped value that a
+read's own argument names is not in the secret set at the moment that read is
+decided, so that one line carries the value. The read's result adds it to the
+set, and every later call redacts it.
 
 ## One `TaskState` per task and actor
 
