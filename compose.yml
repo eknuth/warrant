@@ -250,10 +250,11 @@ services:
       # line, which is the process that writes the run metadata.
       WARRANT_RUNS_DIR: "/app/runs"
       # The scenario seeder writes the access graph into the shared runs
-      # directory, and this points the gateway at the same file through the
-      # `./runs` bind mount below. A scenario's agents and its ticket and
-      # customer resource rows then reach the running gateway without a rebuild.
-      WARRANT_GRAPH_DB: "runs/graph/warrant.db"
+      # directory, and this absolute path is the same file through the `./runs`
+      # bind mount below. It is absolute on purpose: a relative value would
+      # resolve against the container's working directory, and a caller that
+      # overrides WARRANT_RUNS_DIR must still share one graph with the seeder.
+      WARRANT_GRAPH_DB: "/app/runs/graph/warrant.db"
       WARRANT_COMMIT: ""
       WARRANT_DIRTY: ""
     volumes:

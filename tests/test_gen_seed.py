@@ -3,29 +3,49 @@
 The Gitea, database, and mailbox writes need the compose stack, and
 `tests/test_gen_integration.py` covers those. What is here is the graph work and
 the path rules: the ticket and customer rows the seeder derives from the DB
-block, the total reload that leaves no agent behind, and the graph path the
-gateway shares.
+block, the scenario-owned agents, the total reload that leaves no agent behind,
+and the graph path the gateway shares.
 """
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import pytest
 import yaml
 
-from gen.schema import load_scenario
+import gen.__main__ as cli
+from gen.schema import SCENARIO_DIR, Scenario, load_scenario
 from gen.seed import (
+    SeedReport,
     default_graph_db,
     reset_graph,
     reset_runs,
     scenario_graph_rows,
     scenario_run_dir,
+    write_seed_manifest,
 )
 from warrant import graph
+from warrant.config import main_checkout
 
 REPO = Path(__file__).resolve().parents[1]
 SEED = REPO / "infra" / "graph.yml"
+
+
+def scenario_with_agent(**overrides: object) -> Scenario:
+    """The quiet-control fixture plus one scenario-owned agent."""
+    data = copy.deepcopy(yaml.safe_load((SCENARIO_DIR / "08-quiet-control.yml").read_text()))
+    agent: dict = {
+        "client_id": "audit-agent",
+        "owner": "carol",
+        "justification": "watch the desk",
+        "justification_expires_at": "2027-01-01T00:00:00Z",
+        "allowed_tools": ["gitea.get_issue"],
+    }
+    agent.update(overrides)
+    data["seed"]["graph"]["agents"] = [agent]
+    return Scenario.model_validate(data)
 
 
 def test_the_db_block_becomes_ticket_and_customer_graph_rows() -> None:
@@ -45,46 +65,52 @@ def test_the_db_block_becomes_ticket_and_customer_graph_rows() -> None:
     assert resources["db-ticket-12"]["owner_human_id"] == "h-bob"
 
 
-def test_the_scenario_agents_carry_their_owner_and_authority() -> None:
-    scenario = load_scenario("01-issue-injection")
+def test_a_scenario_agent_carries_its_owner_expiry_and_authority() -> None:
+    scenario = scenario_with_agent()
 
     with graph.Graph(":memory:") as base:
         base.seed(yaml.safe_load(SEED.read_text(encoding="utf-8")))
         rows = scenario_graph_rows(scenario, base)
 
-    agent = next(row for row in rows["agents"] if row["id"] == "triage-agent")
-    assert agent["owner_human_id"] == "h-alice"
-    assert "gitea.set_repo_visibility" in agent["allowed_tools"]
+    agent = next(row for row in rows["agents"] if row["id"] == "audit-agent")
+    assert agent["owner_human_id"] == "h-carol"
+    assert agent["justification_expires_at"] == "2027-01-01T00:00:00Z"
+    assert agent["allowed_tools"] == ["gitea.get_issue"]
 
 
 def test_reset_graph_leaves_no_agent_from_the_previous_scenario(tmp_path: Path) -> None:
     database = tmp_path / "warrant.db"
-    scenario = load_scenario("01-issue-injection")
 
-    with reset_graph(scenario, database):
+    with reset_graph(scenario_with_agent(), database):
         pass
     with reset_graph(None, database) as reopened:
         # The shipped graph still has the four shipped agents, and only those.
-        assert "triage-agent" in {agent.id for agent in reopened.agents()}
+        assert "audit-agent" not in {agent.id for agent in reopened.agents()}
         assert len(reopened.agents()) == 4
         assert reopened.resource_named("1", "db_customer") is None
 
 
-def test_reset_graph_puts_the_scenario_agents_in_place(tmp_path: Path) -> None:
+def test_reset_graph_puts_the_scenario_agents_and_rows_in_place(tmp_path: Path) -> None:
     database = tmp_path / "warrant.db"
 
-    with reset_graph(load_scenario("08-quiet-control"), database) as opened:
+    with reset_graph(scenario_with_agent(), database) as opened:
+        assert opened.agent("audit-agent") is not None
         assert opened.agent("support-agent") is not None
         ticket = opened.resource_named("12", "db_ticket")
         assert ticket is not None and ticket.owner_human_id == "h-bob"
 
 
-def test_the_default_graph_db_lives_under_runs(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The gateway bind-mounts `runs/`, so the seeder's file is the gateway's file."""
+def test_the_default_graph_db_ignores_the_runs_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A column's runs override must not move the graph away from the gateway.
+
+    The gateway opens `/app/runs/graph/warrant.db` through the mount, so the
+    seeder's default stays on the main checkout's `runs/`, not on a
+    `WARRANT_RUNS_DIR` a column set for its own records.
+    """
     monkeypatch.delenv("WARRANT_GRAPH_DB", raising=False)
     monkeypatch.setenv("WARRANT_RUNS_DIR", "/tmp/w12-runs")
 
-    assert default_graph_db() == Path("/tmp/w12-runs/graph/warrant.db")
+    assert default_graph_db() == main_checkout() / "runs" / "graph" / "warrant.db"
 
 
 def test_the_graph_db_environment_variable_wins(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -107,3 +133,46 @@ def test_reset_runs_gives_a_fresh_directory(
     assert fresh == directory
     assert fresh.is_dir()
     assert not stale.exists()
+
+
+def test_the_seed_manifest_lands_in_the_run_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = SeedReport(
+        scenario_id="08-quiet-control",
+        elapsed_s=0.5,
+        repos=["acme/widgets"],
+        users=["bob"],
+        customers=1,
+        tickets=1,
+        messages=1,
+    )
+    monkeypatch.setenv("WARRANT_RUNS_DIR", str(tmp_path))
+
+    target = write_seed_manifest(report)
+
+    assert target == tmp_path / "scenarios" / "08-quiet-control" / "seed.json"
+    manifest = yaml.safe_load(target.read_text(encoding="utf-8"))
+    assert manifest["scenario_id"] == "08-quiet-control"
+    assert manifest["repos"] == ["acme/widgets"]
+    assert manifest["tickets"] == 1
+
+
+def test_the_seed_cli_prints_the_run_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_dir = tmp_path / "scenarios" / "08-quiet-control"
+    report = SeedReport(scenario_id="08-quiet-control", elapsed_s=0.5, run_dir=run_dir)
+    monkeypatch.setattr(cli, "seed", lambda scenario: report)
+
+    assert cli.main(["seed", "08-quiet-control"]) == 0
+
+    out = capsys.readouterr().out
+    assert "seeded 08-quiet-control in 0.50s" in out
+    assert f"run root: {run_dir}" in out
+
+
+def test_the_verify_cli_has_no_all_flag() -> None:
+    """Finding 7: only the last seeded scenario can be in place, so --all is gone."""
+    with pytest.raises(SystemExit):
+        cli.main(["verify", "--all"])

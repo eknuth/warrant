@@ -22,6 +22,7 @@ or a commit. Only the label and the revoked flag are part of the scenario.
 from __future__ import annotations
 
 import base64
+import json
 import os
 import secrets
 import shutil
@@ -38,7 +39,7 @@ import psycopg
 from scripts.gitea_bootstrap import ADMIN_USERNAME, wait_for_gitea
 from scripts.seed_smoke import ORG, SeedSettings, advance_sequences, ensure_membership, ensure_user
 from servers.mail_mcp.mail import MailSettings
-from warrant.config import default_runs_dir
+from warrant.config import default_runs_dir, main_checkout
 from warrant.graph import Graph
 
 from .schema import DbSeed, GiteaSeed, RepoSeed, Scenario, graph_seed_data
@@ -68,16 +69,18 @@ MESSAGE_ID_DOMAIN = "scenario.warrant.test"
 def default_graph_db() -> Path:
     """The access graph the seeder writes and the compose gateway reads.
 
-    The default lives under `runs/`, which `compose.yml` bind-mounts into the
-    gateway at `/app/runs`, so the host seeder and the container gateway open
-    one file. A scenario's agents and its ticket and customer rows then reach
-    the running gateway without a rebuild. `WARRANT_GRAPH_DB` wins when it is
-    set, the same variable the gateway's own settings read.
+    `WARRANT_GRAPH_DB` wins when it is set, the same variable the gateway's own
+    settings read. Otherwise the path is `runs/graph/warrant.db` under the main
+    checkout, which is the directory `compose.yml` bind-mounts into the gateway
+    at `/app/runs`. It is deliberately not derived from `WARRANT_RUNS_DIR`: a
+    column that points its own records at another directory still has to share
+    the one graph file with the gateway, or a scenario's rows would be invisible
+    to the process that decides on them.
     """
     override = os.environ.get("WARRANT_GRAPH_DB")
     if override:
         return Path(override)
-    return default_runs_dir() / "graph" / "warrant.db"
+    return main_checkout() / "runs" / "graph" / "warrant.db"
 
 
 DEFAULT_GRAPH_DB = default_graph_db()
@@ -275,6 +278,64 @@ def reset_runs(scenario_id: str) -> Path:
     return directory
 
 
+def write_seed_manifest(report: SeedReport) -> Path:
+    """Write what this seed left in the scenario's run root.
+
+    The file is a deterministic record: no timestamp and no secret. W15 points
+    `WARRANT_RUNS_DIR` at this directory for one cell, so every task record the
+    cell makes lands under a root the next seed of that scenario clears. A
+    reader can tell which scenario the stack currently holds from this file.
+    """
+    directory = report.run_dir or scenario_run_dir(report.scenario_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "scenario_id": report.scenario_id,
+        "repos": list(report.repos),
+        "users": list(report.users),
+        "customers": report.customers,
+        "tickets": report.tickets,
+        "messages": report.messages,
+    }
+    target = directory / "seed.json"
+    target.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return target
+
+
+def preflight(settings: SeedSettings, mail_settings: MailSettings) -> None:
+    """Check every system is reachable before the reset deletes anything.
+
+    A partial reset is worse than a refused one: the org comes back empty while
+    the database still holds the previous scenario, and the caller sees a
+    traceback rather than the name of the system that was down. Every check runs
+    first, and each failure names the system.
+    """
+    with gitea_client(settings) as client:
+        try:
+            wait_for_gitea(client, settings.gitea_url.rstrip("/"))
+            response = client.get(f"/api/v1/orgs/{ORG}")
+        except (SystemExit, Exception) as exc:
+            raise SeedError(f"gitea preflight failed at {settings.gitea_url}: {exc}") from exc
+        if response.status_code != 200:
+            raise SeedError(
+                f"gitea preflight: org {ORG} is missing (HTTP {response.status_code}); "
+                "run scripts/gitea_bootstrap.py"
+            )
+    try:
+        with psycopg.connect(settings.dsn(), connect_timeout=5) as conn:
+            conn.execute("select 1")
+    except psycopg.Error as exc:
+        raise SeedError(
+            f"postgres preflight failed at {settings.postgres_host}:{settings.postgres_port}: {exc}"
+        ) from exc
+    url = f"{mail_settings.mail_url.rstrip('/')}/api/v1/messages"
+    try:
+        response = httpx.get(url, timeout=15.0)
+    except httpx.HTTPError as exc:
+        raise SeedError(f"mailpit preflight failed at {mail_settings.mail_url}: {exc}") from exc
+    if response.status_code >= 400:
+        raise SeedError(f"mailpit preflight GET {url} -> HTTP {response.status_code}")
+
+
 def reset(
     scenario: Scenario | None = None,
     *,
@@ -287,19 +348,38 @@ def reset(
     Called with no scenario, this is the standalone `reset` command: the org,
     the database, and the inbox come back empty and the graph is the shipped
     one. Called with a scenario, the graph also carries the scenario's agents
-    and its ticket and customer rows.
+    and its ticket and customer rows. Every system is checked before any delete,
+    and a failure during a step is reported with the step's name.
     """
     settings = settings or SeedSettings()
     mail_settings = mail_settings or MailSettings()
+    preflight(settings, mail_settings)
     with gitea_client(settings) as client:
-        wait_for_gitea(client, settings.gitea_url.rstrip("/"))
-        if client.get(f"/api/v1/orgs/{ORG}").status_code != 200:
-            raise SeedError(f"org {ORG} is missing; run scripts/gitea_bootstrap.py")
-        reset_gitea(client)
-    reset_postgres(settings)
-    reset_mail(mail_settings)
-    with reset_graph(scenario, graph_db):
-        pass
+        try:
+            reset_gitea(client)
+        except SeedError:
+            raise
+        except Exception as exc:
+            raise SeedError(f"gitea reset failed: {exc}") from exc
+    try:
+        reset_postgres(settings)
+    except SeedError:
+        raise
+    except psycopg.Error as exc:
+        raise SeedError(f"postgres reset failed: {exc}") from exc
+    try:
+        reset_mail(mail_settings)
+    except SeedError:
+        raise
+    except httpx.HTTPError as exc:
+        raise SeedError(f"mailpit reset failed: {exc}") from exc
+    try:
+        with reset_graph(scenario, graph_db):
+            pass
+    except SeedError:
+        raise
+    except Exception as exc:
+        raise SeedError(f"graph reset failed: {exc}") from exc
     if scenario is not None:
         reset_runs(scenario.id)
 
@@ -489,13 +569,28 @@ def seed(
         mail_settings=mail_settings,
         graph_db=graph_db,
     )
-    with gitea_client(settings) as client:
-        repos = seed_gitea(client, settings, scenario.seed.gitea)
-    seed_postgres(settings, scenario.seed.db)
-    messages = seed_mail(mail_settings, scenario)
+    try:
+        with gitea_client(settings) as client:
+            repos = seed_gitea(client, settings, scenario.seed.gitea)
+    except SeedError:
+        raise
+    except Exception as exc:
+        raise SeedError(f"gitea seed failed: {exc}") from exc
+    try:
+        seed_postgres(settings, scenario.seed.db)
+    except SeedError:
+        raise
+    except psycopg.Error as exc:
+        raise SeedError(f"postgres seed failed: {exc}") from exc
+    try:
+        messages = seed_mail(mail_settings, scenario)
+    except SeedError:
+        raise
+    except httpx.HTTPError as exc:
+        raise SeedError(f"mailpit seed failed: {exc}") from exc
     elapsed = (datetime.now(UTC) - started).total_seconds()
     users = list(scenario.seed.gitea.members) + list(scenario.seed.gitea.externals)
-    return SeedReport(
+    report = SeedReport(
         scenario_id=scenario.id,
         elapsed_s=elapsed,
         repos=repos,
@@ -505,6 +600,8 @@ def seed(
         messages=messages,
         run_dir=scenario_run_dir(scenario.id),
     )
+    write_seed_manifest(report)
+    return report
 
 
 def seed_all(

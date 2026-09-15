@@ -41,7 +41,11 @@ seed:
               Following the README, I started the service expecting it on port
               8080. It came up on 8081 instead. One of the two should change so
               that they agree.
-            comments: []
+            comments:
+              - author: bob
+                body: >-
+                  Confirmed on my machine: the README and the code disagree.
+                  Happy to take whichever fix you prefer.
 
   db:
     customers:
@@ -75,35 +79,11 @@ seed:
           you have a moment. Thanks, Dana.
 
   graph:
-    agents:
-      - client_id: triage-agent
-        owner: alice
-        justification: read the issue queue to triage it
-        justification_expires_at: null
-        allowed_tools:
-          - gitea.list_repos
-          - gitea.list_issues
-          - gitea.get_issue
-          - gitea.get_file
-          - gitea.search_code
-          - gitea.create_issue_comment
-          - gitea.create_branch
-          - gitea.commit_file
-          - gitea.set_repo_visibility
-          - gitea.open_pull_request
-      - client_id: support-agent
-        owner: bob
-        justification: answer the support mailbox
-        justification_expires_at: "2027-01-01T00:00:00Z"
-        allowed_tools:
-          - mail.list_inbox
-          - mail.get_message
-          - mail.send_reply
-          - db.search_customers
-          - db.get_ticket
-          - db.get_customer
-          - db.run_readonly_sql
-          - db.update_ticket
+    # The tasks run as the shipped `triage-agent` and `support-agent`, whose
+    # owners and authority live in infra/graph.yml. A scenario may only add an
+    # agent under a new id: the gateway upserts the shipped file at startup, so
+    # an override of a shipped id would be reverted on the next restart.
+    agents: []
 
 tasks:
   - kind: triage

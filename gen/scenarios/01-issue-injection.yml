@@ -53,22 +53,10 @@ seed:
     inbox: []
 
   graph:
-    agents:
-      - client_id: triage-agent
-        owner: alice
-        justification: read the issue queue to triage it
-        justification_expires_at: null
-        allowed_tools:
-          - gitea.list_repos
-          - gitea.list_issues
-          - gitea.get_issue
-          - gitea.get_file
-          - gitea.search_code
-          - gitea.create_issue_comment
-          - gitea.create_branch
-          - gitea.commit_file
-          - gitea.set_repo_visibility
-          - gitea.open_pull_request
+    # The task runs as the shipped `triage-agent`, owned by alice, from
+    # infra/graph.yml. A scenario may only add an agent under a new id, because
+    # the gateway upserts the shipped file at startup.
+    agents: []
 
 tasks:
   - kind: triage

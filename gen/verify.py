@@ -7,19 +7,26 @@ holds it and compared with the file. The Gitea reads go through `GiteaForge`,
 which is the same forge the W3 server registers its tools over, so the
 `author_tier` this prints is the one a tool call returns.
 
+Each check is two-directional where it can be. The scenario's objects have to be
+present and match, and the system may not hold an object the scenario did not
+name: the org's repository list and the graph's agent ids are compared as sets,
+so a leftover repo or agent fails the readback rather than passing unnoticed.
+The Gitea repository list is paged, the way the reset pages its own reads, so a
+scenario with more than fifty repositories is not silently unchecked.
+
 The output is a flat list of deterministic lines: no timestamps, no commit
 shas, no generated key values, and every list sorted. Seeding one scenario
 twice therefore prints the same bytes, which is what makes a re-seed provable
 rather than merely plausible.
-
-Exit status from `main` is 0 when every check passed and 1 when one did not.
 """
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import httpx
 import psycopg
@@ -29,7 +36,7 @@ from servers.gitea_mcp.forge import GiteaForge
 from servers.mail_mcp.mail import MailSettings
 from warrant.graph import Graph
 
-from .schema import Scenario
+from .schema import Scenario, shipped_agent_rows
 from .seed import (
     CUSTOMER_SENSITIVITY,
     DEFAULT_GRAPH_DB,
@@ -64,11 +71,18 @@ def _check(name: str, ok: bool, detail: str) -> Check:
     return Check(name=name, ok=bool(ok), detail=detail)
 
 
+def _expiry(value: str | None) -> datetime | None:
+    """The scenario's ISO 8601 expiry as an aware datetime, or None."""
+    if value is None:
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 def verify_graph(scenario: Scenario, graph_db: Path | str) -> list[Check]:
-    """The scenario's agents and the ticket and customer rows they resolve to."""
+    """The scenario's agents, the shipped agent set, and the database rows."""
     checks: list[Check] = []
     with Graph(graph_db) as graph:
-        rows = []
+        rows: list[tuple[str, bool]] = []
         for agent in scenario.seed.graph.agents:
             row = graph.agent(agent.client_id)
             owner = graph.human(row.owner_human_id) if row and row.owner_human_id else None
@@ -79,6 +93,7 @@ def verify_graph(scenario: Scenario, graph_db: Path | str) -> list[Check]:
                     and owner is not None
                     and owner.login == agent.owner
                     and row.justification == agent.justification
+                    and row.justification_expires_at == _expiry(agent.justification_expires_at)
                     and row.allowed_tools == list(agent.allowed_tools),
                 )
             )
@@ -88,6 +103,20 @@ def verify_graph(scenario: Scenario, graph_db: Path | str) -> list[Check]:
                 "graph agents",
                 not missing,
                 f"{len(rows)} rows match the scenario" if not missing else f"mismatched: {missing}",
+            )
+        )
+
+        expected_agents = set(shipped_agent_rows()) | {
+            agent.client_id for agent in scenario.seed.graph.agents
+        }
+        actual_agents = {agent.id for agent in graph.agents()}
+        checks.append(
+            _check(
+                "graph agent set",
+                actual_agents == expected_agents,
+                f"{len(actual_agents)} agents; "
+                f"extra={sorted(actual_agents - expected_agents)} "
+                f"missing={sorted(expected_agents - actual_agents)}",
             )
         )
 
@@ -131,34 +160,73 @@ def verify_graph(scenario: Scenario, graph_db: Path | str) -> list[Check]:
     return checks
 
 
-async def _verify_gitea(scenario: Scenario, settings: SeedSettings) -> list[Check]:
+def _org_repo_rows(settings: SeedSettings) -> list[dict[str, Any]]:
+    """Every repository in `acme`, paged, with the admin token."""
+    rows: list[dict[str, Any]] = []
+    with httpx.Client(
+        base_url=settings.gitea_url.rstrip("/"),
+        headers={"Authorization": f"token {settings.gitea_admin_token}"},
+        timeout=20.0,
+    ) as client:
+        page = 1
+        while True:
+            response = require_ok(
+                client.get("/api/v1/orgs/acme/repos", params={"page": page, "limit": 50}),
+                f"GET /orgs/acme/repos page {page}",
+            )
+            batch = response.json()
+            if not isinstance(batch, list):
+                raise RuntimeError("GET /orgs/acme/repos did not answer a list")
+            rows.extend(batch)
+            if len(batch) < 50:
+                return rows
+            page += 1
+
+
+async def _verify_gitea(
+    scenario: Scenario, settings: SeedSettings, repo_rows: list[dict[str, Any]]
+) -> list[Check]:
     checks: list[Check] = []
     members = set(scenario.seed.gitea.members)
+    by_name = {str(row.get("full_name", "")): row for row in repo_rows}
+    expected_names = {f"acme/{repo.name}" for repo in scenario.seed.gitea.repos}
+    checks.append(
+        _check(
+            "gitea repo set",
+            set(by_name) == expected_names,
+            f"{len(by_name)} repos; extra={sorted(set(by_name) - expected_names)} "
+            f"missing={sorted(expected_names - set(by_name))}",
+        )
+    )
     forge = GiteaForge(settings.gitea_url, settings.gitea_admin_token)
     try:
-        repos = await forge.list_repos("acme")
-        by_name = {repo.full_name: repo for repo in repos}
         for repo in sorted(scenario.seed.gitea.repos, key=lambda item: item.name):
             full_name = f"acme/{repo.name}"
             listed = by_name.get(full_name)
+            private = bool(listed.get("private")) if listed is not None else None
+            branch = str(listed.get("default_branch", "")) if listed is not None else ""
             checks.append(
                 _check(
                     f"gitea repo {full_name}",
-                    listed is not None and listed.private == (repo.visibility == "private"),
-                    f"{repo.visibility} default_branch=main"
-                    if listed is not None
-                    else "missing from the org",
+                    listed is not None
+                    and private == (repo.visibility == "private")
+                    and branch == "main",
+                    f"private={private} default_branch={branch!r}",
                 )
             )
             if listed is None:
                 continue
             for path, file in sorted(repo.file_entries().items()):
                 read = await forge.get_file(full_name, path)
+                want_tier = "member" if file.author in members else "external"
                 checks.append(
                     _check(
                         f"gitea file {full_name}:{path}",
-                        read.content == file.content,
-                        f"author={read.source.author} tier={read.source.author_tier} "
+                        read.content == file.content
+                        and read.source.author == file.author
+                        and read.source.author_tier == want_tier,
+                        f"author={read.source.author} (want {file.author}) "
+                        f"tier={read.source.author_tier} (want {want_tier}) "
                         f"bytes={len(read.content.encode('utf-8'))}",
                     )
                 )
@@ -189,7 +257,8 @@ def verify_gitea(scenario: Scenario, settings: SeedSettings) -> list[Check]:
     """The org read back through the forge the W3 server wraps."""
     if not settings.gitea_admin_token:
         return [_check("gitea", False, "GITEA_ADMIN_TOKEN is not set")]
-    return asyncio.run(_verify_gitea(scenario, settings))
+    repo_rows = _org_repo_rows(settings)
+    return asyncio.run(_verify_gitea(scenario, settings, repo_rows))
 
 
 def verify_postgres(scenario: Scenario, settings: SeedSettings) -> list[Check]:
@@ -214,14 +283,22 @@ def verify_postgres(scenario: Scenario, settings: SeedSettings) -> list[Check]:
             )
         )
         tickets = [
-            (row[0], row[1], row[2], row[3], row[4], row[5])
+            (row[0], row[1], row[2], row[3], row[4], row[5], row[6])
             for row in conn.execute(
-                "SELECT id, customer_id, subject, body, author_email, status "
+                "SELECT id, customer_id, subject, body, author_email, status, incident_id "
                 "FROM tickets ORDER BY id"
             ).fetchall()
         ]
         expected_tickets = [
-            (item.id, item.customer_id, item.subject, item.body, item.author_email, item.status)
+            (
+                item.id,
+                item.customer_id,
+                item.subject,
+                item.body,
+                item.author_email,
+                item.status,
+                item.incident_id,
+            )
             for item in sorted(scenario.seed.db.tickets, key=lambda item: item.id)
         ]
         checks.append(_check("db tickets", tickets == expected_tickets, f"{len(tickets)} rows"))
@@ -321,31 +398,11 @@ def render(report: VerifyReport) -> str:
     return "\n".join(lines)
 
 
-def verify_all(
-    scenarios: list[Scenario],
-    *,
-    settings: SeedSettings | None = None,
-    mail_settings: MailSettings | None = None,
-    graph_db: Path | str = DEFAULT_GRAPH_DB,
-) -> list[VerifyReport]:
-    """Verify every scenario in order."""
-    return [
-        verify(
-            scenario,
-            settings=settings,
-            mail_settings=mail_settings,
-            graph_db=graph_db,
-        )
-        for scenario in scenarios
-    ]
-
-
 __all__ = [
     "Check",
     "VerifyReport",
     "render",
     "verify",
-    "verify_all",
     "verify_gitea",
     "verify_graph",
     "verify_mail",

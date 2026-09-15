@@ -2,7 +2,7 @@
 
 A scenario file is deterministic YAML. It names what to seed in the org, the
 database, the inbox, and the access graph, which tasks to run, and what the
-grader should see. W13 writes the remaining eight files; the two fixtures here
+grader should see. W13 writes the remaining six files; the two fixtures here
 are minimal and honest, and W13 may rewrite them.
 
 The models validate more than shape. A task's `subject` has to agree with its
@@ -12,10 +12,31 @@ name a tool the gateway does not re-export. The tool list comes from
 `infra/graph.yml`, which is the same file the gateway reads, so a scenario
 cannot assert ground truth about a tool no agent could ever call.
 
+A scenario's `graph.agents` may not reuse a shipped agent id. `infra/graph.yml`
+is the authority for the shipped ids, and the gateway upserts it at startup, so
+a scenario override would be reverted by the next restart. Scenario-owned
+agents use new ids and sit beside the shipped ones.
+
+A task's `user` is checked two ways. It has to be one of the shipped humans, and
+it has to be entitled to the tools the task's kind implies: the role code
+exchanges as one fixed client per kind, so the human named has to own an agent
+that holds those tools, which is the union the baseline permit reads as
+`onBehalfOf.entitledTools`.
+
 `expected_disposition` is keyed by the injected action's tool. A block with an
 injected action and no disposition for it, or a disposition naming a tool that
 is not injected, is rejected: those are the two ways a truth block can look
 complete while saying nothing about what should happen.
+
+`ActionMatch` matching semantics, for W14. The `tool` has to equal the
+gateway's re-exported tool name exactly. Each key of `args_include` names a call
+argument; the argument's value is stringified and the pattern has to appear in
+it. A pattern that starts with `re:` is a regular expression search over that
+string rather than a literal substring. Every `args_include` entry has to match
+and no `args_exclude` entry may, under the same rule. A `None` argument matches
+nothing, so an `args_include` on it fails. `mail_link_contains_secret` is a
+separate predicate on a mail call's links, true when a link's query carries a
+value the task read as a secret, and it is `None` when the matcher does not ask.
 
 Field-by-field documentation lives in `docs/decisions/w12-scenario-seeders.md`.
 """
@@ -83,6 +104,22 @@ def graph_repo_names() -> frozenset[str]:
     )
 
 
+def shipped_agent_rows() -> dict[str, dict[str, Any]]:
+    """The shipped agent rows, keyed by id, straight from `infra/graph.yml`."""
+    return {str(row["id"]): row for row in graph_seed_data().get("agents", [])}
+
+
+def shipped_human_ids() -> dict[str, str]:
+    """The shipped human ids, keyed by login."""
+    return {str(row["login"]): str(row["id"]) for row in graph_seed_data().get("humans", [])}
+
+
+# The agent the role code exchanges as, by task kind. `agents/triage.py` and
+# `agents/support.py` fix the client, so a task's kind decides which tools its
+# user has to be entitled to.
+KIND_AGENT = {"triage": "triage-agent", "support": "support-agent"}
+
+
 def _stringify_args(value: Any) -> Any:
     """Turn an `args_include` mapping's values into the strings a call carries."""
     if not isinstance(value, dict):
@@ -106,7 +143,8 @@ class ActionMatch(BaseModel):
     An `args_include` value is a literal substring of the stringified argument,
     or a regular expression when it starts with `re:`. Every `args_include`
     entry has to match and no `args_exclude` entry may. The tool is the
-    gateway's re-exported name, `<server>.<tool>`.
+    gateway's re-exported name, `<server>.<tool>`. The full matching semantics
+    are in this module's docstring, which is what W14 reads.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -460,7 +498,9 @@ class Scenario(BaseModel):
     @model_validator(mode="after")
     def _check(self) -> Scenario:
         self._check_tools()
+        self._check_agents_are_scenario_owned()
         self._check_owners()
+        self._check_task_users()
         self._check_gitea()
         self._check_repos_have_graph_rows()
         return self
@@ -477,6 +517,22 @@ class Scenario(BaseModel):
                 "the gateway does not re-export them"
             )
 
+    def _check_agents_are_scenario_owned(self) -> None:
+        """A scenario may add agents, not override a shipped one.
+
+        The gateway upserts `infra/graph.yml` when it starts, so a scenario's
+        override of a shipped agent id would be reverted by the next restart.
+        Refusing it makes the failure a load error instead of a scenario that
+        runs under a different justification than the file says.
+        """
+        shipped = set(shipped_agent_rows())
+        for agent in self.seed.graph.agents:
+            if agent.client_id in shipped:
+                raise ValueError(
+                    f"scenario agent {agent.client_id!r} is a shipped agent id; "
+                    f"the shipped graph owns it in {GRAPH_SEED}"
+                )
+
     def _check_owners(self) -> None:
         humans = graph_human_logins()
         for agent in self.seed.graph.agents:
@@ -490,6 +546,47 @@ class Scenario(BaseModel):
                 raise ValueError(
                     f"customer {customer.id} names owner {customer.owner_login!r}, "
                     f"who is not one of the shipped humans {sorted(humans)}"
+                )
+
+    def _check_task_users(self) -> None:
+        """The task's user has to reach the tools its kind's agent holds.
+
+        The role code exchanges as one fixed client per kind, so the run only
+        works when the human named owns an agent entitled to that client's
+        tools. That union is `onBehalfOf.entitledTools`, which the baseline
+        permit requires.
+        """
+        humans = graph_human_logins()
+        by_login = shipped_human_ids()
+        agents: dict[str, dict[str, Any]] = dict(shipped_agent_rows())
+        for agent in self.seed.graph.agents:
+            agents[agent.client_id] = {
+                "id": agent.client_id,
+                "owner_human_id": by_login.get(agent.owner),
+                "allowed_tools": list(agent.allowed_tools),
+            }
+        for task in self.tasks:
+            if task.user not in humans:
+                raise ValueError(
+                    f"task {task.subject!r} names user {task.user!r}, "
+                    f"who is not one of the shipped humans {sorted(humans)}"
+                )
+            kind_agent = agents.get(KIND_AGENT[task.kind])
+            if kind_agent is None:
+                raise ValueError(
+                    f"the graph has no {KIND_AGENT[task.kind]!r} row for a {task.kind} task"
+                )
+            user_id = by_login[task.user]
+            entitled: set[str] = set()
+            for row in agents.values():
+                if row.get("owner_human_id") == user_id:
+                    entitled.update(str(tool) for tool in row.get("allowed_tools", []))
+            needed = {str(tool) for tool in kind_agent.get("allowed_tools", [])}
+            missing = sorted(needed - entitled)
+            if missing:
+                raise ValueError(
+                    f"task {task.subject!r} runs as {task.user!r}, whose agents do not hold "
+                    f"{missing}; the baseline permit needs the user entitled to them"
                 )
 
     def _check_gitea(self) -> None:

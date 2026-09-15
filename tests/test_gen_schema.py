@@ -15,6 +15,7 @@ import yaml
 from pydantic import ValidationError
 
 from gen.schema import (
+    GRAPH_SEED,
     SCENARIO_DIR,
     Scenario,
     available_scenarios,
@@ -34,6 +35,20 @@ def base_scenario() -> dict:
     return copy.deepcopy(yaml.safe_load(text))
 
 
+def with_scenario_agent(data: dict, **overrides: object) -> dict:
+    """Add one scenario-owned agent the fixtures do not carry."""
+    agent: dict = {
+        "client_id": "audit-agent",
+        "owner": "carol",
+        "justification": "watch the desk",
+        "justification_expires_at": "2027-01-01T00:00:00Z",
+        "allowed_tools": ["gitea.get_issue"],
+    }
+    agent.update(overrides)
+    data["seed"]["graph"]["agents"] = [agent]
+    return data
+
+
 def test_both_fixtures_load_and_are_available() -> None:
     assert set(available_scenarios()) >= set(FIXTURES)
     for scenario_id in FIXTURES:
@@ -51,6 +66,7 @@ def test_the_quiet_control_is_a_control() -> None:
     assert scenario.truth.expected_disposition == {}
     assert scenario.truth.escalation_allowed is False
     assert {task.kind for task in scenario.tasks} == {"triage", "support"}
+    assert scenario.seed.graph.agents == [], "the fixtures run as the shipped agents"
 
 
 def test_the_injection_fixture_names_a_real_tool_and_a_disposition() -> None:
@@ -84,10 +100,45 @@ def test_a_legitimate_tool_outside_the_gateway_list_is_rejected() -> None:
 
 
 def test_an_agent_tool_outside_the_gateway_list_is_rejected() -> None:
-    data = base_scenario()
-    data["seed"]["graph"]["agents"][0]["allowed_tools"].append("gitea.make_it_so")
+    data = with_scenario_agent(
+        base_scenario(), allowed_tools=["gitea.get_issue", "gitea.make_it_so"]
+    )
 
     with pytest.raises(ValidationError, match="no row"):
+        Scenario.model_validate(data)
+
+
+def test_a_scenario_owned_agent_loads() -> None:
+    data = with_scenario_agent(base_scenario())
+
+    scenario = Scenario.model_validate(data)
+
+    agent = scenario.seed.graph.agents[0]
+    assert agent.client_id == "audit-agent"
+    assert agent.allowed_tools == ["gitea.get_issue"]
+
+
+def test_a_scenario_agent_may_not_reuse_a_shipped_agent_id() -> None:
+    """Finding 5: the gateway upserts the shipped file, so an override is refused."""
+    data = with_scenario_agent(base_scenario(), client_id="triage-agent", owner="alice")
+
+    with pytest.raises(ValidationError, match="shipped agent id"):
+        Scenario.model_validate(data)
+
+
+def test_a_task_user_has_to_be_a_shipped_human() -> None:
+    data = base_scenario()
+    data["tasks"][0]["user"] = "dave"
+
+    with pytest.raises(ValidationError, match="not one of the shipped humans"):
+        Scenario.model_validate(data)
+
+
+def test_a_task_user_has_to_be_entitled_to_the_kinds_tools() -> None:
+    data = base_scenario()
+    data["tasks"][1]["user"] = "alice"
+
+    with pytest.raises(ValidationError, match="entitled"):
         Scenario.model_validate(data)
 
 
@@ -222,9 +273,10 @@ def test_load_all_reads_every_file() -> None:
     assert {scenario.id for scenario in scenarios} >= set(FIXTURES)
 
 
-def test_the_gateway_tool_list_comes_from_the_graph_file() -> None:
-    tools = gateway_tool_ids()
+def test_the_gateway_tool_list_is_the_graph_files_own_set() -> None:
+    """Parsed from the file, so the test cannot agree with a hand-kept copy."""
+    seed = yaml.safe_load(GRAPH_SEED.read_text(encoding="utf-8"))
 
-    assert "gitea.set_repo_visibility" in tools
-    assert "mail.send_reply" in tools
-    assert "gitea.make_it_so" not in tools
+    assert gateway_tool_ids() == frozenset(str(row["id"]) for row in seed["tools"])
+    assert "gitea.set_repo_visibility" in gateway_tool_ids()
+    assert "gitea.make_it_so" not in gateway_tool_ids()

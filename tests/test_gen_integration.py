@@ -12,6 +12,8 @@ leaves no trace of 01, and seeding every fixture takes under thirty seconds.
 
 from __future__ import annotations
 
+import base64
+import socket
 import time
 from collections.abc import Iterator
 
@@ -20,7 +22,7 @@ import psycopg
 import pytest
 
 from gen.schema import load_all, load_scenario
-from gen.seed import seed, seed_all
+from gen.seed import SeedError, reset, scenario_run_dir, seed, seed_all
 from gen.verify import render, verify
 from scripts.seed_smoke import SeedSettings
 from servers.gitea_mcp.forge import GiteaForge
@@ -146,3 +148,101 @@ async def test_the_injected_issue_is_external_through_the_forge(stack: SeedSetti
 
     assert issue.author == "mallory"
     assert issue.source.author_tier == "external"
+
+
+def _rewrite_readme_as_admin(settings: SeedSettings, content: str) -> None:
+    """Leave README.md with the original content and the admin as last author.
+
+    Two commits are needed: Gitea may not create a commit when the content is
+    unchanged, so the first changes the file and the second puts the scenario's
+    content back. Both are authored by the admin token.
+    """
+    with httpx.Client(
+        base_url=settings.gitea_url.rstrip("/"),
+        headers={"Authorization": f"token {settings.gitea_admin_token}"},
+        timeout=20.0,
+    ) as client:
+        path = "/api/v1/repos/acme/widgets/contents/README.md"
+
+        def commit(text: str, message: str) -> None:
+            existing = client.get(path, params={"ref": "main"})
+            existing.raise_for_status()
+            response = client.put(
+                path,
+                json={
+                    "branch": "main",
+                    "content": base64.b64encode(text.encode("utf-8")).decode("ascii"),
+                    "message": message,
+                    "sha": existing.json()["sha"],
+                },
+            )
+            response.raise_for_status()
+
+        commit(content + "\n<!-- admin rewrite -->\n", "rewrite the readme from the admin token")
+        commit(content, "put the scenario content back from the admin token")
+
+
+def test_a_file_committed_by_the_admin_fails_verify(stack: SeedSettings) -> None:
+    """Finding 1: the commit author is the field W11 reads, so verify compares it."""
+    scenario = load_scenario("08-quiet-control")
+    seed(scenario)
+    content = scenario.seed.gitea.repos[0].file_entries()["README.md"].content
+    _rewrite_readme_as_admin(stack, content)
+
+    report = verify(scenario)
+
+    assert not report.ok
+    assert any(
+        check.name == "gitea file acme/widgets:README.md" and not check.ok
+        for check in report.checks
+    )
+    seed(scenario)
+
+
+def test_a_mutated_incident_id_fails_verify(stack: SeedSettings) -> None:
+    """Finding 2: the ticket's incident_id is seeded and has to be read back."""
+    scenario = load_scenario("08-quiet-control")
+    seed(scenario)
+    with psycopg.connect(stack.dsn()) as conn:
+        conn.execute("UPDATE tickets SET incident_id = 'INC-1' WHERE id = 12")
+        conn.commit()
+
+    report = verify(scenario)
+
+    assert any(check.name == "db tickets" and not check.ok for check in report.checks)
+    seed(scenario)
+
+
+def test_an_unreachable_postgres_fails_before_anything_is_deleted(stack: SeedSettings) -> None:
+    """Finding 6: the preflight runs before the first delete."""
+    scenario = load_scenario("08-quiet-control")
+    seed(scenario)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+    unreachable = SeedSettings(postgres_port=closed_port)
+
+    with pytest.raises(SeedError, match="postgres preflight"):
+        reset(scenario, settings=unreachable)
+
+    assert _repos(stack) == ["acme/widgets"], "the reset deleted a repository before preflight"
+    assert _mail_subjects() == [QUIET_MAIL_SUBJECT], "the reset cleared mail before preflight"
+    assert [subject for _id, subject in _tickets(stack)] == [
+        "Confirm which API key is on file and whether it is still active"
+    ], "the reset truncated the database before preflight"
+
+
+def test_reseeding_clears_the_scenario_run_root(stack: SeedSettings) -> None:
+    """Finding 3: one cell's records live under the run root and a reseed clears them."""
+    scenario = load_scenario("08-quiet-control")
+    first = seed(scenario)
+    run_root = first.run_dir or scenario_run_dir(scenario.id)
+    stray = run_root / "task-from-a-previous-run" / "calls.jsonl"
+    stray.parent.mkdir(parents=True, exist_ok=True)
+    stray.write_text("{}", encoding="utf-8")
+
+    second = seed(scenario)
+
+    assert second.run_dir == run_root
+    assert not stray.exists(), "the previous run's records survived the reseed"
+    assert (run_root / "seed.json").is_file()
