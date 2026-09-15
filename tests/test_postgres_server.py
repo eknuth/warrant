@@ -9,17 +9,21 @@ list rides in the structured result rather than in the text the model reads.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 from starlette.testclient import TestClient
 
-from servers.postgres_mcp.db import query_source, secrets_in
-from servers.postgres_mcp.models import ApiKey, CustomerDetail, Source
+from servers.postgres_mcp.db import build_readonly_statement, query_source, secrets_in
+from servers.postgres_mcp.models import ApiKey, CustomerDetail, Source, TicketDetail
 from servers.postgres_mcp.server import (
+    MAX_RESULT_BYTES,
     TOOL_NAMES,
     ServerSettings,
     build_app,
@@ -139,6 +143,95 @@ def test_tool_result_carries_a_payload_with_no_secrets_whole() -> None:
     assert "acme" in result.content[0].text
 
 
+def test_tool_result_refuses_a_payload_over_the_byte_budget() -> None:
+    """Every payload is measured, not only `run_readonly_sql`'s.
+
+    A payload over the budget has to be a tool error naming the byte count and
+    the limit, so the audit records an error rather than an `ok` line for a
+    response the transport dropped.
+    """
+    source = Source(kind="ticket", id="1", author="user@acme.example", author_tier="customer")
+    payload = TicketDetail(
+        id=1,
+        customer_id=1,
+        subject="big",
+        body="x" * (MAX_RESULT_BYTES + 1),
+        author_email="user@acme.example",
+        status="open",
+        source=source,
+    )
+
+    with pytest.raises(ToolError) as error:
+        tool_result(payload)
+
+    assert "bytes" in str(error.value)
+    assert str(MAX_RESULT_BYTES) in str(error.value)
+
+
+class _AuditCapture(logging.Handler):
+    """Collect the audit lines one call writes, whatever the root logger does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lines: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.lines.append(record.getMessage())
+
+
+class _StubClaims:
+    """The claim fields `audit_record` reads, for an audited-call test."""
+
+    sub = "h-bob"
+    task_id = "task-w8-audit"
+
+    class act:
+        sub = "support-agent"
+
+
+async def test_an_over_budget_payload_is_audited_as_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The audit line for a dropped payload is `error`, not `ok`.
+
+    The byte budget used to live inside `run_readonly_sql`, so a large payload
+    from another tool was shaped after the `ok` line was already written. Shaping
+    now happens inside the audited call, and this pins the status the audit sees.
+    """
+    from servers.postgres_mcp import server as postgres_server
+
+    source = Source(kind="ticket", id="1", author="user@acme.example", author_tier="customer")
+    payload = TicketDetail(
+        id=1,
+        customer_id=1,
+        subject="big",
+        body="x" * (MAX_RESULT_BYTES + 1),
+        author_email="user@acme.example",
+        status="open",
+        source=source,
+    )
+
+    async def call(_claims: Any) -> TicketDetail:
+        return payload
+
+    monkeypatch.setattr(postgres_server, "_claims_for", lambda ctx, policy, tool: _StubClaims())
+    policy = postgres_server.BearerPolicy(audience="postgres-mcp")
+    capture = _AuditCapture()
+    logger = postgres_server.AUDIT_LOGGER
+    saved_level = logger.level
+    logger.addHandler(capture)
+    logger.setLevel(logging.INFO)
+    try:
+        with pytest.raises(ToolError):
+            await postgres_server._audited("get_ticket", None, {"ticket_id": 1}, policy, call)
+    finally:
+        logger.removeHandler(capture)
+        logger.setLevel(saved_level)
+
+    assert any('"status": "error"' in line for line in capture.lines), capture.lines
+    assert not any('"status": "ok"' in line for line in capture.lines), capture.lines
+
+
 def test_secrets_in_collects_every_known_key_value_in_row_order() -> None:
     rows = [
         {"id": 1, "key_value": "alpha"},
@@ -170,6 +263,20 @@ def test_secrets_in_finds_a_key_under_an_alias_or_inside_a_json_object() -> None
     assert secrets_in(["row_to_json"], as_json, ["alpha", "beta"]) == ["alpha"]
 
 
+def test_secrets_in_lists_a_value_json_dumps_would_escape() -> None:
+    """The cell's own text is the value, even when `json.dumps` escapes it.
+
+    The check used to also require the key to appear in the raw serialized
+    result. `json.dumps` writes `clé` as `cl\\u00e9` and `a"b` as `a\\"b`, so a
+    result that carried either value under an alias was dropped before this.
+    """
+    accented = [{"kv": "clé"}]
+    quoted = [{"kv": 'a"b'}]
+
+    assert secrets_in(["kv"], accented, ["clé"]) == ["clé"]
+    assert secrets_in(["kv"], quoted, ['a"b']) == ['a"b']
+
+
 def test_secrets_in_does_not_list_a_key_the_result_does_not_carry() -> None:
     rows = [{"id": 1, "name": "Acme"}]
 
@@ -184,6 +291,30 @@ def test_query_source_ids_the_statement_by_digest() -> None:
     assert source.id == hashlib.sha256(b"select 1").hexdigest()[:12]
     assert source.author == ""
     assert source.author_tier == "unknown"
+
+
+def test_build_readonly_statement_strips_only_the_semicolon_that_ends_it() -> None:
+    """The semicolon removal is string and comment aware.
+
+    `select 1;` loses its semicolon, and so does `select 1; -- note`, but a
+    semicolon inside a string literal, or one with a second statement after it,
+    stays, so the extended protocol refuses the second statement rather than the
+    wrapper silently joining the two.
+    """
+    assert "select 1\n)" in build_readonly_statement("select 1;")
+    assert "select 1 -- note\n)" in build_readonly_statement("select 1; -- note")
+    assert "select ';'" in build_readonly_statement("select ';'")
+    assert "select 1; select 2" in build_readonly_statement("select 1; select 2")
+
+
+def test_build_readonly_statement_doubles_the_callers_percent() -> None:
+    """psycopg parses the wrapper on the client, so a `%` has to be doubled.
+
+    The wrapper's own `%s` stays single, because only the caller's text is
+    escaped.
+    """
+    assert "100%%" in build_readonly_statement("select '100%'")
+    assert "values (%s)" in build_readonly_statement("select 1")
 
 
 def test_the_server_answers_the_host_its_compose_service_name_gives_it(

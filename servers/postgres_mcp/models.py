@@ -14,9 +14,10 @@ has five members (`owner`, `member`, `customer`, `external`, and `unknown`);
 this server uses three of them, and none is downgraded on the way to a policy.
 
 A result that carries an API key value also carries a `secrets` list holding
-every value it returned. The list is in the structured result, not in the text
-block the model reads, so a caller can compute that a secret was in play without
-a model and without the value being put in front of the model twice.
+every known key value that appears in the result. The list is in the structured
+result, not in the text block the model reads, so a caller can compute that a
+secret was in play without a model and without the value being put in front of
+the model twice.
 """
 
 from __future__ import annotations
@@ -119,7 +120,7 @@ class QueryResult(BaseModel):
     """The rows a read-only SQL statement returned.
 
     `rows` are column-name-keyed, `truncated` says the read stopped at the row
-    cap, and `secrets` holds every value that came back in a `key_value` column.
+    cap, and `secrets` holds every known key value that appears in the result.
     """
 
     columns: list[str] = Field(default_factory=list)

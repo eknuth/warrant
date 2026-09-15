@@ -1053,13 +1053,20 @@ async def test_a_per_tool_forbid_refuses_under_the_graph_schema(
 
 
 def test_a_ticket_argument_becomes_the_ticket_row() -> None:
-    """The postgres tools name a row by id, and the extractor reads that id."""
+    """The postgres tools name a row by id, and the extractor reads that id.
+
+    The schema declares `ticket_id` as an integer, so that is the spelling a real
+    caller sends. The string form still resolves, because W12 seeds the resource
+    with `name` set to the id as a string and both spellings become that string.
+    """
+    assert extract_resource("db_ticket", {"ticket_id": 10}) == "10"
     assert extract_resource("db_ticket", {"ticket_id": "10"}) == "10"
     assert extract_resource("db_ticket", {}) is None
 
 
 def test_a_customer_argument_becomes_the_customer_row() -> None:
     """`search_customers` carries a query rather than an id, and both work."""
+    assert extract_resource("db_customer", {"customer_id": 3}) == "3"
     assert extract_resource("db_customer", {"customer_id": "3"}) == "3"
     assert extract_resource("db_customer", {"query": "acme"}) == "acme"
     assert extract_resource("db_customer", {}) is None

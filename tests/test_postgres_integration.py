@@ -31,8 +31,8 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from agents.auth import audience_list, decode_claims
+from servers.postgres_mcp.server import MAX_RESULT_BYTES, build_app
 from servers.postgres_mcp.server import ServerSettings as PostgresSettings
-from servers.postgres_mcp.server import build_app
 
 pytestmark = pytest.mark.integration
 
@@ -452,6 +452,84 @@ async def test_run_readonly_sql_allows_a_trailing_semicolon_and_a_leading_commen
     assert structured(commented)["rows"] == [{"?column?": 1}]
 
 
+async def test_run_readonly_sql_allows_a_trailing_line_comment(
+    pg_app: str, sign_token: Any
+) -> None:
+    """A trailing `--` comment used to swallow the wrapper's closing parenthesis.
+
+    The wrapper now emits a newline before the parenthesis, and one trailing
+    semicolon is dropped before a trailing comment rather than only when the
+    string's last character is `;`.
+    """
+    token = sign_token(audience="postgres-mcp", scope=("db:read",))
+
+    async with mcp_session(pg_app, token) as session:
+        commented = await session.call_tool("run_readonly_sql", {"sql": "select 1 -- note"})
+        semicolon = await session.call_tool("run_readonly_sql", {"sql": "select 1; -- note"})
+
+    assert commented.is_error is False, text_of(commented)
+    assert structured(commented)["rows"] == [{"?column?": 1}]
+    assert semicolon.is_error is False, text_of(semicolon)
+    assert structured(semicolon)["rows"] == [{"?column?": 1}]
+
+
+async def test_run_readonly_sql_keeps_a_percent_in_the_callers_sql(
+    pg_app: str, sign_token: Any
+) -> None:
+    """psycopg parses the wrapper on the client, so a `%` has to be doubled.
+
+    The caller's `%` used to be read as a placeholder: `like 'Ac%'` was refused,
+    `format('%s', name)` miscounted the parameters, and `'%%'` came back as one
+    `%` with no error at all.
+    """
+    token = sign_token(audience="postgres-mcp", scope=("db:read",))
+
+    async with mcp_session(pg_app, token) as session:
+        like = await session.call_tool(
+            "run_readonly_sql", {"sql": "select name from customers where name like 'Ac%'"}
+        )
+        formatted = await session.call_tool(
+            "run_readonly_sql",
+            {"sql": "select format('%s', name) as label from customers order by id"},
+        )
+        doubled = await session.call_tool("run_readonly_sql", {"sql": "select '%%' as literal"})
+        single = await session.call_tool("run_readonly_sql", {"sql": "select '100%' as literal"})
+        literal = await session.call_tool(
+            "run_readonly_sql", {"sql": "select name from customers where name = 'Ac%'"}
+        )
+
+    assert like.is_error is False, text_of(like)
+    assert structured(like)["rows"] == [{"name": "Acme"}]
+    assert formatted.is_error is False, text_of(formatted)
+    assert structured(formatted)["rows"] == [{"label": "Acme"}, {"label": "Globex"}]
+    assert doubled.is_error is False, text_of(doubled)
+    assert structured(doubled)["rows"] == [{"literal": "%%"}]
+    assert single.is_error is False, text_of(single)
+    assert structured(single)["rows"] == [{"literal": "100%"}]
+    assert literal.is_error is False, text_of(literal)
+    assert structured(literal)["rows"] == [], "a literal percent is not a wildcard"
+
+
+async def test_run_readonly_sql_refuses_nextval_in_the_read_only_transaction(
+    pg_app: str, sign_token: Any
+) -> None:
+    """The READ ONLY transaction is the layer that stops a sequence advance.
+
+    `nextval` is a function that writes the sequence, and Postgres refuses it
+    with SQLSTATE 25006 inside the transaction. The transaction does not stop a
+    superuser-only function such as `pg_read_file`, which is why a dedicated
+    `SELECT`-only role is the next layer (a follow-up).
+    """
+    token = sign_token(audience="postgres-mcp", scope=("db:read",))
+    sql = "select nextval('customers_id_seq')"
+
+    async with mcp_session(pg_app, token) as session:
+        result = await session.call_tool("run_readonly_sql", {"sql": sql})
+
+    assert result.is_error is True, text_of(result)
+    assert "read-only transaction" in text_of(result)
+
+
 async def test_get_customer_returns_keys_and_lists_every_value_in_secrets(
     pg_app: str, sign_token: Any, scratch: Scratch
 ) -> None:
@@ -552,6 +630,39 @@ async def test_run_readonly_sql_allows_a_result_just_under_the_byte_budget(
 
     assert result.is_error is False, text_of(result)
     assert structured(result)["rows"] == [{"repeat": "x" * 200000}]
+
+
+async def test_the_byte_budget_covers_a_tool_other_than_run_readonly_sql(
+    pg_app: str,
+    sign_token: Any,
+    pg_server: PostgresSettings,
+    scratch: Scratch,
+) -> None:
+    """A payload over the budget is an error for every tool, not only a raw read.
+
+    A ticket body past the budget used to drop the stream while the audit line
+    said `ok`, because the only byte check was inside `run_readonly_sql`. The
+    check now lives in the server's result shaping, so `get_ticket` answers with
+    a tool error naming the bytes and the limit, and a ticket under the budget
+    still returns.
+    """
+    token = sign_token(audience="postgres-mcp", scope=("db:read",))
+
+    async with mcp_session(pg_app, token) as session:
+        under = await session.call_tool("get_ticket", {"ticket_id": scratch.ticket_id})
+        with psycopg.connect(pg_server.dsn(scratch.name)) as conn:
+            conn.execute(
+                "update tickets set body = repeat('x', 300000) where id = %s",
+                (scratch.ticket_id,),
+            )
+            conn.commit()
+        over = await session.call_tool("get_ticket", {"ticket_id": scratch.ticket_id})
+
+    assert under.is_error is False, text_of(under)
+    assert structured(under)["subject"] == "Site is down"
+    assert over.is_error is True, text_of(over)
+    assert "bytes" in text_of(over)
+    assert str(MAX_RESULT_BYTES) in text_of(over)
 
 
 async def test_search_customers_never_returns_keys(pg_app: str, sign_token: Any) -> None:

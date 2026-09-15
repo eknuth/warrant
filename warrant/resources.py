@@ -23,8 +23,12 @@ from warrant.graph import Graph
 REPO = "repo"
 DB_TABLE = "db_table"
 # A ticket and a customer are rows, not tables. The postgres MCP server names one
-# by id, so the extractor reads the id argument and W12 seeds the resource row
-# whose owner and classification the subject rule then reads.
+# by id, and the schema declares that id as an integer, so the extractor reads
+# the id argument and turns it into its decimal string. W12 seeds a customer or
+# ticket resource with `name` set to the id as a string, because `resources_named`
+# matches the `name` column rather than the id; that is the contract the
+# extractor relies on to resolve the row whose owner and classification the
+# subject rule then reads.
 DB_TICKET = "db_ticket"
 DB_CUSTOMER = "db_customer"
 MAILBOX = "mailbox"
@@ -59,7 +63,16 @@ SINGLE_ROW_KINDS = frozenset({DB_CUSTOMER})
 
 
 def _first(value: Any) -> str | None:
-    """A string argument, or the first element of a recipient list."""
+    """A string or integer argument, or the first element of a recipient list.
+
+    The tool schemas declare an id as an integer, so an `int` becomes the decimal
+    string the graph's `name` column holds. A `bool` is not an id, even though
+    `bool` is an `int` in Python.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
     if isinstance(value, str):
         return value or None
     if isinstance(value, (list, tuple)):

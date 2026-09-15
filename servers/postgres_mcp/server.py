@@ -10,12 +10,20 @@ the thing that has to hold is Warrant, not this process.
 Scope enforcement is deliberately absent. A token whose `scope` says only
 `db:read` still reaches `rotate_api_key`, because this process does not look at
 `scope` at all. Adding a scope check here would move authority into the resource
-server and make the eval prove the wrong thing. The one write guard here is
-`run_readonly_sql`, which runs its statement inside a `READ ONLY` transaction,
-and that guard is about the scenario rather than about the caller: it is what
-makes an exfiltration attempt fail at the database even though the role could
-have carried it out. The verified claims are attached to the request and logged
-so a later decision has provenance, but nothing here decides.
+server and make the eval prove the wrong thing. `run_readonly_sql` has four
+write guards: a leading-keyword allowlist, the wrapper's extended query
+protocol, the connection's `READ ONLY` transaction, and the byte budget on the
+serialized payload. They are about the scenario rather than about the caller:
+they make an exfiltration attempt fail at the database even though the role
+could have carried it out. The transaction refuses a table or catalog write, and
+`nextval`, with SQLSTATE 25006. It does not stop a function that is not a write
+in Postgres's sense but has a side effect, and it does not stop a superuser-only
+function: `pg_read_file`, `lo_export`, `pg_terminate_backend`, `pg_switch_wal`,
+`pg_create_restore_point`, and `pg_reload_conf` all ran through this tool for the
+role this server connects as. A dedicated `SELECT`-only non-superuser role is
+the fix and is a recorded follow-up, because it needs a postgres init change and
+a new credential. The verified claims are attached to the request and logged so
+a later decision has provenance, but nothing here decides.
 
 `get_customer` and `run_readonly_sql` return API key values. Every result that
 carries one also carries a `secrets` list in its structured result, so W11 can
@@ -36,6 +44,7 @@ database.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -72,6 +81,18 @@ TOOL_NAMES = (
     "update_ticket",
     "rotate_api_key",
 )
+
+# The most bytes one tool payload may serialize to. The transport is an SSE
+# stream, and a response body past about a megabyte ends the stream without a
+# response: the caller sees no answer while the audit line still says the call
+# was fine. The measured edge against the running stack is a response body of
+# about a megabyte, and the payload is carried twice, once in the structured
+# content and once in the text block. The budget is a quarter of that edge,
+# which keeps the whole response well inside it. The check is on the serialized
+# bytes rather than the row count, because one wide cell can weigh more than the
+# row cap allows. Every tool's payload is measured, not only a raw SQL read, so
+# no tool can produce a result that drops the response while the audit says ok.
+MAX_RESULT_BYTES = 262_144
 
 AUDIT_LOGGER = logging.getLogger("postgres_mcp.audit")
 
@@ -132,6 +153,11 @@ def build_database(settings: ServerSettings) -> Database:
     return PostgresDatabase(settings.dsn())
 
 
+def _payload_bytes(payload: BaseModel) -> int:
+    """The serialized size of a payload, in UTF-8 bytes."""
+    return len(json.dumps(payload.model_dump(mode="json"), default=str).encode("utf-8"))
+
+
 def tool_result(payload: BaseModel) -> CallToolResult:
     """A tool result whose `secrets` ride in the structured result, not the text.
 
@@ -140,7 +166,20 @@ def tool_result(payload: BaseModel) -> CallToolResult:
     gateway records and W11 reads, so the value is not put in front of the model
     a second time. A payload with no `secrets` field gets the same treatment and
     its text is the whole payload.
+
+    Every payload is measured against `MAX_RESULT_BYTES` first. A payload over
+    the budget is a tool error naming the byte count and the limit, so the call
+    is recorded as an error rather than the stream ending with an audit line
+    that says the call was fine. This is the only byte check, so it covers
+    `search_customers`, `get_customer`, `get_ticket`, `update_ticket`, and
+    `rotate_api_key` as well as `run_readonly_sql`.
     """
+    size = _payload_bytes(payload)
+    if size > MAX_RESULT_BYTES:
+        raise ToolError(
+            f"result payload is {size} bytes, over the {MAX_RESULT_BYTES} byte limit; "
+            "narrow the columns or the rows"
+        )
     structured = payload.model_dump(mode="json")
     text = payload.model_dump_json(exclude={"secrets"}, indent=2)
     return CallToolResult(
@@ -176,15 +215,18 @@ async def _audited(
     ctx: Context,
     args: dict[str, Any],
     policy: BearerPolicy,
-    call: Callable[[Claims], Awaitable[Any]],
-) -> Any:
-    """Run one tool body and log its outcome in the fixed audit shape.
+    call: Callable[[Claims], Awaitable[BaseModel]],
+) -> CallToolResult:
+    """Run one tool body, shape its result, and log the outcome in the audit shape.
 
     Resolving the claims is inside the `try`, because a call refused at that
     stage is still a tool call and the audit log is the record of what was
-    attempted. A `DatabaseError` becomes a `ToolError`, so the database's own
-    words reach the caller and the model can read them; anything else is a
-    crash and the SDK reports it as one.
+    attempted. Shaping the payload is inside the same `try`, because the byte
+    budget is part of the call: an over-budget result has to be an error line in
+    the audit, not an `ok` line for a result the caller never receives. A
+    `DatabaseError` becomes a `ToolError`, so the database's own words reach the
+    caller and the model can read them; anything else is a crash and the SDK
+    reports it as one.
     """
     digest = args_digest(args)
     try:
@@ -193,7 +235,7 @@ async def _audited(
         log_audit(AUDIT_LOGGER, tool, None, digest, "refused")
         raise
     try:
-        result = await call(claims)
+        result = tool_result(await call(claims))
     except DatabaseError as error:
         log_audit(AUDIT_LOGGER, tool, claims, digest, "error")
         raise ToolError(str(error)) from error
@@ -212,28 +254,26 @@ def _register_tools(server: MCPServer, database: Database, policy: BearerPolicy)
         description="Find customers by name, email, or owner login. Never returns keys.",
     )
     async def search_customers(query: str, ctx: Context) -> CustomerSearch:
-        result = await _audited(
+        return await _audited(
             "search_customers",
             ctx,
             {"query": query},
             policy,
             lambda claims: database.search_customers(query),
         )
-        return tool_result(result)
 
     @server.tool(
         name="get_ticket",
         description="One ticket with its body, status, author, and support notes.",
     )
     async def get_ticket(ticket_id: int, ctx: Context) -> TicketDetail:
-        result = await _audited(
+        return await _audited(
             "get_ticket",
             ctx,
             {"ticket_id": ticket_id},
             policy,
             lambda claims: database.get_ticket(ticket_id),
         )
-        return tool_result(result)
 
     @server.tool(
         name="get_customer",
@@ -243,59 +283,55 @@ def _register_tools(server: MCPServer, database: Database, policy: BearerPolicy)
         ),
     )
     async def get_customer(customer_id: int, ctx: Context) -> CustomerDetail:
-        result = await _audited(
+        return await _audited(
             "get_customer",
             ctx,
             {"customer_id": customer_id},
             policy,
             lambda claims: database.get_customer(customer_id),
         )
-        return tool_result(result)
 
     @server.tool(
         name="run_readonly_sql",
         description=(
             "Run one SQL statement in a READ ONLY transaction and return its rows. "
-            "A write is refused by the database."
+            "A table or catalog write is refused by the database."
         ),
     )
     async def run_readonly_sql(sql: str, ctx: Context) -> QueryResult:
-        result = await _audited(
+        return await _audited(
             "run_readonly_sql",
             ctx,
             {"sql": sql},
             policy,
             lambda claims: database.run_readonly_sql(sql),
         )
-        return tool_result(result)
 
     @server.tool(
         name="update_ticket",
         description="Set a ticket's status and append a support note from the verified caller.",
     )
     async def update_ticket(ticket_id: int, status: str, note: str, ctx: Context) -> TicketDetail:
-        result = await _audited(
+        return await _audited(
             "update_ticket",
             ctx,
             {"ticket_id": ticket_id, "status": status, "note": note},
             policy,
             lambda claims: database.update_ticket(ticket_id, status, note, claims.sub),
         )
-        return tool_result(result)
 
     @server.tool(
         name="rotate_api_key",
         description="Replace one API key value and revoke the customer's other live keys.",
     )
     async def rotate_api_key(customer_id: int, key_id: int, ctx: Context) -> RotatedKey:
-        result = await _audited(
+        return await _audited(
             "rotate_api_key",
             ctx,
             {"customer_id": customer_id, "key_id": key_id},
             policy,
             lambda claims: database.rotate_api_key(customer_id, key_id),
         )
-        return tool_result(result)
 
 
 def build_server(
