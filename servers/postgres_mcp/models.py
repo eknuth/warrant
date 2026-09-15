@@ -10,7 +10,8 @@ customer, so its author is `customer`. A note was written by the desk, so its
 author is `member`. A raw query has no author at all, so it is `unknown`. A
 customer record is authored by the login that owns the account relationship,
 which is a member of the business, so it is `member` too. `warrant.models.Tier`
-carries all four values, so none of them is downgraded on the way to a policy.
+has five members (`owner`, `member`, `customer`, `external`, and `unknown`);
+this server uses three of them, and none is downgraded on the way to a policy.
 
 A result that carries an API key value also carries a `secrets` list holding
 every value it returned. The list is in the structured result, not in the text
