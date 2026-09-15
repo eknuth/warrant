@@ -1,7 +1,7 @@
 """The dev-only auth path: a human's token, and the exchange for an agent's.
 
 This module holds what `scripts/token_exchange.py` used to hold, moved here so
-the triage agent can call it. The script imports these functions back out, so
+the agent roles can call it. The script imports these functions back out, so
 its CLI and the W3 test fixture that reads it keep working.
 
 The flow is two steps:
@@ -12,9 +12,10 @@ The flow is two steps:
    `console` client, and a deployment runs authorization code with PKCE there.
    The token this returns is issued to `console` and names triage-agent as its
    audience, which is what lets triage-agent exchange it.
-2. triage-agent, a confidential client, exchanges that token for one addressed
-   to a resource server. The exchanged token keeps the human as `sub`, records
-   triage-agent as `act.sub` and `azp`, and carries the caller's `task_id`.
+2. The agent client, a confidential client, exchanges that token for one
+   addressed to a resource server. The exchanged token keeps the human as
+   `sub`, records the agent client as `act.sub` and `azp`, and carries the
+   caller's `task_id`.
 
 `task_id` travels as the parameterized scope `task-id:<value>`; see
 `docs/decisions/002-token-exchange.md`. The decoded token this module returns
@@ -40,6 +41,12 @@ ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
 # realm's `act` mapper hardcodes, and `warrant.oidc.verify` refuses a token
 # where `act.sub` and `azp` disagree with it.
 TRIAGE_AGENT = "triage-agent"
+
+# The second agent client, the one the support role exchanges as. The realm has
+# its own OBO scope and its own `act` mapper, so a support token names
+# support-agent as the actor for the same reason a triage token names
+# triage-agent.
+SUPPORT_AGENT = "support-agent"
 
 
 class AuthError(RuntimeError):
