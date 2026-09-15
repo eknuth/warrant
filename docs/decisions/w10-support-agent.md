@@ -21,17 +21,16 @@ and is the honest non-lead case: his calls are refused by `wrong-subject` until 
 ticket and customer resource rows, and that refusal is the scenario-7 shape the rule exists for.
 The choice is a seeded-realm fact rather than a policy change, and no policy is edited for it.
 
-## The seeded ticket and the status vocabulary
+## The seeded ticket and the recorded status
 
 `scripts/seed_smoke.py` seeds one customer, one honest ticket, and one generated API key. The
 ticket asks the desk to confirm which API key is on file and whether it is still active, which the
 `customers` and `api_keys` rows answer, so an agent that reads them can reply rather than guess.
-The ticket starts `open`, and the desk names `resolved` as the status for a ticket it has answered.
-`db.update_ticket` accepts any non-empty status, so that vocabulary is the fixture's convention
-rather than a value the schema enforces, and the support prompt says only "set the status to
-reflect where the ticket stands", so the smoke records the status the agent chose. The seeder
-resets the ticket to `open` with no notes on every run, so a smoke starts from the same state. The key value
-is generated at seed time and never written into the file, a test, or git.
+The schema has no status vocabulary and `db.update_ticket` accepts any non-empty status, so the
+fixture seeds the ticket `open` and a smoke records the status the run chose. The recorded run
+cited below chose `pending`. The seeder resets the ticket to `open` with no notes on every run, so a
+smoke starts from the same state. The key value is generated at seed time and never written into
+the file, a test, or git.
 
 ## The run record lives in the checkout
 
@@ -44,6 +43,31 @@ both from the checkout on the exec command line. The two names are declared empt
 environment rather than interpolated with a default, because the scaffold test refuses a
 `${NAME:-...}` in a service environment; the exec carries the real values, and that is the process
 that writes the metadata.
+
+## The smoke command
+
+These are the commands the recorded run used, from the checkout root. The image is rebuilt and the
+service recreated first when the code has changed, so the run is the committed code:
+
+    BUILDX_CONFIG="$PWD/.docker-buildx" docker compose build warrant
+    docker compose up -d --wait warrant
+
+    curl -s -X DELETE http://localhost:8025/api/v1/messages
+    uv run python scripts/seed_smoke.py
+    export WARRANT_COMMIT=$(git rev-parse HEAD)
+    export WARRANT_DIRTY=$([ -z "$(git status --porcelain)" ] && echo false || echo true)
+    docker compose exec -T \
+      -e KEYCLOAK_URL=http://keycloak:8080 \
+      -e WARRANT_COMMIT="$WARRANT_COMMIT" \
+      -e WARRANT_DIRTY="$WARRANT_DIRTY" \
+      warrant python -m agents.support --ticket 12
+
+`KEYCLOAK_URL` is the compose network's name for Keycloak, because the gateway verifies
+`iss=http://keycloak:8080/...` while a host-side login mints `iss=http://localhost:8080/...`. The
+`--user` flag is omitted on purpose, so the run is the CLI's default user, which is carol. The
+Mailpit clear is the DELETE of its message list, so the mailbox starts empty and the reply the run
+sends is the only message in it. The recorded run's task id was
+`5804af60-b08f-40a7-b90d-d886bb30ad0f`, and the status it left the ticket in was `pending`.
 
 ## The write set is derived from the graph
 
@@ -58,11 +82,18 @@ set names a tool the agent does not hold.
 ## The gateway offers only the tools the agent holds
 
 `warrant/gateway.py`'s `list_tools` still discovers per server and caches that discovery per server.
-It now narrows the cached list on every request to `graph.agent(chain.act).allowed_tools`. A tool
-with no graph row was never re-exported, because the gateway would have no action kind to decide it
-with. A tool the graph knows but the acting agent's allowlist lacks is refused by the baseline
-permit anyway, so offering it only invited a call that could not be made. `agents/loop.py`'s
-`offered_tools` is a second narrowing to the servers a role names, and it says so.
+In the modes where the engine decides, which are `full` and `no-provenance`, it narrows the cached
+list on every request to `graph.agent(chain.act).allowed_tools`. A tool with no graph row was never
+re-exported, because the gateway would have no action kind to decide it with. A tool the graph knows
+but the acting agent's allowlist lacks is refused by the baseline permit anyway, so offering it only
+invited a call that could not be made. `agents/loop.py`'s `offered_tools` is a second narrowing to
+the servers a role names, and it says so.
+
+`prompt-only` is the exception. That mode makes every decision allow without evaluating a policy,
+and it is the ablation column the matrix is measured against. Filtering by the graph's allowlist
+there would add a control the other ablations do not have, so the discovered graph-known surface is
+returned whole and the ablation stays policy-free. The filter applies in every other mode, `full`,
+`no-provenance`, and `no-exchange`, which all run the engine.
 
 ## Each task holds its own token
 

@@ -143,6 +143,10 @@ def write_tools_from_graph(agent_id: str, seed_path: Path | None = None) -> froz
     derived for the agent named, so adding a write tool to that agent's
     allowlist in `infra/graph.yml` makes it an action without a second edit, and
     a hand-kept list cannot drift from the graph the gateway decides with.
+
+    An allowlist entry with no tool row is refused rather than dropped. Dropping
+    it silently made a typo look like a read, so a write the graph has never
+    heard of would never appear in an Outcome's actions.
     """
     path = Path(seed_path) if seed_path is not None else DEFAULT_GRAPH_SEED
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -154,9 +158,10 @@ def write_tools_from_graph(agent_id: str, seed_path: Path | None = None) -> froz
         if agent is None:
             raise AgentError(f"no graph row for agent {agent_id!r} in {path}")
         kinds = {tool.id: tool.action_kind for tool in graph.tools()}
-    return frozenset(
-        tool_id for tool_id in agent.allowed_tools if kinds.get(tool_id) in WRITE_KINDS
-    )
+    missing = sorted(tool_id for tool_id in agent.allowed_tools if tool_id not in kinds)
+    if missing:
+        raise AgentError(f"{agent_id} holds tools with no row in {path}: {', '.join(missing)}")
+    return frozenset(tool_id for tool_id in agent.allowed_tools if kinds[tool_id] in WRITE_KINDS)
 
 
 def load_system_prompt(path: Path | None = None) -> str:

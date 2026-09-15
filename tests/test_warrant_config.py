@@ -300,3 +300,27 @@ def test_commit_is_dirty_falls_back_to_the_environment(monkeypatch: pytest.Monke
     assert config.commit_is_dirty(Path("/tmp")) is None
     monkeypatch.delenv(config.DIRTY_ENV)
     assert config.commit_is_dirty(Path("/tmp")) is None
+
+
+def test_a_real_checkout_wins_over_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The environment is a fallback for a checkout with no git, not an override.
+
+    Both values are set to the opposite of what git reports, so this is about
+    precedence and not about whether the tree happened to be clean when the
+    suite ran. On a clean checkout, which is how the suite runs, the answer is
+    the real HEAD and False.
+    """
+    head = subprocess.run(
+        ["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+    dirty = bool(
+        subprocess.run(
+            ["git", "-C", str(REPO), "status", "--porcelain"], capture_output=True, text=True
+        ).stdout.strip()
+    )
+    monkeypatch.setenv(config.COMMIT_ENV, "0" * 40)
+    monkeypatch.setenv(config.DIRTY_ENV, "false" if dirty else "true")
+
+    assert head, "the suite needs a checkout git can answer for"
+    assert config.commit_sha() == head
+    assert config.commit_is_dirty() is dirty

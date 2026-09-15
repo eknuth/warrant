@@ -23,6 +23,7 @@ from agents.loop import (
     Role,
     agent_loop,
     synthesize_summary,
+    write_tools_from_graph,
 )
 from agents.mcp_client import CallResult
 from agents.providers.base import ToolSchema, ToolUse, Turn, Usage
@@ -119,6 +120,31 @@ def test_the_write_set_comes_from_the_graph() -> None:
             )
             assert not (graph_reads & write_tools), f"{agent_id} calls reads writes"
             assert write_tools <= held, f"{agent_id} writes a tool it does not hold"
+
+
+def test_an_allowlist_entry_with_no_tool_row_is_loud(tmp_path: Path) -> None:
+    """A typo in an allowlist must not read as a read.
+
+    `write_tools_from_graph` used to drop a tool the tools table does not know,
+    which made a misspelled write look like a read and left it out of every
+    Outcome's actions.
+    """
+    data = yaml.safe_load(DEFAULT_GRAPH_SEED.read_text(encoding="utf-8"))
+    data["agents"].append(
+        {
+            "id": "typo-agent",
+            "client_id": "typo-agent",
+            "owner_human_id": "h-bob",
+            "justification": "a typo in an allowlist",
+            "justification_expires_at": None,
+            "allowed_tools": ["db.get_ticket", "db.get_tickt"],
+        }
+    )
+    seed = tmp_path / "graph.yml"
+    seed.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    with pytest.raises(AgentError, match="db.get_tickt"):
+        write_tools_from_graph("typo-agent", seed)
 
 
 def test_the_synthesized_summary_uses_the_task_shape_not_the_subject() -> None:

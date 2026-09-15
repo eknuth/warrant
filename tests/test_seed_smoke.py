@@ -27,6 +27,7 @@ from scripts.seed_smoke import (
     SeedSettings,
     seed_postgres,
 )
+from tests.fixtures.auth import require_postgres
 
 pytestmark = pytest.mark.integration
 
@@ -39,16 +40,11 @@ def scratch_settings() -> Iterator[SeedSettings]:
     """A throwaway database with the support schema and no rows.
 
     Only an absent stack skips. A server that answers and refuses the role is a
-    failure, not a skip, the same way the W8 postgres fixture treats it.
+    failure, not a skip, through the same `require_postgres` the W8 postgres
+    fixture uses.
     """
     base = SeedSettings()
-    if not base.postgres_password:
-        pytest.skip("POSTGRES_PASSWORD is not set; add it to .env")
-    try:
-        with psycopg.connect(base.dsn("postgres"), connect_timeout=3) as conn:
-            conn.execute("select 1")
-    except psycopg.OperationalError as error:
-        pytest.skip(f"no postgres at {base.postgres_host}:{base.postgres_port}: {error}")
+    require_postgres(base)
     name = f"w10_seed_{uuid.uuid4().hex[:10]}"
     admin = psycopg.connect(base.dsn("postgres"), autocommit=True)
     admin.execute(f'create database "{name}"')

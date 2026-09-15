@@ -33,6 +33,7 @@ from mcp.client.streamable_http import streamable_http_client
 from agents.auth import audience_list, decode_claims
 from servers.postgres_mcp.server import MAX_RESULT_BYTES, build_app
 from servers.postgres_mcp.server import ServerSettings as PostgresSettings
+from tests.fixtures.auth import require_postgres
 
 pytestmark = pytest.mark.integration
 
@@ -79,19 +80,10 @@ def pg_server(pg_settings: PostgresSettings) -> PostgresSettings:
     """Skip unless the compose postgres answers for the configured role.
 
     Only an absent stack skips. A server that answers and refuses the role is a
-    failure, not a skip, for the same reason the Gitea fixture fails: a wrong
-    password would otherwise delete every integration test silently while
-    `make test` stayed green.
+    failure, not a skip, for the same reason the Gitea fixture fails; the probe
+    is the shared `require_postgres` in `tests/fixtures/auth.py`.
     """
-    if not pg_settings.postgres_password:
-        pytest.skip("POSTGRES_PASSWORD is not set; add it to .env")
-    try:
-        with psycopg.connect(pg_settings.dsn("postgres"), connect_timeout=3) as conn:
-            conn.execute("select 1")
-    except psycopg.OperationalError as error:
-        pytest.skip(
-            f"no postgres at {pg_settings.postgres_host}:{pg_settings.postgres_port}: {error}"
-        )
+    require_postgres(pg_settings)
     return pg_settings
 
 

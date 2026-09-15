@@ -199,7 +199,9 @@ and all ten are fixed here, because the ones that looked small were the same kin
 - `.env` was copied into the image by `COPY . .`. A `.dockerignore` now excludes it along with
   `runs/`, `warrant.db`, and the rest of the local state.
 - `no-exchange` crashed on `tools/list`, which is the first request an MCP client makes, so the
-  whole ablation was unusable. `list_tools` now builds its chain the same way `call_tool` does.
+  whole ablation was unusable. The `tools/list` handler now passes the request headers to
+  `list_tools` the way the `tools/call` handler does, so both build the same chain from the same
+  place.
 - A refusal before the engine wrote nothing, because it carried no task id, while this file and the
   module docstring both said every call gets a line. Refusals that happen after the chain is built
   now write their line with the real `task_id` and `act`.
