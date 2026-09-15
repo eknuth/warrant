@@ -30,7 +30,7 @@ from mcp.types import CallToolResult, TextContent, Tool
 from starlette.testclient import TestClient
 
 from warrant import oidc
-from warrant.config import Mode
+from warrant.config import Mode, Taint
 from warrant.engine import PolicyEngine
 from warrant.gateway import (
     Gateway,
@@ -170,6 +170,8 @@ def make_gateway(
     runs_dir: Path | None = None,
     client_secret: str = "",
     exchange_transport: Any = None,
+    mode: Mode | None = None,
+    taint: Taint | None = None,
 ) -> Gateway:
     runs = runs_dir or tmp_path / "runs"
     settings = GatewaySettings(warrant_agent_client_secret=client_secret)
@@ -183,6 +185,8 @@ def make_gateway(
         upstream=upstream,
         exchange_transport=exchange_transport,
         runs_dir=runs,
+        mode=mode,
+        taint=taint,
     )
 
 

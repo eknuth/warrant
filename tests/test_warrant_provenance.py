@@ -7,7 +7,7 @@ from pathlib import Path
 
 from warrant.config import Mode
 from warrant.models import Source, Tier
-from warrant.provenance import Ledger, ledger_path
+from warrant.provenance import Ledger, classify, ledger_path
 
 
 def test_two_records_come_back_and_leave_two_lines(
@@ -112,3 +112,97 @@ def test_a_replayed_ledger_is_still_per_actor(
         ledger_path(tmp_path, "task-1", "triage-agent").parent
         == ledger_path(tmp_path, "task-1", "support-agent").parent
     )
+
+
+# -- the classifier ---------------------------------------------------------
+
+
+def test_an_instruction_file_from_a_non_member_is_external(
+    make_source: Callable[..., Source],
+) -> None:
+    instructions = make_source(
+        system="gitea",
+        kind="file",
+        id="acme/widgets:.github/copilot-instructions.md@main",
+        author="mallory",
+        author_tier=Tier.external,
+    )
+
+    assert classify(instructions) is Tier.external
+
+
+def test_an_instruction_file_from_a_member_keeps_the_member_tier(
+    make_source: Callable[..., Source],
+) -> None:
+    instructions = make_source(
+        system="gitea",
+        kind="file",
+        id="acme/widgets:.github/copilot-instructions.md@main",
+        author="bob",
+        author_tier=Tier.member,
+    )
+
+    assert classify(instructions) is Tier.member
+
+
+def test_an_instruction_file_with_no_resolvable_author_is_external(
+    make_source: Callable[..., Source],
+) -> None:
+    """A commit with no forge account is not a member either."""
+    instructions = make_source(
+        system="gitea",
+        kind="file",
+        id="acme/widgets:AGENTS.md@main",
+        author="",
+        author_tier=Tier.unknown,
+    )
+
+    assert classify(instructions) is Tier.external
+
+
+def test_every_instruction_path_shape_is_covered(
+    make_source: Callable[..., Source],
+) -> None:
+    for path in (".cursor/rules/style.md", "CLAUDE.md", "config/widgets.rules", "docs/AGENTS.md"):
+        source = make_source(
+            system="gitea",
+            kind="file",
+            id=f"acme/widgets:{path}@main",
+            author="mallory",
+            author_tier=Tier.external,
+        )
+        assert classify(source) is Tier.external, path
+
+
+def test_an_ordinary_file_keeps_the_upstream_tier(make_source: Callable[..., Source]) -> None:
+    ordinary = make_source(
+        system="gitea",
+        kind="file",
+        id="acme/widgets:app.py@main",
+        author="bob",
+        author_tier=Tier.member,
+    )
+
+    assert classify(ordinary) is Tier.member
+
+
+def test_a_raw_sql_read_has_no_author_to_grade(make_source: Callable[..., Source]) -> None:
+    query = make_source(system="db", kind="query", id="q1", author="", author_tier=Tier.member)
+
+    assert classify(query) is Tier.unknown
+
+
+def test_a_mail_sender_outside_the_member_domain_is_external(
+    make_source: Callable[..., Source],
+) -> None:
+    outside = make_source(system="mail", kind="message", id="m1", author="stranger@other.test")
+
+    assert classify(outside) is Tier.external
+
+
+def test_a_mail_sender_inside_the_member_domain_keeps_the_member_tier(
+    make_source: Callable[..., Source],
+) -> None:
+    inside = make_source(system="mail", kind="message", id="m1", author="desk@acme.test")
+
+    assert classify(inside) is Tier.member

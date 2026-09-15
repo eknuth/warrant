@@ -13,12 +13,16 @@ token for `warrant`, connects to this server, and calls the re-exported tools
 3. Builds an `AuthzRequest` from the graph's row for the tool: its action kind,
    the resource named by the call's arguments, and the provenance ledger's set
    for the task. The ledger is the only source of provenance; nothing the agent
-   sends in the call body reaches the request.
+   sends in the call body reaches the request. W11 then fills the taint and
+   target fields from the task's `TaskState`: the sources its reads recorded,
+   the secrets they carried, and the target the first call named.
 4. Calls `engine.decide()`. An allow forwards the call upstream with a bearer
    Warrant exchanges for that upstream's audience, a deny returns the policy
    reasons as a tool error, and an escalate returns `escalated: pending`.
 5. On an allowed read, records each provenance block the upstream returned in
-   the ledger, so the next call in the task is decided with it.
+   the ledger and in the task state, so the next call in the task is decided
+   with it. The ledger is the evidence on disk; the task state is the text the
+   content taint matches against, and it is in memory only.
 
 Two JSONL records are written per call. `decisions.jsonl` is the
 `warrant.engine` decision log, one line per evaluated call. `gateway.jsonl` is
@@ -60,7 +64,7 @@ from starlette.applications import Starlette
 
 from servers.common.auth import BearerAuthMiddleware
 from warrant import config, oidc
-from warrant.config import RUNS_DIR, Mode, bad_task_id, task_dir
+from warrant.config import RUNS_DIR, Mode, Taint, bad_task_id, task_dir
 from warrant.engine import PolicyEngine
 from warrant.graph import Graph
 from warrant.log import DecisionLog
@@ -73,8 +77,9 @@ from warrant.models import (
     Tier,
     Verdict,
 )
-from warrant.provenance import Ledger
+from warrant.provenance import Ledger, classify
 from warrant.resources import extract_resource, resolve_resource
+from warrant.taint import TaskState
 
 logger = logging.getLogger(__name__)
 
@@ -245,13 +250,18 @@ def as_source(block: Mapping[str, Any], record: Any) -> Source:
 
     The resource server's block carries the identity of what was read but not a
     digest of it, so the digest is taken here over the record the block sat in.
+
+    The tier is the one `warrant.provenance.classify` gives, not the upstream's
+    word alone. The forge knows its own membership and the database knows its
+    record kinds, but only Warrant knows that a `.github/` file is an
+    instruction surface and that a raw SQL read has no author to grade.
     """
     tier = block.get("author_tier")
     try:
         author_tier = Tier(tier)
     except ValueError:
         author_tier = Tier.unknown
-    return Source(
+    source = Source(
         system=str(block.get("system", "")),
         kind=str(block.get("kind", "")),
         id=str(block.get("id", "")),
@@ -259,6 +269,7 @@ def as_source(block: Mapping[str, Any], record: Any) -> Source:
         author_tier=author_tier,
         digest=digest(record),
     )
+    return source.model_copy(update={"author_tier": classify(source)})
 
 
 def tool_result_error(text: str) -> CallToolResult:
@@ -336,6 +347,7 @@ class Gateway:
         exchange_transport: httpx.AsyncBaseTransport | None = None,
         runs_dir: Path | str | None = None,
         mode: Mode | None = None,
+        taint: Taint | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self.settings = settings or GatewaySettings()
@@ -353,8 +365,16 @@ class Gateway:
             Path(runs_dir) if runs_dir is not None else Path(self.settings.warrant_runs_dir)
         )
         self.mode = Mode(mode) if mode is not None else config.current_mode()
+        # `Taint(...)` rather than the value as given, the same rule `mode`
+        # follows: a bare string that happens to match would compare unequal
+        # against `is` and quietly run the wrong taint set.
+        self.taint = Taint(taint) if taint is not None else config.current_taint()
         self._now = now or (lambda: datetime.now(UTC))
         self._tools: dict[str, list[Tool]] = {}
+        # One `TaskState` per task and actor. The actor is part of the key for the
+        # same reason the ledger keys on it: an agent writes its own task id, so
+        # keying on the id alone would let one agent fill another agent's taint.
+        self._tasks: dict[tuple[str, str], TaskState] = {}
 
     # Bearer verification ---------------------------------------------------
 
@@ -518,16 +538,35 @@ class Gateway:
             return self._refuse(name, f"unknown tool {name!r}", chain)
 
         provenance = self.ledger.get(chain.task_id, chain.act)
+        if self.taint is Taint.content:
+            # `TAINT=content` runs the content rule alone. The sources stay in the
+            # request so the decision line records what was read; the flag is
+            # what keeps `provenance.hasExternal` from firing the task rule.
+            provenance = provenance.model_copy(update={"task_taint": False})
         resource_name = extract_resource(row.resource_kind, arguments)
+        resource = resolve_resource(self.graph, row.resource_kind, resource_name)
         request = AuthzRequest(
             chain=chain,
             tool=name,
             action_kind=ActionKind(row.action_kind),
-            resource=resolve_resource(self.graph, row.resource_kind, resource_name),
+            resource=resource,
             args_digest=args_digest(arguments),
             provenance=provenance,
             ts=self._now(),
         )
+
+        # The task's named target comes from its first exchange, which here is
+        # the first call whose arguments resolve to a resource. `docs/provenance.md`
+        # records why the call's arguments name it rather than a token claim.
+        state = self._task_state(chain.task_id, chain.act)
+        if not state.targets_named:
+            state.name_target(row.resource_kind, resource)
+        context = state.context_for(request, arguments, exclude=[resource_name or ""])
+        request.overlap_sources = context["overlap_sources"]
+        request.overlap_external = context["overlap_external"]
+        request.args_touch_secret = context["args_touch_secret"]
+        request.target_outside_task = context["target_outside_task"]
+        request.overlap_details = context["overlap_details"]
 
         if self.graph.agent(chain.act) is None:
             return self._log_and_refuse(request, ["unknown agent"])
@@ -610,10 +649,31 @@ class Gateway:
             return None, f"the token's claims cannot build a chain: {error}"
         return chain, ""
 
+    def _task_state(self, task_id: str, actor: str) -> TaskState:
+        """The taint state for one task and actor, created on first use."""
+        key = (task_id, actor)
+        state = self._tasks.get(key)
+        if state is None:
+            state = TaskState(task_id=task_id, taint=self.taint)
+            self._tasks[key] = state
+        return state
+
     def _record_sources(self, task_id: str, actor: str, result: CallToolResult) -> None:
+        """Record a read's sources in the ledger and its taint in the task state.
+
+        The ledger is the evidence and the task state is the working memory. The
+        state is not updated under `no-provenance`, because that ablation drops
+        everything that depends on what was read, and a content taint computed
+        from a state the ledger refuses to hold would be a check the ablation did
+        not remove.
+        """
         payload = payload_of(result)
-        for block, record in extract_sources(payload):
-            self.ledger.record(task_id, actor, as_source(block, record))
+        sources = [as_source(block, record) for block, record in extract_sources(payload)]
+        for source in sources:
+            self.ledger.record(task_id, actor, source)
+        if self.mode is Mode.no_provenance:
+            return
+        self._task_state(task_id, actor).on_read(payload=payload, sources=sources)
 
     # Decisions the gateway makes itself, and logging -----------------------
 

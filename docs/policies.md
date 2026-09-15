@@ -72,10 +72,9 @@ task has read external material or carries external text.
 The exfil rule. W11 computes `argsTouchSecret` when a write carries a value the
 task read from the key table or from a file whose name says it holds secrets, and
 this rule forbids the two tools that put text in front of somebody outside the
-task. The field is false today, so the rule is written and waiting; see the
-section above. The ticket named a reply tool for the mail side. This graph has
-one mail send tool, and a policy that names an action the generated schema does
-not declare fails validation at load, so the rule names the tool the graph holds.
+task. The ticket named a reply tool for the mail side. This graph has one mail
+send tool, and a policy that names an action the generated schema does not
+declare fails validation at load, so the rule names the tool the graph holds.
 When a reply tool lands and the graph gains its row, this line gains the name.
 
 ## `50-ownership.cedar`
@@ -118,14 +117,14 @@ to `h-alice` and `h-bob`, and `tests/test_realm.py` holds the two trees to the
 same key. Before that, a real token carried a random Keycloak id, the graph
 lookup came back empty, and every call was refused.
 
-Waiting on W11, which computes the argument scan and the content-taint overlap:
-`tainted-write` reads `targetOutsideTask`, `tainted-content` reads
-`overlapExternal`, and `secret-in-args` reads `argsTouchSecret`. All three
-default to false, and the gateway does not set them, so those fields currently
-say "no taint found" rather than "no taint exists". That direction is the
-permissive one, which is the opposite of deny-safe, so until W11 lands the
-containment against a target shift, a paraphrased injection, or a secret in the
-arguments is the allowlist and the subject rule rather than these three forbids.
+W11 computes the argument scan and the content-taint overlap: `tainted-write`
+reads `targetOutsideTask`, `tainted-content` reads `overlapExternal`, and
+`secret-in-args` reads `argsTouchSecret`. The gateway fills the taint and target
+fields from the task's state before the engine decides, so the three rules can
+refuse. `docs/provenance.md` records what each rule catches and what it misses,
+including the paraphrase the content rule cannot see. The fields still default to
+false on a request built outside the gateway, which is the permissive direction,
+so a caller that decides a hand-built request gets no taint unless it sets one.
 
 The escalation scope and the support group are seeded. `incident_id` is a
 parameterized client scope in the realm, minted the way `task_id` is and optional
