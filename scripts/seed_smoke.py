@@ -145,32 +145,44 @@ class SeedSettings(BaseSettings):
         )
 
 
-def ensure_user(client: httpx.Client, settings: SeedSettings) -> None:
-    """Create bob if Gitea does not have him, with the realm's dev password."""
-    if client.get(f"/api/v1/users/{BOB}").status_code == 200:
+def ensure_user(
+    client: httpx.Client,
+    settings: SeedSettings,
+    login: str = BOB,
+    email: str | None = None,
+) -> None:
+    """Create one Gitea user if it is missing, with the realm's dev password.
+
+    `login` and `email` default to the smoke fixture's bob, so the smoke path is
+    unchanged. The scenario seeder calls this for each member and external it
+    names, and reuses the same credential rule: the password comes from `.env`
+    and is never written or printed.
+    """
+    if client.get(f"/api/v1/users/{login}").status_code == 200:
         return
     if not settings.warrant_user_password:
-        raise SystemExit("WARRANT_USER_PASSWORD is not set; bob cannot be created")
+        raise SystemExit(f"WARRANT_USER_PASSWORD is not set; {login} cannot be created")
     response = client.post(
         "/api/v1/admin/users",
         json={
-            "username": BOB,
+            "username": login,
             "password": settings.warrant_user_password,
-            "email": BOB_EMAIL,
+            "email": email or (BOB_EMAIL if login == BOB else f"{login}@warrant.local"),
             "must_change_password": False,
         },
     )
     if response.status_code != 201:
-        raise SystemExit(f"could not create {BOB}: HTTP {response.status_code} {response.text}")
+        raise SystemExit(f"could not create {login}: HTTP {response.status_code} {response.text}")
 
 
-def ensure_membership(client: httpx.Client) -> None:
-    """Put bob in the org, so the fixture's issue comes from a member.
+def ensure_membership(client: httpx.Client, login: str = BOB) -> None:
+    """Put one user in the org, so their issue comes from a member.
 
     Gitea has no endpoint that adds someone to an org directly: membership comes
-    from a team. The org's own `Owners` team already exists, and adding bob
-    there would make him owner tier, so the script keeps a write team for the
-    org's engineers and adds him to that.
+    from a team. The org's own `Owners` team already exists, and adding someone
+    there would make them owner tier, so the script keeps a write team for the
+    org's engineers and adds them to that. `login` defaults to the smoke
+    fixture's bob, so the smoke path is unchanged.
     """
     teams = client.get(f"/api/v1/orgs/{ORG}/teams")
     if teams.status_code != 200:
@@ -192,16 +204,16 @@ def ensure_membership(client: httpx.Client) -> None:
                 f"could not create team {ENGINEERS_TEAM}: HTTP {created.status_code} {created.text}"
             )
         team = created.json()
-    response = client.put(f"/api/v1/teams/{team['id']}/members/{BOB}")
+    response = client.put(f"/api/v1/teams/{team['id']}/members/{login}")
     if response.status_code not in (200, 204):
         raise SystemExit(
-            f"could not add {BOB} to team {ENGINEERS_TEAM}: "
+            f"could not add {login} to team {ENGINEERS_TEAM}: "
             f"HTTP {response.status_code} {response.text}"
         )
     members = client.get(f"/api/v1/orgs/{ORG}/members")
     logins = {user.get("login") for user in (members.json() if members.status_code == 200 else [])}
-    if BOB not in logins:
-        raise SystemExit(f"{BOB} is in the team but not listed as a member of {ORG}")
+    if login not in logins:
+        raise SystemExit(f"{login} is in the team but not listed as a member of {ORG}")
 
 
 def ensure_repo(client: httpx.Client) -> None:

@@ -109,6 +109,22 @@ def _load_json_list(raw: str) -> list[str]:
     return [str(item) for item in value]
 
 
+def live_justification(agent: Agent, at: datetime) -> bool:
+    """Whether one agent row carries a justification that is live at `at`.
+
+    This is the rule the baseline permit's `justificationValid` reads and the
+    same one the entitlement union filters on: an agent with no justification
+    text, or with an expiry at or before `at`, confers nothing. The engine
+    decides a request at its own timestamp; a caller checking a scenario file
+    before a run passes now, so a scenario cannot rely on an agent the baseline
+    would refuse.
+    """
+    if not agent.justification:
+        return False
+    expires = agent.justification_expires_at
+    return expires is None or expires > at
+
+
 def _parse_time(raw: str | None) -> datetime | None:
     if raw is None or raw == "":
         return None
@@ -148,6 +164,19 @@ class Graph:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+    def clear(self) -> None:
+        """Delete every row, children before parents.
+
+        The scenario seeder reloads the whole graph from `infra/graph.yml` and
+        then the scenario's own agents, so it needs the tables emptied first:
+        an upsert leaves a row from the previous scenario behind, and a stale
+        agent is authority a run must not inherit. The four names are literals
+        in this file, so the loop cannot carry a caller's text into SQL.
+        """
+        for table in ("resources", "agents", "tools", "humans"):
+            self._conn.execute(f"DELETE FROM {table}")
+        self._conn.commit()
 
     def seed(self, data: Mapping[str, Any]) -> dict[str, int]:
         """Upsert a whole graph from a parsed seed mapping.

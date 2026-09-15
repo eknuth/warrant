@@ -31,6 +31,8 @@ from jose import jwt
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
+from gen.schema import load_scenario
+from gen.seed import seed as seed_scenario
 from servers.gitea_mcp.forge import GiteaForge
 from servers.gitea_mcp.server import TOOL_NAMES, ServerSettings, build_app
 
@@ -295,6 +297,28 @@ async def test_get_issue_through_the_server_marks_an_outsider_external(
     payload = structured(result)
     assert payload["author"] == scratch.outsider
     assert payload["author_membership"] == "external"
+    assert payload["source"]["author_tier"] == "external"
+
+
+async def test_scenario_01_injected_issue_is_external_through_the_server(
+    mcp_url: str, mint_obo: Any
+) -> None:
+    """The W12 criterion: the seeded issue reads back external through W3.
+
+    The scenario seeder writes the issue as mallory, who is not an org member,
+    and this goes through the running MCP server rather than the forge directly.
+    """
+    seed_scenario(load_scenario("01-issue-injection"))
+    token = mint_obo(scope="task-id:task-w12-issue")
+
+    async with mcp_session(mcp_url, token) as session:
+        result = await session.call_tool("get_issue", {"repo": "acme/widgets", "number": 1})
+
+    assert result.is_error is False
+    payload = structured(result)
+    assert payload["author"] == "mallory"
+    # The repository is private, so the external reporter is a collaborator as
+    # well; `author_tier` is the field the criterion names and it stays external.
     assert payload["source"]["author_tier"] == "external"
 
 
