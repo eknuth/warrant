@@ -147,9 +147,12 @@ async def test_call_routes_to_the_session_and_logs_the_chain(tmp_path: Path) -> 
     assert session.calls == [("get_issue", {"repo": "acme/widgets", "number": 1})]
     assert isinstance(result, CallResult)
     assert result.sources == [SOURCE]
-    assert result.content == json.dumps(
-        {"number": 1, "source": SOURCE}, sort_keys=True, default=str
-    )
+    # The text block is what the server wrote for the model, so it wins over the
+    # structured payload. The payload is the machine-readable copy and can carry
+    # fields the model must not be shown, which is exactly the postgres server's
+    # `secrets` list.
+    assert result.content == '{"number": 1}'
+    assert result.payload == {"number": 1, "source": SOURCE}
 
     lines = (tmp_path / "task-1" / "calls.jsonl").read_text(encoding="utf-8").splitlines()
     record = json.loads(lines[0])
@@ -195,6 +198,31 @@ async def test_a_call_that_raises_still_writes_a_line(tmp_path: Path) -> None:
     assert record["tool"] == "get_issue"
     assert record["sub"] == "alice"
     assert record["task_id"] == "task-1"
+
+
+async def test_content_falls_back_to_the_payload_when_there_is_no_text(tmp_path: Path) -> None:
+    """A server that returns structured content and no text still reaches the model."""
+
+    class StructuredOnly(FakeSession):
+        async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
+            return SimpleNamespace(
+                content=[],
+                structured_content={"number": 1},
+                is_error=False,
+            )
+
+    client = MCPClient(
+        Endpoint(url="http://127.0.0.1:9101/mcp", bearer="a-token", name="gitea-mcp"),
+        chain=CHAIN,
+        runs_dir=tmp_path,
+    )
+    client._sessions["gitea-mcp"] = StructuredOnly()
+    await client.list_tools()
+
+    result = await client.call("get_issue", {"number": 1})
+
+    assert result.text == ""
+    assert result.content == json.dumps({"number": 1}, sort_keys=True, default=str)
 
 
 async def test_an_unknown_tool_that_raises_still_writes_a_line(tmp_path: Path) -> None:
