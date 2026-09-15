@@ -84,6 +84,25 @@ def test_warrant_mode_is_read_from_the_environment_once() -> None:
     assert result.stdout.split() == ["prompt-only", "prompt-only"]
 
 
+def test_parse_taint_defaults_to_both_and_rejects_typos() -> None:
+    assert config.parse_taint(None) is config.Taint.both
+    assert config.parse_taint("") is config.Taint.both
+    assert config.parse_taint("task") is config.Taint.task
+    assert config.parse_taint("content") is config.Taint.content
+    with pytest.raises(ValueError, match="TAINT"):
+        config.parse_taint("contnet")
+
+
+def test_taint_is_read_from_the_environment_once() -> None:
+    snippet = (
+        "import warrant.config as c;print(c.current_taint().value);print(c.DEFAULT_TAINT.value)"
+    )
+
+    result = run_python(snippet, {"TAINT": "content"})
+
+    assert result.stdout.split() == ["content", "content"]
+
+
 def test_prompt_only_makes_every_decision_allow_and_logs_it(tmp_path: Path) -> None:
     policies = tmp_path / "policies"
     policies.mkdir()

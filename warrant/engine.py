@@ -548,13 +548,12 @@ class CedarEngine:
                 "sourceIds": sorted({source.id for source in provenance.sources}),
                 # `overlapSources` and `overlapExternal` are W11's content-taint
                 # computation, and `argsTouchSecret` and `targetOutsideTask` are
-                # its argument scan and target comparison. W7 carries them so the
-                # rules that read them exist. The default claims no taint, which
-                # is the permissive direction rather than the deny-safe one: a
-                # `False` here suppresses the rule instead of firing it, so until
-                # W11 fills them the containment against a target shift, a
-                # paraphrased injection, or a secret in the arguments is the
-                # allowlist and the subject rule, not these three forbids.
+                # its argument scan and target comparison. The gateway fills them
+                # from the task's `TaskState`; a request built by hand, which is
+                # what the policy table does, carries whatever it set. The default
+                # claims no taint, which is the permissive direction rather than
+                # the deny-safe one: a `False` here suppresses the rule instead of
+                # firing it.
                 "overlapSources": sorted(req.overlap_sources),
                 "overlapExternal": req.overlap_external,
                 # `count` is what lets a policy tell "nothing has been read yet"

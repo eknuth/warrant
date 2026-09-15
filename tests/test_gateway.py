@@ -30,7 +30,7 @@ from mcp.types import CallToolResult, TextContent, Tool
 from starlette.testclient import TestClient
 
 from warrant import oidc
-from warrant.config import Mode
+from warrant.config import Mode, Taint
 from warrant.engine import PolicyEngine
 from warrant.gateway import (
     Gateway,
@@ -82,14 +82,16 @@ def claims_for(
     task_id: str | None = "task-1",
     audience: str = "warrant",
     exp_offset: int = 300,
+    scope: str = "gitea:read",
+    groups: list[str] | None = None,
 ) -> oidc.Claims:
     payload: dict[str, Any] = {
         "sub": sub,
         "act": {"sub": act},
         "azp": act,
         "aud": [audience],
-        "scope": "gitea:read",
-        "groups": ["owners"],
+        "scope": scope,
+        "groups": groups if groups is not None else ["owners"],
         "exp": int(time.time()) + exp_offset,
         "iss": "https://issuer.test/realms/warrant",
     }
@@ -170,6 +172,8 @@ def make_gateway(
     runs_dir: Path | None = None,
     client_secret: str = "",
     exchange_transport: Any = None,
+    mode: Mode | None = None,
+    taint: Taint | None = None,
 ) -> Gateway:
     runs = runs_dir or tmp_path / "runs"
     settings = GatewaySettings(warrant_agent_client_secret=client_secret)
@@ -183,6 +187,8 @@ def make_gateway(
         upstream=upstream,
         exchange_transport=exchange_transport,
         runs_dir=runs,
+        mode=mode,
+        taint=taint,
     )
 
 

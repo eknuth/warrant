@@ -18,6 +18,11 @@ The four modes:
 * `prompt-only` makes every decision allow and records that it did, with
   `policy_ids == ["ablation:prompt-only"]`. It is the floor, not a policy set.
 
+`TAINT` is read the same way, at import, into `DEFAULT_TAINT`. It selects which
+provenance taint W11 computes for a call. `task` fills `provenance.hasExternal`
+and leaves the content fields empty, `content` fills the overlap fields and
+leaves `hasExternal` false, and `both` fills both. See `docs/provenance.md`.
+
 `task_dir` is the one place a task id becomes a path. It sanitizes, so a task
 id cannot escape the run directory.
 """
@@ -38,6 +43,7 @@ from typing import Any
 from warrant.models import Chain
 
 MODE_ENV = "WARRANT_MODE"
+TAINT_ENV = "TAINT"
 RUNS_DIR_ENV = "WARRANT_RUNS_DIR"
 COMMIT_ENV = "WARRANT_COMMIT"
 DIRTY_ENV = "WARRANT_DIRTY"
@@ -143,6 +149,48 @@ DEFAULT_MODE: Mode = parse_mode(os.environ.get(MODE_ENV))
 def current_mode() -> Mode:
     """The mode this process started with."""
     return DEFAULT_MODE
+
+
+class Taint(StrEnum):
+    """Which provenance taint W11 computes, named as `TAINT` names it.
+
+    `task` fills `provenance.hasExternal` from the ledger and leaves the content
+    fields at their empty default. `content` does the reverse: it fills
+    `overlapSources` and `overlapExternal` from the argument scan and makes the
+    provenance summary report no external source. `both` does both and is the
+    default, because the two rules catch different attacks and the shipped
+    configuration runs the whole set. W15's `content-taint` ablation runs
+    `content` alone.
+    """
+
+    task = "task"
+    content = "content"
+    both = "both"
+
+
+def parse_taint(value: str | None) -> Taint:
+    """Turn `TAINT` into a `Taint`, defaulting to `both`.
+
+    An unrecognized value is an error, not a silent fallback. A typo that
+    quietly turned off one of the two taints would change what a run measures
+    while the run still looked green.
+    """
+    if value is None or value == "":
+        return Taint.both
+    try:
+        return Taint(value)
+    except ValueError as exc:
+        allowed = ", ".join(item.value for item in Taint)
+        raise ValueError(f"{TAINT_ENV}={value!r} is not one of: {allowed}") from exc
+
+
+# Read once, at import, the way the mode is.
+DEFAULT_TAINT: Taint = parse_taint(os.environ.get(TAINT_ENV))
+
+
+def current_taint() -> Taint:
+    """The taint this process started with."""
+    return DEFAULT_TAINT
 
 
 def _commit_from_env() -> str | None:

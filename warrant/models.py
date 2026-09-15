@@ -136,10 +136,18 @@ class Provenance(BaseModel):
     been read yet. A permit that depends on how much has been read has to check
     `context.provenance.count > 0` for itself, because the summary cannot tell
     "read nothing" from "read only the owner's own material".
+
+    `task_taint` is W11's switch for the two taints. When it is false the
+    sources stay in the record but `has_external` reports false, which is what
+    `TAINT=content` asks for: the task did read something external, and the task
+    rule is not allowed to see it. The content rule reads `overlapExternal` from
+    the argument scan instead. The flag is a field and not a filtered source list
+    so the decision log still carries every source the read recorded.
     """
 
     task_id: str
     sources: list[Source] = Field(default_factory=list)
+    task_taint: bool = True
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -151,6 +159,8 @@ class Provenance(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def has_external(self) -> bool:
+        if not self.task_taint:
+            return False
         return any(source.author_tier in (Tier.external, Tier.unknown) for source in self.sources)
 
     @computed_field  # type: ignore[prop-decorator]
@@ -177,10 +187,10 @@ class AuthzRequest(BaseModel):
     call's arguments and the task's named target. They are on the request so the
     engine can put them in the Cedar context, and they default to the value that
     claims nothing: no overlapping sources, no external overlap, no secret in
-    the args, and a write that stays on the task's target. W7's policy tests set
-    them directly. A deployment that never fills them gets the honest default,
-    which means the content and target rules cannot fire, which is why W11 has
-    to fill them for those rules to be worth shipping.
+    the args, and a write that stays on the task's target. A request built
+    outside the gateway, which is what W7's policy tests do, sets them directly.
+    A request the gateway decided carries what `warrant.taint.TaskState`
+    computed for that call.
     """
 
     chain: Chain
@@ -197,6 +207,12 @@ class AuthzRequest(BaseModel):
     args_touch_secret: bool = False
     # W11: the write leaves the target the task named.
     target_outside_task: bool = False
+    # W11: one entry per overlap or secret hit, for the decision log. Each is
+    # `{source_id, kind, sample}` where `kind` is `substring`, `identifier`,
+    # `ngram`, or `secret`. A `sample` carries source text, so it is redacted of
+    # every known secret value before it reaches the log, and a `secret` entry's
+    # sample is the digest of the matched value rather than the value.
+    overlap_details: list[dict[str, str]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _provenance_belongs_to_the_task(self) -> AuthzRequest:
