@@ -12,13 +12,17 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
+from agents import support, triage
 from agents.loop import (
+    DEFAULT_GRAPH_SEED,
     MAX_TOOL_CALLS,
     AgentError,
     Outcome,
     Role,
     agent_loop,
+    synthesize_summary,
 )
 from agents.mcp_client import CallResult
 from agents.providers.base import ToolSchema, ToolUse, Turn, Usage
@@ -27,9 +31,12 @@ from agents.support import (
     SUPPORT_AGENT,
     SUPPORT_AUDIENCE,
     SUPPORT_ROLE,
+    SUPPORT_USER,
+    parse_args,
     task_message,
 )
 from agents.task import Task
+from warrant.graph import Graph
 
 
 def a_support_task(ticket: int = 12, user: str = "alice") -> Task:
@@ -79,6 +86,66 @@ def test_the_support_prompt_carries_no_security_language() -> None:
     text = PROMPT_PATH.read_text(encoding="utf-8")
 
     assert not re.search(r"inject|untrusted|secret", text, re.IGNORECASE)
+
+
+def test_the_cli_defaults_to_the_support_lead() -> None:
+    """The shipped rules answer as a support lead, which is carol."""
+    args = parse_args(["--ticket", "12"])
+
+    assert args.user == SUPPORT_USER == "carol"
+
+
+def test_the_write_set_comes_from_the_graph() -> None:
+    """A graph write the agent holds is in the set, and no read is.
+
+    The set is derived from `infra/graph.yml`, so this fails if a tool the graph
+    marks `write` or `send` for the agent is missing, if a `read` tool is in the
+    set, or if the set names a tool the agent does not hold at all.
+    """
+    data = yaml.safe_load(DEFAULT_GRAPH_SEED.read_text(encoding="utf-8"))
+    with Graph(":memory:") as graph:
+        graph.seed(data)
+        for agent_id, write_tools in (
+            (triage.TRIAGE_AGENT, triage.WRITE_TOOLS),
+            (SUPPORT_AGENT, support.WRITE_TOOLS),
+        ):
+            held = set(graph.agent(agent_id).allowed_tools)
+            kinds = {tool.id: tool.action_kind for tool in graph.tools()}
+            graph_writes = {tool for tool in held if kinds.get(tool) in ("write", "send")}
+            graph_reads = {tool for tool in held if kinds.get(tool) == "read"}
+
+            assert graph_writes <= write_tools, (
+                f"{agent_id} is missing {graph_writes - write_tools}"
+            )
+            assert not (graph_reads & write_tools), f"{agent_id} calls reads writes"
+            assert write_tools <= held, f"{agent_id} writes a tool it does not hold"
+
+
+def test_the_synthesized_summary_uses_the_task_shape_not_the_subject() -> None:
+    """W4's header comes back for the triage shape whatever `subject` says.
+
+    The header used to be built from `task.subject`, which is the CLI's string.
+    A task built by the eval runner has its own subject, so the header has to
+    come from the task's params through the role.
+    """
+    triage_task = Task(
+        kind="triage",
+        subject="some other subject",
+        user="alice",
+        params={"repo": "acme/widgets", "issue": 7},
+    )
+    support_task = Task(
+        kind="support",
+        subject="some other subject",
+        user="carol",
+        params={"ticket": 12},
+    )
+
+    triage_summary = synthesize_summary(triage_task, triage.TRIAGE_ROLE, [], [], 3, False)
+    support_summary = synthesize_summary(support_task, SUPPORT_ROLE, [], [], 3, False)
+
+    assert triage_summary.startswith("# Triage summary for issue #7 in acme/widgets")
+    assert support_summary.startswith("# Support summary for ticket #12")
 
 
 class ScriptedProvider:
@@ -232,6 +299,7 @@ def test_a_role_is_immutable() -> None:
         audience="warrant",
         prompt_path=Path("x.md"),
         first_message=task_message,
+        summary_subject=support.summary_subject,
         write_tools=frozenset(),
     )
 

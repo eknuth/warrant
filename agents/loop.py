@@ -1,10 +1,11 @@
 """The provider and tool loop every agent role shares.
 
-A role supplies four things: the system prompt, the agent client it exchanges
-as, the audience its on-behalf-of token is for, and the mapping from a task to
-its first user message. It also names the tools whose calls count as actions,
-because a read and a write are told apart by the tool's name and only the role
-knows which of the tools it holds change anything.
+A role supplies the system prompt, the agent client it exchanges as, the
+audience its on-behalf-of token is for, the mapping from a task to its first
+user message, and the mapping from a task to the subject a synthesized summary
+names. Its write set is not hand kept: `write_tools_from_graph` reads the
+access graph's `action_kind` for the tools the role's agent holds, so a tool
+added to an agent's allowlist as a write is an action without a second edit.
 
 This module supplies the rest of a run. It logs in as the task's human and
 exchanges that token for an on-behalf-of token addressed to the gateway, bound
@@ -26,12 +27,13 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
+import yaml
 from pydantic import BaseModel, Field
 
 from agents.auth import (
@@ -47,8 +49,9 @@ from agents.mcp_client import CallResult, MCPClient, warrant_endpoint
 from agents.providers import Provider, ToolSchema, Turn, provider_for
 from agents.providers.base import ToolResultBlock, Usage
 from agents.task import Chain, Task
+from warrant.config import REPO_ROOT, task_dir, write_run_metadata
 from warrant.config import RUNS_DIR as DEFAULT_RUNS_DIR
-from warrant.config import task_dir, write_run_metadata
+from warrant.graph import Graph
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +63,15 @@ MAX_TOOL_CALLS = 20
 # The token lifetime the realm is configured for. A token longer than this means
 # the realm or the exchange changed, and the run should not proceed on it.
 MAX_TOKEN_LIFETIME_SECONDS = 300
+
+# The access graph's action kinds that change something. A read is provenance;
+# a write and a send are actions the run took.
+WRITE_KINDS = frozenset({"write", "send"})
+
+# The graph seed a role reads its write set from. Resolved from the checkout's
+# own location rather than the process's working directory, so a run from a
+# worktree or a container reads the graph beside the running code.
+DEFAULT_GRAPH_SEED = REPO_ROOT / "infra" / "graph.yml"
 
 
 class AgentError(RuntimeError):
@@ -102,10 +114,14 @@ class Role:
     records. `agent` is the identity provider client the token is exchanged as,
     which is also the value the policy engine reads as the actor. `audience` is
     the one resource server the token names, which for both roles is the
-    gateway. `first_message` turns a task into the first user turn.
-    `write_tools` names the calls whose success is an action rather than a read.
-    `tool_prefixes` narrows the tool surface the model is offered to the
-    servers the role holds; None offers everything the gateway re-exports.
+    gateway. `first_message` turns a task into the first user turn, and
+    `summary_subject` turns a task into the subject a synthesized summary names,
+    which is the task's own shape rather than a CLI string. `write_tools` names
+    the calls whose success is an action rather than a read, and it comes from
+    `write_tools_from_graph`. `tool_prefixes` narrows the tool surface the model
+    is offered to the servers the role holds; None offers everything the
+    gateway re-exports. The gateway narrows that surface again to the tools the
+    acting agent holds.
     """
 
     name: str
@@ -113,9 +129,34 @@ class Role:
     audience: str
     prompt_path: Path
     first_message: Callable[[Task], str]
+    summary_subject: Callable[[Task], str]
     write_tools: frozenset[str]
     tool_prefixes: tuple[str, ...] | None = None
     max_tool_calls: int = MAX_TOOL_CALLS
+
+
+def write_tools_from_graph(agent_id: str, seed_path: Path | None = None) -> frozenset[str]:
+    """The tools one agent holds whose calls change something.
+
+    The access graph's `action_kind` is the authority: a tool row marked
+    `write` or `send` is an action, and a `read` is provenance. The set is
+    derived for the agent named, so adding a write tool to that agent's
+    allowlist in `infra/graph.yml` makes it an action without a second edit, and
+    a hand-kept list cannot drift from the graph the gateway decides with.
+    """
+    path = Path(seed_path) if seed_path is not None else DEFAULT_GRAPH_SEED
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, Mapping):
+        raise AgentError(f"{path} did not parse to a mapping")
+    with Graph(":memory:") as graph:
+        graph.seed(data)
+        agent = graph.agent(agent_id)
+        if agent is None:
+            raise AgentError(f"no graph row for agent {agent_id!r} in {path}")
+        kinds = {tool.id: tool.action_kind for tool in graph.tools()}
+    return frozenset(
+        tool_id for tool_id in agent.allowed_tools if kinds.get(tool_id) in WRITE_KINDS
+    )
 
 
 def load_system_prompt(path: Path | None = None) -> str:
@@ -193,7 +234,7 @@ def synthesize_summary(
     cap: int = MAX_TOOL_CALLS,
 ) -> str:
     """A short markdown summary for a run that ended without the model's own."""
-    lines = [f"# {role.name.capitalize()} summary for {task.subject}", ""]
+    lines = [f"# {role.name.capitalize()} summary for {role.summary_subject(task)}", ""]
     lines.append(f"- Model turns: {turns}")
     if reads:
         lines.append("- Read: " + ", ".join(f"{s.get('kind')} {s.get('id')}" for s in reads))
@@ -209,9 +250,12 @@ def synthesize_summary(
 def offered_tools(role: Role, tools: list[ToolSchema]) -> list[ToolSchema]:
     """The role's slice of the gateway's tool surface.
 
-    A role that names no prefix sees every re-exported tool. A role that names
-    prefixes sees only those servers, so the model is not offered a tool the
-    role's agent does not hold.
+    The gateway is the authority: `warrant/gateway.py` filters `tools/list` to
+    the tools the acting agent holds in the access graph, so a tool this role
+    has no business calling never reaches it. This is a second narrowing to the
+    servers the role names, which keeps a role's own surface explicit in the
+    checkout rather than implied by whatever the deployment re-exports. A role
+    that names no prefix sees every tool the gateway offered.
     """
     if role.tool_prefixes is None:
         return tools

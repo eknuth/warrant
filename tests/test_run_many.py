@@ -3,9 +3,11 @@
 The loop is real: `agents.run_many.run_concurrent` builds two whole runs, each
 one logging in, exchanging, opening a session, and writing its run directory.
 Only the two ends that need a stack are replaced. The exchange is a fake that
-returns a marker per task, and the MCP client is one that serves a fake session
-instead of opening a streamable-HTTP connection. Everything between them,
-including `agents/mcp_client.py`'s call log, is the shipped code.
+returns a marker per task, and the streamable-HTTP transport is replaced with
+fake streams while the shipped `MCPClient` still builds the httpx client and
+writes the call log. The Authorization header is read inside `call_tool`, from
+the HTTP client the session uses, so the assertion is over the header the
+request carries rather than the endpoint the client was built from.
 
 These are the W10 criteria that two concurrent tasks keep their own `sub` and
 that a token obtained for one task is never presented on another's call.
@@ -13,6 +15,7 @@ that a token obtained for one task is never presented on another's call.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -22,6 +25,7 @@ from typing import Any
 import pytest
 
 from agents import loop as loop_module
+from agents import mcp_client as mcp_client_module
 from agents import run_many
 from agents.mcp_client import MCPClient
 from agents.providers.base import ToolSchema, ToolUse, Turn, Usage
@@ -29,12 +33,51 @@ from agents.task import Task
 
 TOOL = "db.get_ticket"
 
+# Every call's Authorization header, keyed by the HTTP client the session uses.
+# Reading it inside `call_tool` is the point: the value is the header the
+# request carries, not the endpoint the client was built from.
+CALL_HEADERS: dict[int, list[str | None]] = {}
+
+
+class FakeStream:
+    """One end of the fake stream pair, carrying the HTTP client it came from."""
+
+    def __init__(self, http: Any) -> None:
+        self.http = http
+
+
+class FakeTransport:
+    """A stand-in for `streamable_http_client`'s async context manager."""
+
+    def __init__(self, http: Any) -> None:
+        self.http = http
+
+    async def __aenter__(self) -> tuple[FakeStream, FakeStream]:
+        return FakeStream(self.http), FakeStream(self.http)
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        return None
+
+
+def fake_transport(url: str, http_client: Any = None) -> FakeTransport:
+    """The `streamable_http_client` replacement, given the real HTTP client."""
+    return FakeTransport(http_client)
+
 
 class FakeSession:
-    """The two `ClientSession` methods the MCP client uses."""
+    """The `ClientSession` methods the MCP client uses, over fake streams."""
 
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, dict[str, Any] | None]] = []
+    def __init__(self, read: FakeStream, write: FakeStream) -> None:
+        self.http = read.http
+
+    async def __aenter__(self) -> FakeSession:
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        return None
+
+    async def initialize(self) -> None:
+        return None
 
     async def list_tools(self) -> Any:
         return SimpleNamespace(
@@ -56,7 +99,7 @@ class FakeSession:
         )
 
     async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
-        self.calls.append((name, arguments))
+        CALL_HEADERS.setdefault(id(self.http), []).append(self.http.headers.get("authorization"))
         return SimpleNamespace(
             content=[SimpleNamespace(type="text", text='{"id": 12}')],
             structured_content={"id": 12},
@@ -64,38 +107,22 @@ class FakeSession:
         )
 
 
-class OfflineMCPClient(MCPClient):
-    """A real `MCPClient` that skips the network and serves one fake session.
+class RecordingMCPClient(MCPClient):
+    """The shipped client, with every instance kept for inspection.
 
-    Every instance is kept so a test can read the bearer each run presented and
-    the calls it made. `call` records the bearer at call time, which is the
-    question the criterion asks: not what the session was built with, but what
-    each call carried.
+    `__aenter__` is the shipped one, so the httpx client it builds carries the
+    Authorization header this session will send. `_http` is that client, which
+    is what makes the per-task token assertion an assertion about the wire.
     """
 
-    instances: list[OfflineMCPClient] = []
+    instances: list[RecordingMCPClient] = []
 
     def __init__(
         self, endpoints: Any, *, chain: Any, runs_dir: Path | None = None, **kw: Any
     ) -> None:
         super().__init__(endpoints, chain=chain, runs_dir=runs_dir, **kw)
-        self.bearer = self._endpoints[0].bearer
         self.task_id = chain.task_id
-        self.session = FakeSession()
-        self.call_bearers: list[str] = []
-        OfflineMCPClient.instances.append(self)
-
-    async def __aenter__(self) -> OfflineMCPClient:
-        for endpoint in self._endpoints:
-            self._sessions[endpoint.name] = self.session
-        return self
-
-    async def __aexit__(self, *exc_info: Any) -> None:
-        return None
-
-    async def call(self, name: str, args: dict[str, Any]) -> Any:
-        self.call_bearers.append(self.bearer)
-        return await super().call(name, args)
+        RecordingMCPClient.instances.append(self)
 
 
 class OneToolThenText:
@@ -141,7 +168,8 @@ def install_fake_stack(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     Returns the list the fake exchange appends to, so a test can assert what the
     exchange was asked for as well as what each call carried.
     """
-    OfflineMCPClient.instances = []
+    RecordingMCPClient.instances = []
+    CALL_HEADERS.clear()
     exchanges: list[dict[str, Any]] = []
 
     def fake_login(settings: Any, client: Any, username: str, password: str) -> str:
@@ -184,7 +212,9 @@ def install_fake_stack(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     monkeypatch.setattr(loop_module, "login_user", fake_login)
     monkeypatch.setattr(loop_module, "exchange_for_obo", fake_exchange)
     monkeypatch.setattr(loop_module, "decode_claims", fake_decode)
-    monkeypatch.setattr(loop_module, "MCPClient", OfflineMCPClient)
+    monkeypatch.setattr(loop_module, "MCPClient", RecordingMCPClient)
+    monkeypatch.setattr(mcp_client_module, "streamable_http_client", fake_transport)
+    monkeypatch.setattr(mcp_client_module, "ClientSession", FakeSession)
     return exchanges
 
 
@@ -217,10 +247,14 @@ async def test_concurrent_tasks_keep_their_own_sub_in_the_logs(
     assert set(subs) == {task.task_id for task in tasks}
 
 
-async def test_each_call_carries_the_token_its_own_task_obtained(
+async def test_each_call_sends_the_token_its_own_task_obtained(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A marker per task, and every call presents its own task's marker."""
+    """The Authorization header on each call is its own task's marker.
+
+    The header is read inside `call_tool`, from the HTTP client the session
+    uses, so a token cached at construction cannot pass this.
+    """
     exchanges = install_fake_stack(monkeypatch)
     tasks = [support_task("alice", 12), support_task("bob", 13)]
 
@@ -231,13 +265,14 @@ async def test_each_call_carries_the_token_its_own_task_obtained(
         settings=SimpleNamespace(warrant_user_password=""),
     )
 
-    clients = {client.task_id: client for client in OfflineMCPClient.instances}
+    clients = {client.task_id: client for client in RecordingMCPClient.instances}
     assert set(clients) == {task.task_id for task in tasks}
+    assert len({id(client._http["warrant"]) for client in clients.values()}) == len(tasks)
     for task in tasks:
         client = clients[task.task_id]
-        assert client.bearer == f"marker-{task.task_id}"
-        assert client.call_bearers, "the task made no call"
-        assert set(client.call_bearers) == {f"marker-{task.task_id}"}
+        headers = CALL_HEADERS[id(client._http["warrant"])]
+        assert headers, "the task made no call"
+        assert set(headers) == {f"Bearer marker-{task.task_id}"}
 
     # The exchange ran once per task, each as the support client for the gateway.
     assert {exchange["task_id"] for exchange in exchanges} == {t.task_id for t in tasks}
@@ -262,6 +297,36 @@ async def test_a_support_run_offers_only_the_database_and_mail_tools(
 
     assert provider.offered, "the model was never offered a tool surface"
     assert {tuple(names) for names in provider.offered} == {(TOOL,)}
+
+
+async def test_a_failing_task_cancels_its_siblings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One failure is the group's failure, and the sibling stops working.
+
+    `asyncio.TaskGroup` is what the caller sees: the sibling is cancelled and
+    awaited before the group raises an `ExceptionGroup` holding the child error.
+    """
+    cancelled = asyncio.Event()
+
+    async def fake_run_one(task: Task, **kwargs: Any) -> Any:
+        if task.user == "boom":
+            # Give the sibling a moment to reach its own await, so the failure
+            # arrives while it is running rather than before it starts.
+            await asyncio.sleep(0.01)
+            raise RuntimeError("boom")
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return None
+
+    monkeypatch.setattr(run_many, "run_one", fake_run_one)
+
+    with pytest.raises(ExceptionGroup) as error:
+        await run_many.run_concurrent([support_task("boom"), support_task("slow")])
+
+    assert any(isinstance(child, RuntimeError) for child in error.value.exceptions)
+    assert cancelled.is_set(), "the sibling kept running after the failure"
 
 
 async def test_run_concurrent_of_nothing_returns_nothing() -> None:

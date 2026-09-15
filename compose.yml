@@ -240,6 +240,19 @@ services:
       WARRANT_GATEWAY_PORT: "9100"
       WARRANT_OIDC_ISSUER: "http://keycloak:8080/realms/warrant"
       GITEA_URL: "http://gitea:3000"
+      # The run record lives in the checkout, not in the container's writable
+      # layer, so a record outlives the container and an agent run started here
+      # lands beside every other run. The image has no git and no `.git`, so the
+      # commit and the dirty flag come from the caller; `warrant/config.py` reads
+      # them when git cannot answer. They are declared empty rather than
+      # interpolated, because the scaffold test refuses a defaulting `${...:-}`
+      # in a service environment, and the smoke passes them on the exec command
+      # line, which is the process that writes the run metadata.
+      WARRANT_RUNS_DIR: "/app/runs"
+      WARRANT_COMMIT: ""
+      WARRANT_DIRTY: ""
+    volumes:
+      - ./runs:/app/runs
     ports:
       - "9100:9100"
     depends_on:

@@ -660,6 +660,32 @@ async def test_list_tools_prefixes_and_keeps_only_graph_known_tools(
     assert tools[0].description == "Read an issue."
 
 
+async def test_list_tools_offers_only_the_tools_the_agent_holds(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """A graph-known tool the acting agent does not hold is not offered.
+
+    The graph is the authority twice over: a tool with no row is not
+    re-exported, and a tool with a row that the agent's allowlist lacks is not
+    offered to that agent, because the baseline permit refuses it anyway.
+    """
+    log = DecisionLog(tmp_path / "runs")
+    engine = FakeEngine(decision_log=log)
+    upstream = FakeUpstream(
+        tools=[
+            Tool(name="get_issue", description="Read an issue.", input_schema={"type": "object"}),
+            Tool(name="send_reply", description="Send a reply.", input_schema={"type": "object"}),
+        ]
+    )
+    gateway = make_gateway(tmp_path, graph_db, engine, servers=[GITEA, MAIL], upstream=upstream)
+
+    triage_tools = await gateway.list_tools(claims=claims_for(act="triage-agent"), token="")
+    support_tools = await gateway.list_tools(claims=claims_for(act="support-agent"), token="")
+
+    assert [tool.name for tool in triage_tools] == ["gitea.get_issue"]
+    assert [tool.name for tool in support_tools] == ["mail.send_reply"]
+
+
 # -- the HTTP boundary -----------------------------------------------------
 
 

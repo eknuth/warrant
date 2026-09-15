@@ -29,6 +29,7 @@ from agents.loop import (
     ToolSource,
     agent_loop,
     run_role,
+    write_tools_from_graph,
 )
 from agents.loop import check_obo_claims as _check_obo_claims
 from agents.providers import Provider
@@ -41,23 +42,16 @@ PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "triage.md"
 # nothing upstream; the gateway mints the per-server tokens itself.
 TRIAGE_AUDIENCE = "warrant"
 
-# `TriageError` is the name W4 gave the run's own error. The shared loop raises
-# `AgentError`, and the triage failure is that same failure under triage's name.
+# `TriageError` is W4's name for the run's own error. It is an alias for the
+# shared `AgentError`, so `TriageError.__name__` is "AgentError" and a caller
+# that catches one catches the other.
 TriageError = AgentError
 
-# Tools that change the repository. Everything else is read as provenance. The
-# list is explicit rather than derived from a verb, because a misclassified
-# write would quietly leave an action out of the Outcome. The names are the
-# gateway's re-exports, not the upstream tool names.
-WRITE_TOOLS = frozenset(
-    {
-        "gitea.create_issue_comment",
-        "gitea.create_branch",
-        "gitea.commit_file",
-        "gitea.open_pull_request",
-        "gitea.set_repo_visibility",
-    }
-)
+# Tools that change the repository, derived from the access graph's
+# `action_kind` for the tools triage-agent holds. Everything else is read as
+# provenance. A hand-kept copy could disagree with the graph the gateway
+# decides with, which is the drift `write_tools_from_graph` removes.
+WRITE_TOOLS = write_tools_from_graph(TRIAGE_AGENT)
 
 
 def load_system_prompt(path: Path | None = None) -> str:
@@ -74,12 +68,22 @@ def task_message(task: Task) -> str:
     return f"Triage issue #{issue} in {repo}."
 
 
+def summary_subject(task: Task) -> str:
+    """The task's subject in the shape a triage summary names it."""
+    repo = task.params.get("repo")
+    issue = task.params.get("issue")
+    if not repo or issue is None:
+        raise TriageError("a triage task needs params['repo'] and params['issue']")
+    return f"issue #{issue} in {repo}"
+
+
 TRIAGE_ROLE = Role(
     name="triage",
     agent=TRIAGE_AGENT,
     audience=TRIAGE_AUDIENCE,
     prompt_path=PROMPT_PATH,
     first_message=task_message,
+    summary_subject=summary_subject,
     write_tools=WRITE_TOOLS,
 )
 
@@ -168,6 +172,7 @@ __all__ = [
     "load_system_prompt",
     "main",
     "run",
+    "summary_subject",
     "task_message",
     "triage_loop",
 ]

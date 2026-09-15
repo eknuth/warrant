@@ -373,11 +373,16 @@ class Gateway:
         token: str = "",
         headers: Mapping[str, str] | None = None,
     ) -> list[Tool]:
-        """Every upstream tool the graph knows, with the upstream name prefixed.
+        """The tools the acting agent holds, with the upstream name prefixed.
 
-        The graph is the authority on what may be called: a tool the upstream
-        offers but the graph has no row for is not re-exported, because the
-        gateway would have no action kind to decide it with.
+        The graph is the authority on what may be called twice over. A tool the
+        upstream offers but the graph has no row for is not re-exported, because
+        the gateway would have no action kind to decide it with; and a tool the
+        graph knows but the acting agent's allowlist does not hold is not
+        offered, because the baseline permit refuses it anyway and the model
+        should not be handed a call it cannot make. `_discover` caches the full
+        per-server list, so the per-actor narrowing is a filter over that cache
+        on every request.
 
         `claims` is None under the `no-exchange` ablation, where the chain comes
         from headers and there is no token at all. `tools/list` is the first
@@ -391,14 +396,16 @@ class Gateway:
         # already refuses it before the engine; listing is not a decision, but
         # it is a round trip to every upstream and a description of what this
         # deployment can do, and neither belongs to an actor with no row.
-        if self.graph.agent(chain.act) is None:
+        agent = self.graph.agent(chain.act)
+        if agent is None:
             logger.info("not listing tools for unknown agent %s", chain.act)
             return []
+        allowed = set(agent.allowed_tools)
 
         tools: list[Tool] = []
         for server in self.servers:
             tools.extend(await self._discover(server, task_id=chain.task_id, token=token))
-        return tools
+        return [tool for tool in tools if tool.name in allowed]
 
     async def _discover(self, server: UpstreamServer, *, task_id: str, token: str) -> list[Tool]:
         if server.name in self._tools:

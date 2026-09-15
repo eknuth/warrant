@@ -220,6 +220,11 @@ class MCPClient:
         self._stack = AsyncExitStack()
         self._sessions: dict[str, ClientSession] = {}
         self._tools: dict[str, tuple[str, ClientSession]] = {}
+        # The per-endpoint HTTP client, kept so the bearer a session carries can
+        # be read back without a call. It is also what makes the per-task token
+        # test assert the header the request uses rather than the endpoint the
+        # client was built from.
+        self._http: dict[str, httpx.AsyncClient] = {}
 
     async def __aenter__(self) -> MCPClient:
         try:
@@ -230,6 +235,7 @@ class MCPClient:
                         timeout=self._timeout,
                     )
                 )
+                self._http[endpoint.name] = http
                 streams = await self._stack.enter_async_context(
                     streamable_http_client(endpoint.url, http_client=http)
                 )
