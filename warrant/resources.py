@@ -36,12 +36,26 @@ UNRESOLVED_PREFIX = "unresolved:"
 
 # The table a statement reads or writes. `FROM public.orders`, `JOIN
 # public.orders o`, and the quoted spellings a migration might use. The first
-# match is the resource, which is the table a simple statement touches; a
-# statement touching several tables is a W7 policy question, not this one's.
+# match is the resource, which is the table a simple statement touches.
+#
+# A statement that names several tables is decided against the first one it
+# names. That is a real gap: `select c.name, k.key_value from customers c join
+# api_keys k on k.customer_id = c.id` is decided against `customers`, so a
+# policy that keys on the key table's classification never sees it. One resource
+# cannot name several tables, so the fix belongs to a policy or resource model
+# that can (W7 owns the policy shape and W12 the seeded rows), and it is a
+# deliberate open finding rather than an oversight. The test
+# `test_a_multi_table_statement_is_decided_against_its_first_table` pins the
+# current behavior so a change there is visible.
 _TABLE = re.compile(
     r"\b(?:from|join|update|into)\s+[\"']?([A-Za-z_][\w.]*)[\"']?",
     re.IGNORECASE,
 )
+
+# The resource kinds that have to resolve to exactly one row. A tool that names
+# a row by id has one subject, and a search that matches no row or several must
+# not be decided as though it named one.
+SINGLE_ROW_KINDS = frozenset({DB_CUSTOMER})
 
 
 def _first(value: Any) -> str | None:
@@ -73,8 +87,9 @@ def extract_resource(resource_kind: str, args: Mapping[str, Any]) -> str | None:
     if resource_kind == DB_TICKET:
         return _first(args.get("ticket_id"))
     if resource_kind == DB_CUSTOMER:
-        # `search_customers` takes a free-text query rather than an id, so a
-        # search resolves only when the query is a customer the graph holds.
+        # `get_customer` and `rotate_api_key` name a row by id. `search_customers`
+        # takes free text instead, so its query is a resource only when it is the
+        # `name` of exactly one graph row; `resolve_resource` refuses a tie.
         return _first(args.get("customer_id")) or _first(args.get("query"))
     if resource_kind == MAILBOX:
         return _first(args.get("to"))
@@ -89,6 +104,12 @@ def resolve_resource(graph: Graph | None, resource_kind: str, name: str | None) 
     which is the deny-safe direction: an unlisted resource cannot match a permit
     that keys on ownership or classification.
 
+    A kind in `SINGLE_ROW_KINDS` resolves only when exactly one row carries the
+    name. `search_customers` takes free text, so a query that matches several
+    rows would otherwise be decided against the lowest id while the read
+    returned all of them; that is a decision against one subject and a read of
+    others. A tie gets `UNRESOLVED_PREFIX` and fails closed.
+
     Name and id share one namespace in the graph, so a name that misses on the
     tool's kind can still be a row's id under another kind. Passing that through
     would let the engine resolve the row: a `mail.send` whose `to` is
@@ -100,6 +121,13 @@ def resolve_resource(graph: Graph | None, resource_kind: str, name: str | None) 
     if name is None:
         return ""
     if graph is None:
+        return name
+    if resource_kind in SINGLE_ROW_KINDS:
+        matches = graph.resources_named(name, resource_kind)
+        if len(matches) == 1:
+            return matches[0].id
+        if matches or graph.resource(name) is not None:
+            return f"{UNRESOLVED_PREFIX}{name}"
         return name
     row = graph.resource_named(name, resource_kind)
     if row is not None:

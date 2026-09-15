@@ -257,6 +257,83 @@ def test_an_unknown_resource_name_is_passed_through() -> None:
     assert resolve_resource(None, "repo", None) == ""
 
 
+def test_a_free_text_customer_search_resolves_only_to_exactly_one_row() -> None:
+    """`search_customers` takes text, and a decision needs one subject.
+
+    The query string is not an id, so it resolves only when it is the `name` of
+    exactly one graph row. A query matching no row resolves to something the
+    graph has no row for, so the engine's unknown-resource path applies instead
+    of a decision against the row the query was not bounded by.
+    """
+    with Graph(":memory:") as graph:
+        graph.seed(
+            {
+                "humans": [{"id": "h-alice", "login": "alice", "groups": []}],
+                "resources": [
+                    {
+                        "id": "customer-acme-1",
+                        "kind": "db_customer",
+                        "name": "Acme",
+                        "owner_human_id": "h-alice",
+                        "sensitivity": "internal",
+                    }
+                ],
+            }
+        )
+
+        assert resolve_resource(graph, "db_customer", "Acme") == "customer-acme-1"
+        unmatched = resolve_resource(graph, "db_customer", "Globex")
+        assert graph.resource(unmatched) is None, "an unmatched name names no row"
+
+
+def test_a_customer_query_matching_several_rows_is_unresolved() -> None:
+    """Two rows named the same are not a subject a read can be decided against."""
+    with Graph(":memory:") as graph:
+        graph.seed(
+            {
+                "humans": [{"id": "h-alice", "login": "alice", "groups": []}],
+                "resources": [
+                    {
+                        "id": "customer-acme-1",
+                        "kind": "db_customer",
+                        "name": "Acme",
+                        "owner_human_id": "h-alice",
+                        "sensitivity": "internal",
+                    },
+                    {
+                        "id": "customer-acme-2",
+                        "kind": "db_customer",
+                        "name": "Acme",
+                        "owner_human_id": "h-alice",
+                        "sensitivity": "confidential",
+                    },
+                ],
+            }
+        )
+
+        resolved = resolve_resource(graph, "db_customer", "Acme")
+
+        assert graph.resource(resolved) is None, "a tie must not become a known row"
+
+
+def test_a_multi_table_statement_is_decided_against_its_first_table() -> None:
+    """The current behavior, pinned so a change to it is visible.
+
+    `select c.name, k.key_value from customers c join api_keys k ...` is a read
+    of two tables, and the decision is made against the first one the extractor
+    finds, `customers`. A policy that keys on `api_keys` never sees the call.
+    One resource cannot name several tables, so the fix is a policy or resource
+    model that can and belongs to W7 and W12; this test is the visible record
+    that it is open.
+    """
+    sql = "select c.name, k.key_value from customers c join api_keys k on k.customer_id = c.id"
+
+    name = extract_resource("db_table", {"sql": sql})
+
+    assert name == "customers", "the first FROM wins, not the table that holds the key"
+    assert "api_keys" in sql, "and the statement really does read the key table"
+
+
 def test_extract_sources_keeps_the_record_that_carried_the_block() -> None:
     payload = {"issue": source_payload(), "other": {"source": source_payload("acme/widgets#2")}}
 

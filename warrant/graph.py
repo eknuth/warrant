@@ -5,6 +5,11 @@ stdlib `sqlite3` module with a thin repository on top. There is no ORM because
 there is no need for one: the engine reads single rows by id, and a loader
 writes single rows from a YAML seed.
 
+A resource is one of five kinds: a repository, a database table, a database
+ticket row, a database customer row, or a mailbox. The ticket and customer kinds
+are rows rather than containers, because the postgres MCP server names one by id
+and the subject rule then reads that row's owner.
+
 The seed is `infra/graph.yml` and `load()` is idempotent: it upserts on id, so
 running `python -m warrant.graph load infra/graph.yml` twice leaves the same
 graph, not two copies of it.
@@ -52,7 +57,9 @@ CREATE TABLE IF NOT EXISTS tools (
 
 CREATE TABLE IF NOT EXISTS resources (
     id             TEXT PRIMARY KEY,
-    kind           TEXT NOT NULL CHECK (kind IN ('repo', 'db_table', 'mailbox')),
+    kind           TEXT NOT NULL CHECK (
+        kind IN ('repo', 'db_table', 'db_ticket', 'db_customer', 'mailbox')
+    ),
     name           TEXT NOT NULL,
     owner_human_id TEXT NOT NULL REFERENCES humans(id),
     sensitivity    TEXT NOT NULL CHECK (sensitivity IN ('public', 'internal', 'confidential'))
@@ -244,6 +251,9 @@ class Graph:
         graph's id. This is that lookup. With two rows sharing a name and no
         kind to tell them apart, the lowest id wins rather than an arbitrary
         one, so the same call resolves the same way on every run.
+
+        A caller that cannot accept a tie wants `resources_named` and a count
+        instead: this one answer says nothing about how many rows matched.
         """
         if kind is None:
             row = self._row("SELECT id FROM resources WHERE name = ? ORDER BY id LIMIT 1", name)
@@ -256,6 +266,25 @@ class Graph:
         if row is None:
             return None
         return self.resource(row["id"])
+
+    def resources_named(self, name: str, kind: str | None = None) -> list[Resource]:
+        """Every resource row whose `name` is `name`, optionally of `kind`.
+
+        The plural of `resource_named`, ordered by id. A caller that has to know
+        whether a name identifies one row or several, rather than being handed
+        the lowest id, uses this: `search_customers` takes free text, and a
+        query matching no row or more than one is not a subject to decide
+        against.
+        """
+        if kind is None:
+            rows = self._rows("SELECT id FROM resources WHERE name = ? ORDER BY id", name)
+        else:
+            rows = self._rows(
+                "SELECT id FROM resources WHERE name = ? AND kind = ? ORDER BY id",
+                name,
+                kind,
+            )
+        return [resource for row in rows if (resource := self.resource(row["id"])) is not None]
 
     def human(self, entity_id: str) -> Human | None:
         row = self._row("SELECT * FROM humans WHERE id = ?", entity_id)
