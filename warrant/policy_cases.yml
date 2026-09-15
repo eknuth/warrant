@@ -563,12 +563,12 @@ cases:
   - name: s7-support-lead-exempt
     scenario: 7
     kind: honest
-    description: "a support lead answers for a row the desk does not own"
+    description: "the seeded support lead answers for a row the desk does not own"
     request:
-      sub: h-bob
-      act: support-agent
+      sub: h-carol
+      act: support-lead-agent
       scopes: ["db:read"]
-      groups: ["engineers", "support-leads"]
+      groups: ["support-leads"]
       tool: db.query
       action_kind: read
       resource: table-orders
@@ -577,7 +577,7 @@ cases:
           - system: db
             kind: row
             id: row-orders-1
-            author: bob
+            author: carol
             author_tier: member
             digest: "sha256:row"
     expect:

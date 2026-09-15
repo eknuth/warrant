@@ -19,7 +19,11 @@ humans:
     groups: [support]
   - id: h-carol
     login: carol
-    groups: [engineering, reviewers]
+    # `support-leads` is the exemption the wrong-subject rule reads: a lead may
+    # answer for a row the desk does not own. It is defined in the realm too, as
+    # a group carol is a member of, so her token carries the claim the policy
+    # checks.
+    groups: [engineering, reviewers, support-leads]
 
 agents:
   - id: triage-agent
@@ -59,6 +63,17 @@ agents:
     justification: ""
     justification_expires_at: null
     allowed_tools: [db.query, gitea.search_code]
+  # Carol's live agent. The support-leads exemption is only reachable through a
+  # permit, so the person who carries the group needs an agent she owns with a
+  # live justification and the tools the exemption is about. Without this row the
+  # exemption is a rule that can never fire, because every db and mail call by
+  # carol would be refused by the baseline before the wrong-subject rule saw it.
+  - id: support-lead-agent
+    client_id: support-lead-agent
+    owner_human_id: h-carol
+    justification: answer escalated billing and mailbox questions for the desk
+    justification_expires_at: null
+    allowed_tools: [db.query, mail.search, mail.send]
 
 tools:
   - id: gitea.list_repos
