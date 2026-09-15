@@ -29,3 +29,6 @@ evals/results/
 
 # the checkout-local uv cache `make` sets by default
 .uv-cache/
+
+# docker buildx state, when a session points BUILDX_CONFIG into the checkout
+.docker-buildx/
