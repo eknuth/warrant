@@ -265,3 +265,42 @@ def _sign_with(private_pem: str) -> str:
         private_pem,
         algorithm="RS256",
     )
+
+
+def test_the_server_answers_the_host_its_compose_service_name_gives_it(
+    rsa_keypair: tuple[str, str], sign_token: Any
+) -> None:
+    """A server bound to all interfaces must accept the service hostname.
+
+    The MCP library auto-enables DNS-rebinding protection with a localhost-only
+    host list when the app is not told its bind host. In compose the gateway
+    reaches this upstream as `http://gitea-mcp:9101/mcp`, so the Host header is
+    the service name and every request was refused with 421 before this was
+    wired: the tool list came back empty and the agent had nothing to call.
+
+    The control is the localhost bind: the same request is refused there, which
+    is the protection doing its job and what makes the first assertion mean the
+    host was passed through rather than the protection switched off. A valid
+    bearer is sent because the auth middleware answers 401 before the transport
+    check runs.
+    """
+    from servers.gitea_mcp.server import ServerSettings, build_app
+
+    headers = {"Authorization": f"Bearer {sign_token()}"}
+    body = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+    compose_settings = ServerSettings(gitea_mcp_host="0.0.0.0")
+    localhost_settings = ServerSettings(gitea_mcp_host="127.0.0.1")
+
+    with TestClient(
+        build_app(settings=compose_settings, issuer=TEST_ISSUER, key=rsa_keypair[1]),
+        base_url="http://gitea-mcp:9101",
+    ) as compose:
+        answered = compose.post("/mcp", json=body, headers=headers)
+    with TestClient(
+        build_app(settings=localhost_settings, issuer=TEST_ISSUER, key=rsa_keypair[1]),
+        base_url="http://gitea-mcp:9101",
+    ) as localhost:
+        refused = localhost.post("/mcp", json=body, headers=headers)
+
+    assert answered.status_code != 421
+    assert refused.status_code == 421

@@ -120,11 +120,15 @@ the two the token holds. The graph seed records different group names for the sa
 (`engineering`, `support`), so the rule reads the claim rather than the graph attribute. The graph
 remains the authority for the agent's `allowed_tools`, which is what `entitledTools` uses.
 
-Two group-shaped conditions have no definition in the stack. `support-leads`, the `wrong-subject`
-exemption, is in no realm group and no graph row, so it is a knob an operator grants rather than a
-path the seed exercises. `incident_id`, the escalate permit's scope, is minted by no client scope, so
-the permit is false for every real token. Both are recorded in `docs/policies.md` under what the
-running stack can decide today, and adding them is realm work rather than a policy change.
+Two group-shaped conditions were undefined, and the follow-up seeded both. `support-leads`, the
+`wrong-subject` exemption, is now a realm group and a graph group with carol as its seeded member;
+the graph also gives her a live agent, `support-lead-agent`, because the exemption is only reachable
+through a permit and every `db.*` or `mail.*` call by a person with no live agent is refused by the
+baseline before the subject rule sees it. `incident_id`, the escalate permit's scope, is now a
+parameterized client scope minted the way `task_id` is, optional on the four clients that could ask
+for it, so a task can declare itself an incident. Carol also gained the realm user her graph row
+never had. Each is pinned by a test in `tests/test_realm.py`, and the exemption has a seeded row in
+the policy table.
 
 ## What the two provenance rules miss
 

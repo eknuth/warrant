@@ -103,12 +103,13 @@ def test_the_compose_image_is_the_version_the_decision_doc_names() -> None:
     assert any("/opt/keycloak/data/import" in volume for volume in keycloak["volumes"])
 
 
-def test_the_three_users_carry_their_groups() -> None:
+def test_the_seeded_users_carry_their_groups() -> None:
     users = {user["username"]: user for user in REALM["users"]}
 
-    assert set(users) == {"alice", "bob", "mallory"}
+    assert set(users) == {"alice", "bob", "carol", "mallory"}
     assert users["alice"]["groups"] == ["/owners"]
     assert users["bob"]["groups"] == ["/engineers"]
+    assert users["carol"]["groups"] == ["/support-leads"]
     assert "groups" not in users["mallory"]
 
 
@@ -215,8 +216,8 @@ def test_an_agent_holds_no_scope_beyond_the_ones_named_for_it() -> None:
     triage_optional = set(client("triage-agent").get("optionalClientScopes", []))
     support_optional = set(client("support-agent").get("optionalClientScopes", []))
 
-    assert triage_optional == {"task-id"}
-    assert support_optional == {"task-id"}
+    assert triage_optional == {"task-id", "incident_id"}
+    assert support_optional == {"task-id", "incident_id"}
     assert not {"postgres-mcp", "mail-mcp"} & set(audience_mappers("triage-agent"))
 
 
@@ -285,7 +286,7 @@ def test_the_realm_users_that_have_a_graph_row_use_its_id() -> None:
     graph_ids = set(humans.values())
 
     linked = {name: user.get("id") for name, user in users.items() if name in humans}
-    assert linked == {"alice": "h-alice", "bob": "h-bob"}
+    assert linked == {"alice": "h-alice", "bob": "h-bob", "carol": "h-carol"}
 
     for name, user in users.items():
         if user.get("id") in graph_ids:
@@ -293,3 +294,43 @@ def test_the_realm_users_that_have_a_graph_row_use_its_id() -> None:
                 f"{name} carries the graph id {user['id']}, which belongs to "
                 f"{[login for login, human_id in humans.items() if human_id == user['id']]}"
             )
+
+
+def test_incident_id_is_a_parameterized_scope_like_task_id() -> None:
+    """The escalation rule reads `incident_id`, so the realm has to mint it.
+
+    A rule whose condition can never be true is dead text. `incident_id` is the
+    record that a task is an incident rather than routine, and it is minted the
+    same way `task_id` is: a parameterized scope the caller asks for, with a
+    mapper that puts the value in the access token as its own claim.
+    """
+    scope = next(scope for scope in REALM["clientScopes"] if scope["name"] == "incident_id")
+
+    assert scope["attributes"]["is.parameterized.scope"] == "true"
+    assert scope["attributes"]["include.in.token.scope"] == "false"
+    mapper = next(m for m in scope["protocolMappers"] if m.get("protocolMapper"))
+    assert mapper["protocolMapper"] == "oidc-parameterized-scope-mapper"
+    assert mapper["config"]["claim.name"] == "incident_id"
+    assert mapper["config"]["access.token.claim"] == "true"
+
+    # Optional, like `task-id`: a caller asks for it, a client does not carry it
+    # by default.
+    for client_id in ("triage-agent", "support-agent", "orphan-agent", "warrant"):
+        scopes = set(client(client_id).get("optionalClientScopes", []))
+        assert "incident_id" in scopes, client_id
+        assert "incident_id" not in set(client(client_id).get("defaultClientScopes", [])), client_id
+
+
+def test_support_leads_is_a_defined_group_with_one_member() -> None:
+    """The `wrong-subject` exemption names a group, so the group has to exist.
+
+    `support-leads` was a name in the policy and nowhere else, which made the
+    exemption unreachable. The realm defines it and carol is its seeded member,
+    which is what the graph's `h-carol` row says too.
+    """
+    assert "support-leads" in {group["name"] for group in REALM["groups"]}
+    members = [
+        user["username"] for user in REALM["users"] if user.get("groups") == ["/support-leads"]
+    ]
+
+    assert members == ["carol"]

@@ -15,7 +15,8 @@
   "ssoSessionMaxLifespan": 36000,
   "groups": [
     { "name": "owners" },
-    { "name": "engineers" }
+    { "name": "engineers" },
+    { "name": "support-leads" }
   ],
   "users": [
     {
@@ -66,6 +67,23 @@
           "temporary": false
         }
       ]
+    },
+    {
+      "id": "h-carol",
+      "username": "carol",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "carol@warrant.local",
+      "firstName": "Carol",
+      "lastName": "Lead",
+      "groups": ["/support-leads"],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${WARRANT_USER_PASSWORD}",
+          "temporary": false
+        }
+      ]
     }
   ],
   "clients": [
@@ -106,7 +124,7 @@
         "standard.token.exchange.enabled": "true"
       },
       "defaultClientScopes": ["gitea:read", "gitea:write", "triage-agent-obo"],
-      "optionalClientScopes": ["task-id"]
+      "optionalClientScopes": ["task-id", "incident_id"]
     },
     {
       "clientId": "support-agent",
@@ -125,7 +143,7 @@
         "standard.token.exchange.enabled": "true"
       },
       "defaultClientScopes": ["db:read", "db:write", "mail:send", "support-agent-obo"],
-      "optionalClientScopes": ["task-id"]
+      "optionalClientScopes": ["task-id", "incident_id"]
     },
     {
       "clientId": "orphan-agent",
@@ -144,7 +162,7 @@
         "standard.token.exchange.enabled": "true"
       },
       "defaultClientScopes": ["gitea:read", "orphan-agent-obo"],
-      "optionalClientScopes": ["task-id"]
+      "optionalClientScopes": ["task-id", "incident_id"]
     },
     {
       "clientId": "gitea-mcp",
@@ -209,7 +227,7 @@
         "mail:send",
         "warrant-obo"
       ],
-      "optionalClientScopes": ["task-id"]
+      "optionalClientScopes": ["task-id", "incident_id"]
     }
   ],
   "clientScopes": [
@@ -276,6 +294,32 @@
           "consentRequired": false,
           "config": {
             "claim.name": "task_id",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "name": "incident_id",
+      "description": "Parameterized scope. The caller writes scope=incident_id:<value> and the value is emitted as the incident_id claim, which the escalation rule reads as the record that a task is an incident.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false",
+        "is.parameterized.scope": "true",
+        "parameterized.scope.type": "string"
+      },
+      "protocolMappers": [
+        {
+          "name": "incident_id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-parameterized-scope-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "incident_id",
             "jsonType.label": "String",
             "access.token.claim": "true",
             "id.token.claim": "false",

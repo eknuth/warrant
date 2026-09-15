@@ -127,24 +127,21 @@ permissive one, which is the opposite of deny-safe, so until W11 lands the
 containment against a target shift, a paraphrased injection, or a secret in the
 arguments is the allowlist and the subject rule rather than these three forbids.
 
-Waiting on a scope the realm does not mint: `escalate-incident` requires an
-`incident_id` scope. No client scope carries that name today, so the permit is
-false for every real token and escalation has no live path. The scope is the
-record that a task is an incident rather than routine, and it belongs in the
-realm with the other optional scopes.
+The escalation scope and the support group are seeded. `incident_id` is a
+parameterized client scope in the realm, minted the way `task_id` is and optional
+on the four clients that could ask for it, so a task can declare itself an
+incident and `escalate-incident` can fire. `support-leads` is a realm group and a
+graph group, and carol is its seeded member: her realm user carries the group, and
+the graph gives her a live agent, `support-lead-agent`, so the exemption is
+reachable through a permit rather than being a rule that can never match. Carol
+also has a graph row and now a realm user for it, which she did not before.
 
-Waiting on a group nobody holds: `wrong-subject` exempts a caller in
-`support-leads`. The realm defines `owners` and `engineers` and its OBO client
-scopes emit them into the token with `full.path: false`, so those two names work
-as written, and the escalation group check is live for the people who hold them.
-`support-leads` is defined nowhere, so the exemption is a knob an operator
-grants by adding the group to a person, not a path the seed exercises.
-
-One consequence of the last point is worth stating: `wrong-subject` refuses
+One consequence of the subject rule is worth stating: `wrong-subject` refuses
 every `db.*` or `mail.*` call whose resource the caller does not own, and a
 recipient the graph does not know resolves to a sentinel-owned resource. A send
-to an address outside the task is therefore refused today by `wrong-subject`,
-not by `secret-in-args`. The containment is real and it comes from resource
+to an address outside the task is therefore refused by `wrong-subject` unless the
+caller is a support lead, not by `secret-in-args`. The containment is real and it
+comes from resource
 ownership rather than from the exfil rule written for it.
 
 ## The scenarios

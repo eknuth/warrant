@@ -19,11 +19,12 @@ def loaded(tmp_path: Path) -> graph.Graph:
         yield opened
 
 
-def test_the_shipped_fixture_has_three_humans_and_three_agents(loaded: graph.Graph) -> None:
+def test_the_shipped_fixture_has_three_humans_and_four_agents(loaded: graph.Graph) -> None:
     assert [human.id for human in loaded.humans()] == ["h-alice", "h-bob", "h-carol"]
     assert [agent.id for agent in loaded.agents()] == [
         "orphan-agent",
         "support-agent",
+        "support-lead-agent",
         "triage-agent",
     ]
 
@@ -45,7 +46,7 @@ def test_a_human_row_round_trips_through_sqlite(loaded: graph.Graph) -> None:
 
     assert human is not None
     assert human.login == "carol"
-    assert human.groups == ["engineering", "reviewers"]
+    assert human.groups == ["engineering", "reviewers", "support-leads"]
 
 
 def test_tool_and_resource_rows_round_trip(loaded: graph.Graph) -> None:
@@ -116,7 +117,7 @@ def test_loading_twice_leaves_the_same_graph(tmp_path: Path) -> None:
     graph.load(SEED, database).close()
     with graph.load(SEED, database) as second:
         assert len(second.humans()) == 3
-        assert len(second.agents()) == 3
+        assert len(second.agents()) == 4
         assert len(second.tools()) == 14
         assert len(second.resources()) == 6
 
@@ -150,10 +151,10 @@ def test_the_cli_loads_a_seed_and_reports_what_it_wrote(
 
     output = capsys.readouterr().out
     assert "humans=3" in output
-    assert "agents=3" in output
+    assert "agents=4" in output
     assert str(database) in output
     with graph.Graph(database) as opened:
-        assert len(opened.agents()) == 3
+        assert len(opened.agents()) == 4
 
 
 def test_load_rejects_a_seed_that_is_not_a_mapping(tmp_path: Path) -> None:
