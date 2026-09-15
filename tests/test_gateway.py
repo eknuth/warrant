@@ -247,7 +247,7 @@ def test_an_explicit_table_argument_wins_over_the_statement() -> None:
 
 
 def test_a_recipient_becomes_the_mailbox(graph_db: Graph) -> None:
-    name = extract_resource("mailbox", {"to": "support@acme.example", "body": "hi"})
+    name = extract_resource("mailbox", {"to": "support@acme.test", "body": "hi"})
 
     assert resolve_resource(graph_db, "mailbox", name) == "mailbox-support"
 
@@ -259,10 +259,8 @@ def test_a_mailbox_argument_becomes_the_mailbox() -> None:
     The extractor reads both spellings, so a read resolves to the same row a
     send to that address does.
     """
-    assert extract_resource("mailbox", {"mailbox": "support@acme.example"}) == (
-        "support@acme.example"
-    )
-    assert extract_resource("mailbox", {"to": "support@acme.example"}) == "support@acme.example"
+    assert extract_resource("mailbox", {"mailbox": "support@acme.test"}) == "support@acme.test"
+    assert extract_resource("mailbox", {"to": "support@acme.test"}) == "support@acme.test"
     assert extract_resource("mailbox", {}) is None
 
 
@@ -1123,3 +1121,21 @@ def test_the_shipped_graph_holds_the_mail_tools(tmp_path: Path) -> None:
         "mail.send_reply",
     } <= tools
     assert not {"mail.search", "mail.send"} & tools, "the placeholders are gone"
+
+
+def test_the_shipped_graph_names_the_mailbox_the_server_uses(tmp_path: Path) -> None:
+    """The mailbox resource name has to be the address the mail tools carry.
+
+    The graph held `support@acme.example` while the server sends from and reads
+    `support@acme.test`, so a live honest `list_inbox` resolved to no resource and
+    the subject rule refused it. The two spellings are two trees that have to
+    agree, and this is the check that keeps them agreeing.
+    """
+    from servers.mail_mcp.mail import MailSettings
+
+    desk = MailSettings().mail_from
+    with load_graph(SEED, tmp_path / "warrant.db") as graph:
+        row = graph.resource_named(desk, "mailbox")
+
+    assert row is not None, f"no mailbox resource named {desk}"
+    assert row.owner_human_id, "the row needs an owner for the subject rule"

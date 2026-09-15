@@ -232,6 +232,9 @@ resources:
     sensitivity: confidential
   - id: mailbox-support
     kind: mailbox
-    name: support@acme.example
+    # The address the mail server sends from and reads, and the acceptance
+    # criterion's mailbox. The resource name has to be the address a tool call
+    # carries, or the lookup misses and the subject rule refuses the honest read.
+    name: support@acme.test
     owner_human_id: h-bob
     sensitivity: internal
