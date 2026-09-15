@@ -10,10 +10,12 @@ everything that talks to a server sits together.
 
 from __future__ import annotations
 
+import socket
 import time
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -146,6 +148,35 @@ def gitea(settings: ServerSettings) -> ServerSettings:
     if response.status_code != 200:
         pytest.fail(f"Gitea answered HTTP {response.status_code} for org acme")
     return settings
+
+
+def require_postgres(settings: Any) -> None:
+    """Skip on an absent postgres, fail on a refused role.
+
+    Only a stack that is not there skips. A TCP connect that fails means no
+    server is listening, so the test skips. A socket that opens and then a
+    connection that fails means the server answered and refused the role, which
+    is a failure, for the same reason the Gitea fixture fails on a 401: a wrong
+    `POSTGRES_PASSWORD` used to be reported as a missing stack, which deleted
+    every database test silently while `make test` stayed green.
+
+    The split is by reachability rather than by SQLSTATE. psycopg raises its
+    connection-level `OperationalError` with `sqlstate` unset even for a
+    password refusal, so the state code cannot tell the two apart from here.
+    """
+    if not settings.postgres_password:
+        pytest.skip("POSTGRES_PASSWORD is not set; add it to .env")
+    address = (settings.postgres_host, settings.postgres_port)
+    try:
+        with socket.create_connection(address, timeout=3):
+            pass
+    except OSError as error:
+        pytest.skip(f"no postgres at {address[0]}:{address[1]}: {error}")
+    try:
+        with psycopg.connect(settings.dsn("postgres"), connect_timeout=3) as conn:
+            conn.execute("select 1")
+    except psycopg.OperationalError as error:
+        pytest.fail(f"postgres at {address[0]}:{address[1]} refused the role: {error}")
 
 
 @pytest.fixture(scope="session")

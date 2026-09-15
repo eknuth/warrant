@@ -254,3 +254,73 @@ def test_write_run_metadata_records_the_commit(tmp_path: Path) -> None:
     assert isinstance(record["dirty"], bool)
     assert record["mode"] in {mode.value for mode in Mode}
     assert record["started_at"]
+
+
+def _no_git(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+    """A `subprocess.run` that behaves like a host with no git installed."""
+    raise FileNotFoundError("git")
+
+
+def test_commit_sha_falls_back_to_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The container image has no git, so the caller's value is the answer."""
+    monkeypatch.setattr(config.subprocess, "run", _no_git)
+    monkeypatch.setenv(config.COMMIT_ENV, "a" * 40)
+
+    assert config.commit_sha(Path("/tmp")) == "a" * 40
+
+
+def test_commit_sha_falls_back_when_git_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A directory that is not a repository is the other way git cannot answer."""
+    monkeypatch.setattr(
+        config.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 128, "", "fatal: not a git"),
+    )
+    monkeypatch.setenv(config.COMMIT_ENV, "deadbeef")
+
+    assert config.commit_sha(Path("/tmp")) == "deadbeef"
+
+
+def test_commit_sha_without_git_or_environment_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An answer the run cannot have is None, not an empty string."""
+    monkeypatch.setattr(config.subprocess, "run", _no_git)
+    monkeypatch.delenv(config.COMMIT_ENV, raising=False)
+
+    assert config.commit_sha(Path("/tmp")) is None
+
+
+def test_commit_is_dirty_falls_back_to_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config.subprocess, "run", _no_git)
+
+    monkeypatch.setenv(config.DIRTY_ENV, "true")
+    assert config.commit_is_dirty(Path("/tmp")) is True
+    monkeypatch.setenv(config.DIRTY_ENV, "0")
+    assert config.commit_is_dirty(Path("/tmp")) is False
+    monkeypatch.setenv(config.DIRTY_ENV, "maybe")
+    assert config.commit_is_dirty(Path("/tmp")) is None
+    monkeypatch.delenv(config.DIRTY_ENV)
+    assert config.commit_is_dirty(Path("/tmp")) is None
+
+
+def test_a_real_checkout_wins_over_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The environment is a fallback for a checkout with no git, not an override.
+
+    Both values are set to the opposite of what git reports, so this is about
+    precedence and not about whether the tree happened to be clean when the
+    suite ran. On a clean checkout, which is how the suite runs, the answer is
+    the real HEAD and False.
+    """
+    head = subprocess.run(
+        ["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+    dirty = bool(
+        subprocess.run(
+            ["git", "-C", str(REPO), "status", "--porcelain"], capture_output=True, text=True
+        ).stdout.strip()
+    )
+    monkeypatch.setenv(config.COMMIT_ENV, "0" * 40)
+    monkeypatch.setenv(config.DIRTY_ENV, "false" if dirty else "true")
+
+    assert head, "the suite needs a checkout git can answer for"
+    assert config.commit_sha() == head
+    assert config.commit_is_dirty() is dirty

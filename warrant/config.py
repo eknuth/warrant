@@ -39,6 +39,8 @@ from warrant.models import Chain
 
 MODE_ENV = "WARRANT_MODE"
 RUNS_DIR_ENV = "WARRANT_RUNS_DIR"
+COMMIT_ENV = "WARRANT_COMMIT"
+DIRTY_ENV = "WARRANT_DIRTY"
 
 # The checkout this file is part of. `warrant/config.py` is one level down, so
 # the parent of its parent is the root of whichever checkout is running.
@@ -143,6 +145,31 @@ def current_mode() -> Mode:
     return DEFAULT_MODE
 
 
+def _commit_from_env() -> str | None:
+    """The commit a caller passed in, for a checkout without git.
+
+    The container image has no git and no `.git`, so `commit_sha` there could
+    only ever answer None and every run record from compose carried no commit.
+    `WARRANT_COMMIT` carries the value the caller exported from the checkout.
+    """
+    value = os.environ.get(COMMIT_ENV, "").strip()
+    return value or None
+
+
+def _dirty_from_env() -> bool | None:
+    """Whether the tree was dirty, from `WARRANT_DIRTY`, or None when unset.
+
+    The same fallback as `_commit_from_env`. An unrecognized value is None,
+    which means "not checked" rather than False.
+    """
+    value = os.environ.get(DIRTY_ENV, "").strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
 def commit_sha(root: Path | None = None) -> str | None:
     """The commit the running checkout is at, or None when there is no answer.
 
@@ -151,6 +178,10 @@ def commit_sha(root: Path | None = None) -> str | None:
     first question a surprising number raises. Returns None rather than raising
     when git is absent or the directory is not a repository: metadata the run
     cannot have is not a reason to fail the run.
+
+    When git cannot answer, `WARRANT_COMMIT` is the fallback. The container the
+    smoke runs in has no git, so the value the caller exported from the
+    checkout is what the run record carries there.
     """
     where = root if root is not None else REPO_ROOT
     try:
@@ -161,9 +192,9 @@ def commit_sha(root: Path | None = None) -> str | None:
             timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return _commit_from_env()
     if proc.returncode != 0 or not proc.stdout.strip():
-        return None
+        return _commit_from_env()
     return proc.stdout.strip()
 
 
@@ -173,6 +204,9 @@ def commit_is_dirty(root: Path | None = None) -> bool | None:
     The sha alone is not the provenance of a run: the same sha with a dirty tree
     is a different program. None means the question could not be asked, which is
     not the same answer as False.
+
+    When git cannot answer, `WARRANT_DIRTY` is the fallback, with the same
+    meaning as `commit_sha`'s.
     """
     where = root if root is not None else REPO_ROOT
     try:
@@ -183,9 +217,9 @@ def commit_is_dirty(root: Path | None = None) -> bool | None:
             timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return _dirty_from_env()
     if proc.returncode != 0:
-        return None
+        return _dirty_from_env()
     return bool(proc.stdout.strip())
 
 

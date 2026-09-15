@@ -20,6 +20,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -29,10 +30,12 @@ from mcp.types import CallToolResult, TextContent, Tool
 from starlette.testclient import TestClient
 
 from warrant import oidc
+from warrant.config import Mode
 from warrant.engine import PolicyEngine
 from warrant.gateway import (
     Gateway,
     GatewayError,
+    GatewayServer,
     GatewaySettings,
     StreamableHTTPUpstream,
     UpstreamServer,
@@ -658,6 +661,92 @@ async def test_list_tools_prefixes_and_keeps_only_graph_known_tools(
 
     assert [tool.name for tool in tools] == ["gitea.get_issue"]
     assert tools[0].description == "Read an issue."
+
+
+async def test_list_tools_offers_only_the_tools_the_agent_holds(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """A graph-known tool the acting agent does not hold is not offered.
+
+    The graph is the authority twice over: a tool with no row is not
+    re-exported, and a tool with a row that the agent's allowlist lacks is not
+    offered to that agent, because the baseline permit refuses it anyway.
+    """
+    log = DecisionLog(tmp_path / "runs")
+    engine = FakeEngine(decision_log=log)
+    upstream = FakeUpstream(
+        tools=[
+            Tool(name="get_issue", description="Read an issue.", input_schema={"type": "object"}),
+            Tool(name="send_reply", description="Send a reply.", input_schema={"type": "object"}),
+        ]
+    )
+    gateway = make_gateway(tmp_path, graph_db, engine, servers=[GITEA, MAIL], upstream=upstream)
+
+    triage_tools = await gateway.list_tools(claims=claims_for(act="triage-agent"), token="")
+    support_tools = await gateway.list_tools(claims=claims_for(act="support-agent"), token="")
+
+    assert [tool.name for tool in triage_tools] == ["gitea.get_issue"]
+    assert [tool.name for tool in support_tools] == ["mail.send_reply"]
+
+
+async def test_prompt_only_offers_the_whole_graph_surface(tmp_path: Path, graph_db: Graph) -> None:
+    """The ablation must not gain a graph-allowlist control it did not have.
+
+    `orphan-agent` holds none of the discovered tools. Under prompt-only the
+    engine evaluates no policy, so the discovered graph-known surface is offered
+    whole; the same request in a deciding mode comes back empty.
+    """
+    log = DecisionLog(tmp_path / "runs")
+    engine = FakeEngine(decision_log=log)
+    upstream = FakeUpstream(
+        tools=[
+            Tool(name="get_issue", description="Read an issue.", input_schema={"type": "object"}),
+            Tool(name="get_file", description="Read a file.", input_schema={"type": "object"}),
+            Tool(name="send_reply", description="Send a reply.", input_schema={"type": "object"}),
+        ]
+    )
+    gateway = make_gateway(tmp_path, graph_db, engine, servers=[GITEA, MAIL], upstream=upstream)
+    gateway.mode = Mode.prompt_only
+
+    tools = await gateway.list_tools(claims=claims_for(act="orphan-agent"), token="")
+
+    assert [tool.name for tool in tools] == [
+        "gitea.get_issue",
+        "gitea.get_file",
+        "mail.send_reply",
+    ]
+
+
+async def test_the_handler_lists_tools_from_headers_under_no_exchange(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """`tools/list` builds the same chain `tools/call` does, from the headers.
+
+    The handler did not pass the request headers, so under the no-exchange
+    ablation `list_tools` raised `ChainSourceError` at the first request an MCP
+    client makes, and the whole ablation was unusable.
+    """
+    log = DecisionLog(tmp_path / "runs")
+    engine = FakeEngine(decision_log=log)
+    upstream = FakeUpstream(
+        tools=[
+            Tool(name="get_issue", description="Read an issue.", input_schema={"type": "object"})
+        ]
+    )
+    gateway = make_gateway(tmp_path, graph_db, engine, upstream=upstream)
+    gateway.mode = Mode.no_exchange
+    handler = GatewayServer(gateway)
+    headers = {
+        "X-Warrant-Sub": "h-alice",
+        "X-Warrant-Act": "triage-agent",
+        "X-Warrant-Task-Id": "task-1",
+        "X-Warrant-Token-Exp": str(int(time.time()) + 300),
+    }
+    ctx = SimpleNamespace(request=SimpleNamespace(headers=headers))
+
+    result = await handler.list_tools(ctx, None)
+
+    assert [tool.name for tool in result.tools] == ["gitea.get_issue"]
 
 
 # -- the HTTP boundary -----------------------------------------------------

@@ -373,11 +373,22 @@ class Gateway:
         token: str = "",
         headers: Mapping[str, str] | None = None,
     ) -> list[Tool]:
-        """Every upstream tool the graph knows, with the upstream name prefixed.
+        """The tools the acting agent holds, with the upstream name prefixed.
 
-        The graph is the authority on what may be called: a tool the upstream
-        offers but the graph has no row for is not re-exported, because the
-        gateway would have no action kind to decide it with.
+        The graph is the authority on what may be called twice over. A tool the
+        upstream offers but the graph has no row for is not re-exported, because
+        the gateway would have no action kind to decide it with; and, in the
+        modes where the engine decides, a tool the graph knows but the acting
+        agent's allowlist does not hold is not offered, because the baseline
+        permit refuses it anyway and the model should not be handed a call it
+        cannot make. `_discover` caches the full per-server list, so the
+        per-actor narrowing is a filter over that cache on every request.
+
+        `prompt-only` is the exception. That mode makes every decision allow
+        without evaluating a policy, and it is the ablation column the matrix is
+        measured against. Filtering by the graph's allowlist there would add a
+        control the other ablations do not have, so the discovered surface is
+        returned whole and the ablation stays policy-free.
 
         `claims` is None under the `no-exchange` ablation, where the chain comes
         from headers and there is no token at all. `tools/list` is the first
@@ -391,14 +402,18 @@ class Gateway:
         # already refuses it before the engine; listing is not a decision, but
         # it is a round trip to every upstream and a description of what this
         # deployment can do, and neither belongs to an actor with no row.
-        if self.graph.agent(chain.act) is None:
+        agent = self.graph.agent(chain.act)
+        if agent is None:
             logger.info("not listing tools for unknown agent %s", chain.act)
             return []
+        allowed = set(agent.allowed_tools)
 
         tools: list[Tool] = []
         for server in self.servers:
             tools.extend(await self._discover(server, task_id=chain.task_id, token=token))
-        return tools
+        if self.mode is Mode.prompt_only:
+            return tools
+        return [tool for tool in tools if tool.name in allowed]
 
     async def _discover(self, server: UpstreamServer, *, task_id: str, token: str) -> list[Tool]:
         if server.name in self._tools:
@@ -753,7 +768,11 @@ class GatewayServer:
 
     async def list_tools(self, ctx: Any, params: Any) -> ListToolsResult:
         claims, token = self._identity(ctx)
-        return ListToolsResult(tools=await self.gateway.list_tools(claims=claims, token=token))
+        return ListToolsResult(
+            tools=await self.gateway.list_tools(
+                claims=claims, token=token, headers=request_headers(ctx)
+            )
+        )
 
     async def call_tool(self, ctx: Any, params: Any) -> CallToolResult:
         claims, token = self._identity(ctx)
