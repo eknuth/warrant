@@ -25,10 +25,11 @@ Nothing here reads a secret or opens a connection at import time.
 from __future__ import annotations
 
 import asyncio
+import re
 import smtplib
 from datetime import UTC, datetime
 from email.message import EmailMessage
-from email.utils import make_msgid
+from email.utils import getaddresses, make_msgid
 from typing import Any, Protocol, runtime_checkable
 
 import httpx
@@ -45,6 +46,24 @@ MEMBER_DOMAIN = "acme.test"
 MESSAGES_PATH = "/api/v1/messages"
 SEARCH_PATH = "/api/v1/search"
 MESSAGE_PATH = "/api/v1/message"
+
+# Mailpit answers a search one page at a time, 50 messages by default whatever
+# the match count is. `SEARCH_PAGE` is the page this client asks for and the
+# walk follows Mailpit's `start` offset until the reported match count is
+# consumed. `MAX_SEARCH_PAGES` bounds a search that keeps answering, so five
+# thousand matches per call is the documented limit.
+SEARCH_PAGE = 50
+MAX_SEARCH_PAGES = 100
+
+# A message id names a Mailpit id or an RFC 5322 `Message-ID`. Anything outside
+# this set, and a slash in particular, would change the path this client builds
+# rather than name a message, so it is refused before the request.
+MESSAGE_ID_UNSAFE = re.compile(r"[/\\?#%\s]")
+
+# The characters a header value may not carry. The email library refuses a
+# line break by raising its own error, which the tool layer would report as a
+# crash rather than a `MailError`, so the check is here.
+HEADER_BREAKS = ("\r", "\n")
 
 
 class MailError(RuntimeError):
@@ -146,12 +165,61 @@ class Mail(Protocol):
 
     async def list_inbox(self, mailbox: str) -> Inbox: ...
 
-    async def get_message(self, message_id: str) -> MessageDetail: ...
+    async def get_message(self, mailbox: str, message_id: str) -> MessageDetail: ...
 
 
 def _addresses(value: Any) -> list[str]:
     """The address of each recipient object Mailpit returns."""
     return [str(entry.get("Address", "")) for entry in value or [] if isinstance(entry, dict)]
+
+
+def _normalize_address(value: str) -> str:
+    """An address folded for an exact comparison, without changing the record."""
+    return (value or "").strip().lower()
+
+
+def _recipients(item: dict[str, Any]) -> list[str]:
+    """Every address a stored message was delivered to, in Mailpit's own order."""
+    found: list[str] = []
+    for field in ("To", "Cc", "Bcc"):
+        found.extend(_addresses(item.get(field)))
+    return found
+
+
+def _addressed_to(item: dict[str, Any], mailbox: str) -> bool:
+    """Whether the exact mailbox address is one of the message's recipients.
+
+    Mailpit's `to:` search is a substring match, so it answers with
+    `notsupport@acme.test` and `support@acme.test.evil` for a search on
+    `support@acme.test`. This is the second, exact check the parsed recipient
+    list gets after that search. `list_inbox` and `get_message` both use it, so
+    a message read back by id is held to the same mailbox the call named.
+    """
+    wanted = _normalize_address(mailbox)
+    return any(_normalize_address(address) == wanted for address in _recipients(item))
+
+
+def _check_header(name: str, value: str | None) -> None:
+    """Refuse a header value that carries a line break, as a `MailError`."""
+    if value is None:
+        return
+    if any(break_char in value for break_char in HEADER_BREAKS):
+        raise MailError(f"{name} must not contain a line break")
+
+
+def _check_message_id(message_id: str) -> str:
+    """The message id when it can name a message, or a `MailError`.
+
+    A slash, a backslash, or a percent escape in the id would not name a
+    message: it would change the path this client requests, so `x/../../info`
+    reaches Mailpit's `/api/v1/info` and answers a record that is not a message.
+    """
+    value = (message_id or "").strip()
+    if not value:
+        raise MailError("message_id must not be empty")
+    if value in (".", "..") or MESSAGE_ID_UNSAFE.search(value):
+        raise MailError(f"message_id is not a message id: {message_id!r}")
+    return value
 
 
 def _sender(item: dict[str, Any]) -> str:
@@ -244,14 +312,27 @@ class MailpitMail:
     async def send_reply(
         self, to: str, subject: str, body: str, in_reply_to: str | None = None
     ) -> SentReply:
-        """Send one plain-text message from the desk address.
+        """Send one plain-text message from the desk address to one recipient.
 
         The send runs in a thread, because `smtplib` blocks and this is an async
         server. The `Message-ID` is generated here so the caller gets a stable id
-        back and Mailpit records the same value.
+        back and Mailpit records the same value. Every check runs, and the links
+        are extracted, before the message is handed to SMTP, so a mail that goes
+        out always has its record and a refusal never sends.
         """
         if not to.strip():
             raise MailError("to must not be empty")
+        _check_header("to", to)
+        _check_header("subject", subject)
+        _check_header("in_reply_to", in_reply_to)
+        recipients = [address for _name, address in getaddresses([to]) if address]
+        if len(recipients) > 1:
+            raise MailError(
+                f"send_reply delivers to one address per call, this call named {len(recipients)}"
+            )
+        if not recipients:
+            raise MailError("to must name one address")
+        links = extract_links(body)
         message_id = make_msgid(domain=MEMBER_DOMAIN)
         message = EmailMessage()
         message["From"] = self._from
@@ -269,7 +350,7 @@ class MailpitMail:
             message_id=message_id.strip("<>"),
             to=to,
             subject=subject,
-            links=extract_links(body),
+            links=links,
         )
 
     def _send(self, message: EmailMessage) -> None:
@@ -284,38 +365,77 @@ class MailpitMail:
 
     # -- reads -------------------------------------------------------------
 
+    async def _search_all(self, query: str) -> list[dict[str, Any]]:
+        """Every message Mailpit's search reports for `query`, across its pages.
+
+        Mailpit answers 50 messages at a time whatever the match count is, so a
+        single request silently drops the rest. This walks its `start` offset
+        until the `messages_count` it reports has been consumed, and it stops on
+        an empty page or after `MAX_SEARCH_PAGES` pages so a search that keeps
+        answering cannot loop forever.
+        """
+        found: list[dict[str, Any]] = []
+        start = 0
+        for _page in range(MAX_SEARCH_PAGES):
+            data = await self._get_json(SEARCH_PATH, query=query, start=start, limit=SEARCH_PAGE)
+            page = [item for item in data.get("messages") or [] if isinstance(item, dict)]
+            if not page:
+                break
+            found.extend(page)
+            reported = data.get("messages_count")
+            if isinstance(reported, int) and len(found) >= reported:
+                break
+            start += len(page)
+        return found
+
     async def list_inbox(self, mailbox: str) -> Inbox:
-        """Every message addressed to `mailbox`, newest first."""
+        """Every message addressed to `mailbox`, newest first.
+
+        Mailpit's `to:` search is a substring match, so it answers with a
+        lookalike address as well. The exact recipient check on the parsed `To`
+        list is what keeps `notsupport@acme.test` and
+        `support@acme.test.evil` out of the result.
+        """
         if not mailbox.strip():
             raise MailError("mailbox must not be empty")
-        data = await self._get_json(SEARCH_PATH, query=f"to:{mailbox}")
-        messages = [
-            inbox_message_from(item)
-            for item in data.get("messages") or []
-            if isinstance(item, dict)
-        ]
+        items = await self._search_all(f"to:{mailbox}")
+        messages = [inbox_message_from(item) for item in items if _addressed_to(item, mailbox)]
         return Inbox(mailbox=mailbox, messages=messages)
 
-    async def get_message(self, message_id: str) -> MessageDetail:
-        """One message by Mailpit id, or by the RFC `Message-ID` it carries."""
-        if not message_id.strip():
-            raise MailError("message_id must not be empty")
+    async def get_message(self, mailbox: str, message_id: str) -> MessageDetail:
+        """One message by Mailpit id, or by the RFC `Message-ID` it carries.
+
+        The mailbox is the resource the call names: it is what the gateway
+        authorizes on, and the message is held to it. A message that the mailbox
+        search turns up but that does not carry the exact address as a recipient
+        is refused rather than returned.
+        """
+        if not mailbox.strip():
+            raise MailError("mailbox must not be empty")
+        message_id = _check_message_id(message_id)
         try:
             response = await self._client.get(f"{MESSAGE_PATH}/{message_id}")
         except httpx.HTTPError as error:
             raise MailError(f"mailpit is unreachable at {self._base_url}: {error}") from error
         if response.status_code == 200:
-            return message_detail_from(response.json())
+            return self._detail_for_mailbox(response.json(), mailbox, message_id)
         if response.status_code != 404:
             raise MailError(
                 f"mailpit GET {MESSAGE_PATH}/{message_id} -> HTTP {response.status_code}"
             )
-        found = await self._get_json(SEARCH_PATH, query=f"message-id:{message_id}")
-        matches = [item for item in found.get("messages") or [] if isinstance(item, dict)]
-        if not matches:
+        found = await self._search_all(f"message-id:{message_id}")
+        if not found:
             raise MailError(f"message {message_id!r} not found")
-        detail = await self._get_json(f"{MESSAGE_PATH}/{matches[0].get('ID', '')}")
-        return message_detail_from(detail)
+        detail = await self._get_json(f"{MESSAGE_PATH}/{found[0].get('ID', '')}")
+        return self._detail_for_mailbox(detail, mailbox, message_id)
+
+    def _detail_for_mailbox(
+        self, item: dict[str, Any], mailbox: str, message_id: str
+    ) -> MessageDetail:
+        """One fetched message, refused unless `mailbox` is one of its recipients."""
+        if not _addressed_to(item, mailbox):
+            raise MailError(f"message {message_id!r} is not addressed to {mailbox!r}")
+        return message_detail_from(item)
 
 
 def build_mail(settings: MailSettings) -> MailpitMail:

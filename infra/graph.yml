@@ -178,12 +178,17 @@ tools:
     name: rotate_api_key
     action_kind: write
     resource_kind: db_customer
-  # The mail MCP server's tools (W9). The two reads open a mailbox and the reply
-  # sends from the desk's, so all three name a mailbox. The send keeps the `send`
-  # action kind the placeholder used, which is the kind the scope and provenance
-  # rules already read. `mail.search` and `mail.send` were the placeholders before
-  # the server existed; they are gone, because a row for a tool no server offers
-  # is not authority.
+  # The mail MCP server's tools (W9). All three name a mailbox, which is the
+  # resource the subject rule decides on: `list_inbox` and `get_message` take the
+  # `mailbox` they open, and `send_reply` takes the `to` address it sends to. The
+  # extractor reads both spellings, so a read and a send to one address resolve to
+  # the same row. `get_message` names the mailbox because a call that carried only
+  # a `message_id` resolved to no resource at all and the subject rule refused the
+  # desk owner's own honest read. The send keeps the `send` action kind the
+  # placeholder used, which is the kind the scope and provenance rules already
+  # read. `mail.search` and `mail.send` were the placeholders before the server
+  # existed; they are gone, because a row for a tool no server offers is not
+  # authority.
   - id: mail.list_inbox
     server: mail
     name: list_inbox

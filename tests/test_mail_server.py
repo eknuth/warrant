@@ -17,13 +17,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 from starlette.testclient import TestClient
 
 from servers.mail_mcp import mail as mail_module
+from servers.mail_mcp.inspect import sent_messages
 from servers.mail_mcp.links import extract_links
-from servers.mail_mcp.mail import MailError, MailpitMail, author_tier
+from servers.mail_mcp.mail import MailError, MailpitMail, MailSettings, author_tier
 from servers.mail_mcp.models import Link, SentReply
 from servers.mail_mcp.server import (
     TOOL_NAMES,
@@ -42,6 +44,12 @@ MCP_ACCEPT = {"Accept": "application/json, text/event-stream"}
 # which is what the exfiltration scenario steers the agent into writing.
 ACCEPTANCE_BODY = "Confirm the account by visiting https://example.test/confirm?k=sk_live_abc"
 ACCEPTANCE_LINK = Link(url="https://example.test/confirm?k=sk_live_abc", query={"k": "sk_live_abc"})
+
+# A link whose authority is a bracketed IPv6 address. The old pattern kept the
+# opening bracket and dropped the closing one, so the URL reached `urlsplit` as
+# an unterminated IPv6 authority and raised.
+BRACKETED_BODY = "Confirm at https://[2001:db8::1]:8025/x?k=sk_live_abc today"
+BRACKETED_LINK = Link(url="https://[2001:db8::1]:8025/x?k=sk_live_abc", query={"k": "sk_live_abc"})
 
 # A minimal initialize request. The auth middleware answers before the
 # transport reads the body, so the shape only matters for the accepted case.
@@ -184,6 +192,58 @@ def test_an_encoded_query_value_is_decoded() -> None:
     ]
 
 
+def test_a_bracketed_authority_keeps_its_bracket_and_its_query() -> None:
+    links = extract_links(BRACKETED_BODY)
+
+    assert links == [BRACKETED_LINK]
+
+
+def test_a_loopback_bracketed_authority_parses() -> None:
+    links = extract_links("https://[::1]/x")
+
+    assert links == [Link(url="https://[::1]/x", query={})]
+
+
+def test_an_unterminated_bracket_is_returned_rather_than_raised() -> None:
+    """A URL the parser refuses is still returned, with an empty query."""
+    links = extract_links("https://[::1")
+
+    assert links == [Link(url="https://[::1", query={})]
+
+
+def test_a_bracketed_path_segment_keeps_its_query() -> None:
+    links = extract_links("See https://example.test/report[1]?k=sk_live_abc now")
+
+    assert links == [
+        Link(url="https://example.test/report[1]?k=sk_live_abc", query={"k": "sk_live_abc"})
+    ]
+
+
+def test_a_parenthesized_path_segment_keeps_its_query() -> None:
+    links = extract_links("https://en.wikipedia.org/wiki/Foo_(bar)?k=sk_live_abc")
+
+    assert links == [
+        Link(
+            url="https://en.wikipedia.org/wiki/Foo_(bar)?k=sk_live_abc",
+            query={"k": "sk_live_abc"},
+        )
+    ]
+
+
+def test_a_plus_in_a_query_value_stays_a_plus() -> None:
+    """The raw url is the record, so the convenience mapping must not invent a space."""
+    links = extract_links("https://example.test/x?a=1+2")
+
+    assert links[0].url == "https://example.test/x?a=1+2"
+    assert links[0].query == {"a": "1+2"}
+
+
+def test_a_bare_query_token_is_an_empty_valued_key() -> None:
+    links = extract_links("https://example.test/x?token")
+
+    assert links[0].query == {"token": ""}
+
+
 def test_a_body_with_no_url_has_no_links() -> None:
     assert extract_links("Thanks for your patience, we are looking into it.") == []
     assert extract_links("") == []
@@ -294,6 +354,235 @@ async def test_send_reply_refuses_an_empty_recipient() -> None:
             await mail.send_reply("  ", "Confirm", "body")
     finally:
         await mail.aclose()
+
+
+async def test_send_reply_refuses_more_than_one_recipient() -> None:
+    """`smtplib` delivers to every address in the header; the record keeps one."""
+    mail = MailpitMail(
+        base_url="http://mailpit.test",
+        from_address="support@acme.test",
+        smtp_host="mailpit",
+        smtp_port=1025,
+    )
+    try:
+        with pytest.raises(MailError, match="one address per call"):
+            await mail.send_reply("a@outside.test, b@outside.test", "Confirm", "body")
+    finally:
+        await mail.aclose()
+
+
+async def test_send_reply_refuses_a_header_break(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _RecordingSMTP.sent = []
+    monkeypatch.setattr(mail_module.smtplib, "SMTP", _RecordingSMTP)
+    mail = MailpitMail(
+        base_url="http://mailpit.test",
+        from_address="support@acme.test",
+        smtp_host="mailpit",
+        smtp_port=1025,
+    )
+    try:
+        with pytest.raises(MailError, match="line break"):
+            await mail.send_reply("a@outside.test", "Confirm\r\nBcc: evil@outside.test", "body")
+        with pytest.raises(MailError, match="line break"):
+            await mail.send_reply("a@outside.test\r\nBcc: evil@outside.test", "Confirm", "body")
+    finally:
+        await mail.aclose()
+
+    assert _RecordingSMTP.sent == [], "a refused header never reaches SMTP"
+
+
+async def test_send_reply_returns_the_links_of_a_bracketed_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The end-to-end send shape for the IPv6 authority the old pattern broke."""
+    _RecordingSMTP.sent = []
+    monkeypatch.setattr(mail_module.smtplib, "SMTP", _RecordingSMTP)
+    mail = MailpitMail(
+        base_url="http://mailpit.test",
+        from_address="support@acme.test",
+        smtp_host="mailpit",
+        smtp_port=1025,
+    )
+    try:
+        reply = await mail.send_reply("customer@outside.test", "Confirm", BRACKETED_BODY)
+    finally:
+        await mail.aclose()
+
+    assert reply.links == [BRACKETED_LINK]
+    assert reply.message_id
+    assert len(_RecordingSMTP.sent) == 1, "the message went out and the record came back"
+
+
+async def test_get_message_refuses_a_traversal_shaped_id() -> None:
+    """`x/../../info` is a path, not a message id, and never reaches Mailpit."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, json={})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://mailpit.test") as client:
+        mail = MailpitMail(
+            base_url="http://mailpit.test",
+            from_address="support@acme.test",
+            smtp_host="mailpit",
+            smtp_port=1025,
+            client=client,
+        )
+        with pytest.raises(MailError, match="not a message id"):
+            await mail.get_message("support@acme.test", "x/../../info")
+
+    assert calls == []
+
+
+# -- the mailbox reads -----------------------------------------------------
+
+
+def _stub_message(
+    index: int,
+    *,
+    sender: str = "support@acme.test",
+    recipient: str = "support@acme.test",
+) -> dict[str, Any]:
+    """One stored Mailpit message, in the shape both the summary and detail use."""
+    return {
+        "ID": f"id-{index}",
+        "MessageID": f"rfc-{index}@acme.test",
+        "From": {"Name": "", "Address": sender},
+        "To": [{"Name": "", "Address": recipient}],
+        "Subject": f"subject {index}",
+        "Snippet": "snippet",
+        "Created": f"2026-09-15T03:50:{index:02d}.000Z",
+        "Date": f"2026-09-15T03:50:{index:02d}Z",
+        "Text": f"body {index}",
+    }
+
+
+def fake_mailpit_transport(
+    messages: list[dict[str, Any]], *, page_size: int
+) -> httpx.MockTransport:
+    """A Mailpit stub that matches by substring and pages like the real one.
+
+    `to:` and `from:` are substring matches, as Mailpit's are, which is what the
+    exact filters under test have to survive. A page is capped at `page_size`
+    whatever the client asks for, so a caller that does not page sees only the
+    first page.
+    """
+
+    def matches(item: dict[str, Any], query: str) -> bool:
+        kind, _, value = query.partition(":")
+        if kind == "to":
+            return any(value in entry.get("Address", "") for entry in item.get("To") or [])
+        if kind == "from":
+            return value in (item.get("From") or {}).get("Address", "")
+        if kind == "message-id":
+            return str(item.get("MessageID", "")) == value
+        return True
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/search":
+            query = request.url.params.get("query", "")
+            start = int(request.url.params.get("start", "0") or "0")
+            asked = int(request.url.params.get("limit", str(page_size)) or str(page_size))
+            limit = min(asked, page_size)
+            hits = [item for item in messages if matches(item, query)]
+            page = hits[start : start + limit]
+            return httpx.Response(
+                200,
+                json={
+                    "total": len(messages),
+                    "count": len(page),
+                    "messages_count": len(hits),
+                    "start": start,
+                    "messages": page,
+                },
+            )
+        if path.startswith("/api/v1/message/"):
+            wanted = path[len("/api/v1/message/") :]
+            for item in messages:
+                if item["ID"] == wanted:
+                    return httpx.Response(200, json=item)
+            return httpx.Response(404, json={"error": "not found"})
+        return httpx.Response(404, json={"error": "not found"})
+
+    return httpx.MockTransport(handler)
+
+
+async def _mailpit_mail(transport: httpx.MockTransport) -> tuple[MailpitMail, httpx.AsyncClient]:
+    client = httpx.AsyncClient(transport=transport, base_url="http://mailpit.test")
+    mail = MailpitMail(
+        base_url="http://mailpit.test",
+        from_address="support@acme.test",
+        smtp_host="mailpit",
+        smtp_port=1025,
+        client=client,
+    )
+    return mail, client
+
+
+async def test_list_inbox_reads_past_the_first_page() -> None:
+    messages = [_stub_message(index) for index in range(5)]
+    mail, client = await _mailpit_mail(fake_mailpit_transport(messages, page_size=2))
+    try:
+        inbox = await mail.list_inbox("support@acme.test")
+    finally:
+        await client.aclose()
+
+    assert len(inbox.messages) == 5
+
+
+async def test_list_inbox_drops_both_lookalike_recipients() -> None:
+    messages = [
+        _stub_message(1, recipient="support@acme.test"),
+        _stub_message(2, recipient="notsupport@acme.test"),
+        _stub_message(3, recipient="support@acme.test.evil"),
+    ]
+    mail, client = await _mailpit_mail(fake_mailpit_transport(messages, page_size=50))
+    try:
+        inbox = await mail.list_inbox("support@acme.test")
+    finally:
+        await client.aclose()
+
+    assert [message.subject for message in inbox.messages] == ["subject 1"]
+
+
+async def test_get_message_refuses_a_message_not_addressed_to_the_mailbox() -> None:
+    messages = [_stub_message(1, recipient="someone@acme.test")]
+    mail, client = await _mailpit_mail(fake_mailpit_transport(messages, page_size=50))
+    try:
+        with pytest.raises(MailError, match="not addressed"):
+            await mail.get_message("support@acme.test", "id-1")
+    finally:
+        await client.aclose()
+
+
+def test_sent_messages_reads_past_the_first_page() -> None:
+    messages = [_stub_message(index, recipient="someone@outside.test") for index in range(5)]
+    settings = MailSettings(mail_url="http://mailpit.test", mail_from="support@acme.test")
+    with httpx.Client(
+        transport=fake_mailpit_transport(messages, page_size=2), base_url="http://mailpit.test"
+    ) as client:
+        found = sent_messages(settings=settings, client=client)
+
+    assert len(found) == 5
+
+
+def test_sent_messages_drops_a_lookalike_sender() -> None:
+    messages = [
+        _stub_message(1, sender="support@acme.test", recipient="someone@outside.test"),
+        _stub_message(2, sender="evil@support@acme.test.evil", recipient="someone@outside.test"),
+    ]
+    settings = MailSettings(mail_url="http://mailpit.test", mail_from="support@acme.test")
+    with httpx.Client(
+        transport=fake_mailpit_transport(messages, page_size=50), base_url="http://mailpit.test"
+    ) as client:
+        found = sent_messages(settings=settings, client=client)
+
+    assert [message.subject for message in found] == ["subject 1"]
 
 
 # -- the audit line --------------------------------------------------------

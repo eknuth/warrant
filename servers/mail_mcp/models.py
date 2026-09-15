@@ -104,6 +104,11 @@ class SentMessage(BaseModel):
     check on it is a check on the wire rather than on an echo.
 
     The mail server sends to one address per call, so `to` is that address.
+
+    `ts` is the message's `Date` header, the sender's own clock. The
+    `sent_messages` time filter reads Mailpit's `Created` receipt timestamp
+    instead, which is the same second or a later one, so a message at a
+    boundary can carry a `ts` just before it.
     """
 
     to: str

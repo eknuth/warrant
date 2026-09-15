@@ -82,13 +82,13 @@ def mail_settings() -> MailSettings:
     return settings
 
 
-def seed(settings: MailSettings, sender: str, subject: str, text: str) -> str:
-    """Deliver one message to the desk through Mailpit's HTTP send endpoint."""
+def seed(settings: MailSettings, sender: str, subject: str, text: str, *, to: str = DESK) -> str:
+    """Deliver one message through Mailpit's HTTP send endpoint."""
     response = httpx.post(
         f"{settings.mail_url.rstrip('/')}/api/v1/send",
         json={
             "From": {"Email": sender},
-            "To": [{"Email": DESK}],
+            "To": [{"Email": to}],
             "Subject": subject,
             "Text": text,
         },
@@ -263,6 +263,28 @@ async def test_list_inbox_reports_the_author_tier(
     assert messages[member_subject]["source"]["author"] == MEMBER
 
 
+async def test_list_inbox_does_not_leak_a_lookalike_mailbox(
+    mail_app: str, mail_settings: MailSettings, sign_token: Any
+) -> None:
+    """Mailpit's `to:` is a substring match, so the exact check is the filter."""
+    real_subject = f"real desk {uuid4().hex}"
+    prefix_subject = f"prefix lookalike {uuid4().hex}"
+    suffix_subject = f"suffix lookalike {uuid4().hex}"
+    seed(mail_settings, OUTSIDE, real_subject, "for the desk")
+    seed(mail_settings, OUTSIDE, prefix_subject, "for a lookalike", to="notsupport@acme.test")
+    seed(mail_settings, OUTSIDE, suffix_subject, "for another", to="support@acme.test.evil")
+    token = sign_token(audience="mail-mcp", scope=("mail:send",), act="support-agent")
+
+    async with mcp_session(mail_app, token) as session:
+        result = await session.call_tool("list_inbox", {"mailbox": DESK})
+
+    assert result.is_error is False
+    subjects = {message["subject"] for message in structured(result)["messages"]}
+    assert real_subject in subjects
+    assert prefix_subject not in subjects
+    assert suffix_subject not in subjects
+
+
 async def test_get_message_returns_the_full_body_and_the_same_source(
     mail_app: str, mail_settings: MailSettings, sign_token: Any
 ) -> None:
@@ -271,7 +293,7 @@ async def test_get_message_returns_the_full_body_and_the_same_source(
     token = sign_token(audience="mail-mcp", scope=("mail:send",), act="support-agent")
 
     async with mcp_session(mail_app, token) as session:
-        result = await session.call_tool("get_message", {"message_id": message_id})
+        result = await session.call_tool("get_message", {"mailbox": DESK, "message_id": message_id})
 
     assert result.is_error is False
     payload = structured(result)
@@ -297,17 +319,33 @@ async def test_get_message_by_rfc_message_id(
     token = sign_token(audience="mail-mcp", scope=("mail:send",), act="support-agent")
 
     async with mcp_session(mail_app, token) as session:
-        result = await session.call_tool("get_message", {"message_id": rfc_id})
+        result = await session.call_tool("get_message", {"mailbox": DESK, "message_id": rfc_id})
 
     assert result.is_error is False
     assert structured(result)["subject"] == subject
+
+
+async def test_get_message_refuses_a_message_for_another_mailbox(
+    mail_app: str, mail_settings: MailSettings, sign_token: Any
+) -> None:
+    """The mailbox is the resource, so naming it must not open somebody else's."""
+    subject = f"not the desk {uuid4().hex}"
+    message_id = seed(mail_settings, OUTSIDE, subject, "hello", to=MEMBER)
+    token = sign_token(audience="mail-mcp", scope=("mail:send",), act="support-agent")
+
+    async with mcp_session(mail_app, token) as session:
+        result = await session.call_tool("get_message", {"mailbox": DESK, "message_id": message_id})
+
+    assert result.is_error is True
 
 
 async def test_a_missing_message_is_a_tool_error(mail_app: str, sign_token: Any) -> None:
     token = sign_token(audience="mail-mcp", scope=("mail:send",), act="support-agent")
 
     async with mcp_session(mail_app, token) as session:
-        result = await session.call_tool("get_message", {"message_id": "no-such-message"})
+        result = await session.call_tool(
+            "get_message", {"mailbox": DESK, "message_id": "no-such-message"}
+        )
 
     assert result.is_error is True
 
@@ -341,6 +379,68 @@ def test_sent_messages_excludes_what_arrived_before_the_reset(
     found = sent_messages(future, settings=mail_settings)
 
     assert subject not in {message.subject for message in found}
+
+
+def test_sent_messages_drops_a_lookalike_sender(mail_settings: MailSettings) -> None:
+    """Mailpit's `from:` is a substring match; the exact From check drops the rest."""
+    real_subject = f"real sender {uuid4().hex}"
+    lookalike_subject = f"lookalike sender {uuid4().hex}"
+    seed(mail_settings, DESK, real_subject, "from the desk")
+    seed(mail_settings, f"evil@{DESK}.evil", lookalike_subject, "not from the desk")
+    since = datetime.now(UTC) - timedelta(minutes=5)
+
+    found = sent_messages(since, settings=mail_settings)
+
+    subjects = {message.subject for message in found}
+    assert real_subject in subjects
+    assert lookalike_subject not in subjects
+
+
+def test_a_bracketed_ipv6_link_does_not_raise_the_inspector(
+    mail_settings: MailSettings,
+) -> None:
+    """The body that used to poison `sent_messages` is read back, links and all."""
+    subject = f"ipv6 {uuid4().hex}"
+    body = "Confirm at https://[2001:db8::1]:8025/x?k=sk_live_abc today"
+    seed(mail_settings, DESK, subject, body)
+    since = datetime.now(UTC) - timedelta(minutes=5)
+
+    found = sent_messages(since, settings=mail_settings)
+    target = next(message for message in found if message.subject == subject)
+
+    assert target.links[0].url == "https://[2001:db8::1]:8025/x?k=sk_live_abc"
+    assert target.links[0].query == {"k": "sk_live_abc"}
+
+
+def _delete_probes(settings: MailSettings, ids: list[str]) -> None:
+    """Remove the probe messages a test seeded, best effort."""
+    if not ids:
+        return
+    try:
+        httpx.request(
+            "DELETE",
+            f"{settings.mail_url.rstrip('/')}/api/v1/messages",
+            json={"IDs": ids},
+            timeout=10.0,
+        )
+    except httpx.HTTPError:
+        pass
+
+
+def test_sent_messages_reads_past_mailpits_first_page(mail_settings: MailSettings) -> None:
+    """Fifty-five messages is more than Mailpit's default fifty-message page."""
+    marker = uuid4().hex
+    seeded: list[str] = []
+    since = datetime.now(UTC) - timedelta(seconds=1)
+    try:
+        for index in range(55):
+            seeded.append(seed(mail_settings, DESK, f"{marker} page {index:02d}", "page probe"))
+        found = sent_messages(since, settings=mail_settings)
+    finally:
+        _delete_probes(mail_settings, seeded)
+
+    mine = [message.subject for message in found if message.subject.startswith(marker)]
+    assert len(mine) == 55
 
 
 # -- the send, when SMTP is reachable --------------------------------------

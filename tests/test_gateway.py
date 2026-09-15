@@ -12,6 +12,7 @@ Nothing here reaches Keycloak, Gitea, or the model.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -65,6 +66,9 @@ MCP_ACCEPT = {"Accept": "application/json, text/event-stream"}
 
 GITEA = UpstreamServer(
     name="gitea-mcp", prefix="gitea", url="http://127.0.0.1:1/mcp", audience="gitea-mcp"
+)
+MAIL = UpstreamServer(
+    name="mail-mcp", prefix="mail", url="http://127.0.0.1:1/mcp", audience="mail-mcp"
 )
 
 
@@ -1139,3 +1143,60 @@ def test_the_shipped_graph_names_the_mailbox_the_server_uses(tmp_path: Path) -> 
 
     assert row is not None, f"no mailbox resource named {desk}"
     assert row.owner_human_id, "the row needs an owner for the subject rule"
+
+
+def test_the_mail_tool_surface_matches_the_graph_rows(tmp_path: Path) -> None:
+    """The server's names and arguments and the graph's rows cannot drift apart.
+
+    The gateway re-exports only tools the graph knows, and the graph decides the
+    resource kind each tool is authorized against, so the two trees have to
+    agree. A rename on either side fails here, the way
+    `test_the_shipped_graph_names_the_mailbox_the_server_uses` holds the mailbox
+    name. Each tool's declared arguments are fed to the extractor for its row's
+    resource kind, so a read that stops naming its mailbox is a failure and not a
+    quiet unknown resource at decision time.
+    """
+    from servers.mail_mcp.server import TOOL_NAMES, ServerSettings, build_server
+
+    server = build_server(mail=object(), settings=ServerSettings())
+    declared = {
+        tool.name: set(tool.input_schema.get("properties") or {})
+        for tool in asyncio.run(server.list_tools())
+    }
+    with load_graph(SEED, tmp_path / "warrant.db") as graph:
+        rows = {tool.name: tool for tool in graph.tools() if tool.server == "mail"}
+
+    assert set(declared) == set(TOOL_NAMES)
+    assert set(declared) == set(rows), "a server tool has no graph row, or the reverse"
+    for name, arguments in declared.items():
+        row = rows[name]
+        probe = dict.fromkeys(arguments, "probe@acme.test")
+        assert extract_resource(row.resource_kind, probe) is not None, (
+            f"{name} declares no argument the {row.resource_kind} extractor reads"
+        )
+
+
+async def test_an_honest_get_message_by_the_desk_owners_agent_is_allowed(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """The mailbox is the resource `get_message` names, so the desk owner passes.
+
+    With only a `message_id` argument the extractor resolved nothing, the mailbox
+    was unknown, and the subject rule refused the honest read. This runs the
+    shipped policy set through the real engine, so the verdict is the rule's.
+    """
+    from warrant.engine import CedarEngine
+
+    log = DecisionLog(tmp_path / "runs")
+    engine = CedarEngine(policies_dir=REPO / "policies", graph=graph_db, decision_log=log)
+    gateway = make_gateway(tmp_path, graph_db, engine, servers=[MAIL], upstream=FakeUpstream())
+
+    result = await gateway.call_tool(
+        "mail.get_message",
+        {"mailbox": "support@acme.test", "message_id": "prior@acme.test"},
+        claims=claims_for(sub="h-bob", act="support-agent"),
+        token="",
+    )
+
+    assert result.is_error is False
+    assert log.read("task-1")[-1].verdict is Verdict.allow

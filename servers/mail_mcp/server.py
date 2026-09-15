@@ -174,13 +174,13 @@ def _register_tools(server: MCPServer, mail: Mail, policy: BearerPolicy) -> None
         name="get_message",
         description="One message with its full body and the source block for its sender.",
     )
-    async def get_message(message_id: str, ctx: Context) -> MessageDetail:
+    async def get_message(mailbox: str, message_id: str, ctx: Context) -> MessageDetail:
         return await _audited(
             "get_message",
             ctx,
-            {"message_id": message_id},
+            {"mailbox": mailbox, "message_id": message_id},
             policy,
-            lambda claims: mail.get_message(message_id),
+            lambda claims: mail.get_message(mailbox, message_id),
         )
 
     @server.tool(

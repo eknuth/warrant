@@ -21,7 +21,14 @@ from typing import Any
 import httpx
 
 from .links import extract_links
-from .mail import MailError, MailSettings, normalize_since, parse_created
+from .mail import (
+    MAX_SEARCH_PAGES,
+    SEARCH_PAGE,
+    MailError,
+    MailSettings,
+    normalize_since,
+    parse_created,
+)
 from .models import SentMessage
 
 # Re-exported so a caller can name the record it gets back from this module.
@@ -37,28 +44,40 @@ def sent_messages(
     settings: MailSettings | None = None,
     client: httpx.Client | None = None,
 ) -> list[SentMessage]:
-    """Every message the desk address sent, oldest first, at or after `since_ts`.
+    """Every message whose exact From address is the desk address, oldest first.
 
     `since_ts` takes a datetime, an ISO 8601 string, or Unix seconds; None means
     everything Mailpit still holds. A client may be passed in, which is what lets
     a test hand this function a stub transport; the caller owns that client.
 
-    The filter is on the timestamp Mailpit recorded for the received message, not
-    on a clock read here, so a message that arrived just after the reset is
-    excluded by the reset's own start rather than by a race.
+    Mailpit's `from:` search is a substring match, so `evil@support@acme.test.evil`
+    comes back for a search on `support@acme.test`. Every candidate's stored
+    `From` address is compared again, in full, and only an exact match is kept.
+    The search is also paged until Mailpit's reported match count is consumed,
+    because one response would otherwise cap the result at the default 50.
+
+    The time filter is on the timestamp Mailpit recorded for the received
+    message, not on a clock read here, so a message that arrived just after the
+    reset is excluded by the reset's own start rather than by a race. That
+    timestamp is `Created`, Mailpit's receipt time; `SentMessage.ts` is the
+    message's `Date` header, the sender's own clock, which can sit up to a
+    second before `Created` and so just below the boundary.
     """
     settings = settings or MailSettings()
     since = normalize_since(since_ts)
+    wanted_from = settings.mail_from.strip().lower()
     owns_client = client is None
     http = client or httpx.Client(base_url=settings.mail_url.rstrip("/"), timeout=15.0)
     try:
-        summaries = _search(http, f"from:{settings.mail_from}")
+        summaries = _search_all(http, f"from:{settings.mail_from}")
         found: list[SentMessage] = []
         for summary in summaries:
             created = parse_created(summary.get("Created") or summary.get("Date"))
             if since is not None and (created is None or created < since):
                 continue
             detail = _get_json(http, f"{MESSAGE_PATH}/{summary.get('ID', '')}")
+            if _from_address(detail).strip().lower() != wanted_from:
+                continue
             found.append(_sent_from(detail))
         found.sort(key=lambda message: message.ts or datetime.min.replace(tzinfo=UTC))
         return found
@@ -67,9 +86,31 @@ def sent_messages(
             http.close()
 
 
-def _search(client: httpx.Client, query: str) -> list[dict[str, Any]]:
-    data = _get_json(client, SEARCH_PATH, query=query)
-    return [item for item in data.get("messages") or [] if isinstance(item, dict)]
+def _from_address(item: dict[str, Any]) -> str:
+    """The address in a stored message's `From`, or an empty string."""
+    entry = item.get("From")
+    return str(entry.get("Address", "")) if isinstance(entry, dict) else ""
+
+
+def _search_all(client: httpx.Client, query: str) -> list[dict[str, Any]]:
+    """Every message Mailpit's search reports for `query`, across its pages.
+
+    The same walk `MailpitMail._search_all` does for the server, against the
+    synchronous client this module hands its callers.
+    """
+    found: list[dict[str, Any]] = []
+    start = 0
+    for _page in range(MAX_SEARCH_PAGES):
+        data = _get_json(client, SEARCH_PATH, query=query, start=start, limit=SEARCH_PAGE)
+        page = [item for item in data.get("messages") or [] if isinstance(item, dict)]
+        if not page:
+            break
+        found.extend(page)
+        reported = data.get("messages_count")
+        if isinstance(reported, int) and len(found) >= reported:
+            break
+        start += len(page)
+    return found
 
 
 def _get_json(client: httpx.Client, path: str, **params: Any) -> Any:
