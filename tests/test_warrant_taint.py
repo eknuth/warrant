@@ -225,19 +225,67 @@ def test_the_target_is_named_by_the_first_call_that_resolves_one(
 
     state.name_target("repo", "repo-acme-widgets")
 
-    inside = state.context_for(make_request(resource="repo-acme-widgets"), {})
-    outside = state.context_for(make_request(resource="repo-acme-vault"), {})
+    inside = state.context_for(make_request(resource="repo-acme-widgets"), {}, resource_kind="repo")
+    outside = state.context_for(make_request(resource="repo-acme-vault"), {}, resource_kind="repo")
     assert inside["target_outside_task"] is False
     assert outside["target_outside_task"] is True
+
+
+def test_a_resource_of_another_kind_is_not_the_named_target(make_request: MakeRequest) -> None:
+    """The target is the `(kind, name)` pair, not the name alone."""
+    state = TaskState(task_id="task-1")
+    state.name_target("repo", "shared-id")
+
+    same_pair = state.context_for(make_request(resource="shared-id"), {}, resource_kind="repo")
+    other_kind = state.context_for(make_request(resource="shared-id"), {}, resource_kind="db_table")
+
+    assert same_pair["target_outside_task"] is False
+    assert other_kind["target_outside_task"] is True
 
 
 def test_a_task_with_no_named_target_reports_nothing_outside(make_request: MakeRequest) -> None:
     state = TaskState(task_id="task-1")
 
-    assert (
-        state.context_for(make_request(resource="repo-acme-vault"), {})["target_outside_task"]
-        is False
+    context = state.context_for(make_request(resource="repo-acme-vault"), {}, resource_kind="repo")
+    assert context["target_outside_task"] is False
+
+
+def test_the_resource_exclusion_ignores_case(
+    make_request: MakeRequest, make_source: MakeSource
+) -> None:
+    """`Acme/Widgets` is the same value as `acme/widgets` for the overlap scan."""
+    state = TaskState(task_id="task-1")
+    read(
+        state,
+        make_source(system="gitea", kind="issue", id="acme/widgets#1"),
+        {"body": "the repository acme/widgets is the one"},
     )
+
+    context = state.context_for(
+        make_request(action_kind=ActionKind.write, tool="gitea.create_issue_comment"),
+        {"repo": "Acme/Widgets"},
+        exclude=["acme/widgets"],
+        resource_kind="repo",
+    )
+
+    assert context["overlap_sources"] == set()
+
+
+def test_a_secret_in_the_resource_argument_is_still_scanned(make_request: MakeRequest) -> None:
+    """The exclusion is for the overlap scan. The secret scan keeps every value."""
+    secret = "sk_live_abc"
+    state = TaskState(task_id="task-1")
+    state.on_read(payload={"secrets": [secret]})
+
+    context = state.context_for(
+        make_request(action_kind=ActionKind.send, tool="mail.send_reply"),
+        {"to": secret, "body": "hello"},
+        exclude=[secret],
+        resource_kind="mailbox",
+    )
+
+    assert context["overlap_sources"] == set()
+    assert context["args_touch_secret"] is True
 
 
 def test_string_values_walks_nested_arguments_and_skips_non_strings() -> None:

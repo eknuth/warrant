@@ -111,10 +111,6 @@ def _gitea_path(source_id: str) -> str:
     return path if separator else rest
 
 
-LEDGER_NAME = "provenance.jsonl"
-LEDGER_DIR = "provenance"
-
-
 def ledger_dir(root: Path | str, task_id: str) -> Path:
     """The directory holding one task's per-actor ledger files."""
     return task_dir(root, task_id) / LEDGER_DIR

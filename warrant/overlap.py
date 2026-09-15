@@ -65,6 +65,72 @@ _KEY_SHAPED = re.compile(r"(?:sk_live_|ghp_)[A-Za-z0-9_]{4,}|AKIA[A-Z0-9]{8,}")
 
 _IDENTIFIER_PATTERNS = (_URL, _EMAIL, _REPO, _ISSUE, _KEY_SHAPED)
 
+# A slash between two common English words is prose, not a repository. The
+# shapes that showed up in a run were the conjunctions and the verb pairs a
+# sentence uses: `and/or`, `read/write`, and `either/or`. A repository-shaped
+# token is an identifier only when both halves are outside this set, so a pair
+# of ordinary words is not a hit. The set is the function words and the verb
+# pairs, not a dictionary, and a pair it does not hold can still pass; the
+# false-positive cost is stated in `docs/provenance.md`.
+_COMMON_WORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "both",
+        "but",
+        "by",
+        "do",
+        "either",
+        "else",
+        "for",
+        "from",
+        "if",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "neither",
+        "no",
+        "nor",
+        "not",
+        "of",
+        "off",
+        "on",
+        "or",
+        "over",
+        "per",
+        "read",
+        "read-only",
+        "readonly",
+        "so",
+        "than",
+        "that",
+        "the",
+        "then",
+        "these",
+        "this",
+        "those",
+        "to",
+        "under",
+        "up",
+        "via",
+        "vs",
+        "was",
+        "were",
+        "with",
+        "without",
+        "write",
+        "yes",
+        "yet",
+    }
+)
+
 _WORD = re.compile(r"[a-z0-9]+")
 
 
@@ -133,7 +199,9 @@ def identifiers(text: str) -> list[str]:
     """Every identifier-shaped token in `text`, in the order the patterns find them.
 
     The text is normalized first, so the tokens are lowercase and a caller
-    matching them against a normalized source compares like with like.
+    matching them against a normalized source compares like with like. A
+    repository-shaped token whose two halves are both common English words is
+    skipped, so `and/or` is not an identifier.
     """
     text = normalize(text)
     found: list[str] = []
@@ -143,9 +211,19 @@ def identifiers(text: str) -> list[str]:
             token = match.group(0)
             if len(token) < 5 or token in seen:
                 continue
+            if pattern is _REPO and not _repo_shaped(token):
+                continue
             seen.add(token)
             found.append(token)
     return found
+
+
+def _repo_shaped(token: str) -> bool:
+    """Whether a `left/right` token is an identifier rather than a word pair."""
+    left, separator, right = token.partition("/")
+    if not separator:
+        return False
+    return not (left in _COMMON_WORDS and right in _COMMON_WORDS)
 
 
 def identifier_hits(source: str, arguments: str, *, limit: int = 8) -> list[str]:

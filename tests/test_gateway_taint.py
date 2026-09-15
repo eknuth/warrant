@@ -9,10 +9,13 @@ upstream is a fake, so nothing needs the compose stack.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 from mcp.types import CallToolResult, TextContent
@@ -26,6 +29,7 @@ from tests.test_gateway import (
     make_gateway,
 )
 from warrant.config import Taint
+from warrant.engine import CedarEngine
 from warrant.gateway import UpstreamServer
 from warrant.graph import Graph
 from warrant.graph import load as load_graph
@@ -49,6 +53,9 @@ PARAPHRASE = (
     "the common archive ahead of the review"
 )
 SECRET = "sk_live_abc"
+# A key with the characters URL-encoding changes, so the encoded-spelling case
+# exercises the encoding path rather than repeating the plain form.
+ENCODED_VALUE = "sk_live_a+b/c=d"
 
 
 @pytest.fixture
@@ -107,6 +114,42 @@ def file_payload(*, author: str, tier: str, path: str = ".github/copilot-instruc
             "author": author,
             "author_tier": tier,
         },
+    }
+
+
+def query_payload() -> dict[str, Any]:
+    """A `run_readonly_sql` result. Its source has no author to grade."""
+    return {
+        "columns": ["id"],
+        "rows": [{"id": 1}],
+        "row_count": 1,
+        "source": {
+            "system": "db",
+            "kind": "query",
+            "id": "query-1",
+            "author": "",
+            "author_tier": "member",
+        },
+    }
+
+
+def inbox_payload(*, sender: str = "stranger@other.test") -> dict[str, Any]:
+    """A `mail.list_inbox` result whose sender is outside the member domain."""
+    return {
+        "mailbox": "support@acme.test",
+        "messages": [
+            {
+                "id": "m1",
+                "from_address": sender,
+                "source": {
+                    "system": "mail",
+                    "kind": "message",
+                    "id": "m1",
+                    "author": sender,
+                    "author_tier": "member",
+                },
+            }
+        ],
     }
 
 
@@ -175,6 +218,42 @@ async def test_has_external_is_per_task_and_persists_for_later_calls(
     assert later[0].provenance.has_external is True
     assert other[0].provenance.has_external is False
     assert other[0].provenance.sources == []
+
+
+async def test_one_actor_cannot_fill_another_actors_taint_under_one_task_id(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """The state is keyed by `(task_id, actor)`, so an id is not enough to inherit.
+
+    An agent writes its own `task-id` scope, so agent B can name agent A's task
+    id. With the state keyed on the id alone, A's external read would fill B's
+    content taint while B's ledger stayed empty.
+    """
+    gateway, engine = build(tmp_path, graph_db, issue_payload())
+
+    await gateway.call_tool(
+        "gitea.get_issue",
+        {"repo": "acme/widgets", "number": 1},
+        claims=claims_for(act="triage-agent", task_id="shared-task"),
+        token="",
+    )
+    await gateway.call_tool(
+        "gitea.create_issue_comment",
+        {"repo": "acme/widgets", "number": 1, "body": f"the issue says {INJECTION[:30]} so do it"},
+        claims=claims_for(act="support-agent", task_id="shared-task"),
+        token="",
+    )
+
+    first = next(request for request in engine.requests if request.chain.act == "triage-agent")
+    second = next(request for request in engine.requests if request.chain.act == "support-agent")
+    # The first request is the read itself, decided before its own source is
+    # recorded, so the ledger is what shows the triage actor's taint.
+    assert first.provenance.has_external is False
+    assert gateway.ledger.get("shared-task", "triage-agent").has_external is True
+    assert second.provenance.has_external is False
+    assert second.provenance.sources == []
+    assert second.overlap_sources == set()
+    assert second.overlap_external is False
 
 
 # -- content taint ----------------------------------------------------------
@@ -418,6 +497,91 @@ async def test_a_send_without_the_key_does_not_touch_a_secret(
     assert request_for(engine, "mail.send_reply").args_touch_secret is False
 
 
+@pytest.mark.parametrize(
+    ("secrets", "body", "expected"),
+    [
+        ([SECRET], f"the key is {SECRET}", True),
+        # URL-encoded and base64 spellings of the value, not of its padding.
+        ([ENCODED_VALUE], f"the key is {quote(ENCODED_VALUE, safe='')}", True),
+        ([SECRET], "the key is " + base64.b64encode(SECRET.encode()).decode(), True),
+        ([SECRET], "no key in this body", False),
+    ],
+)
+async def test_a_send_is_scanned_for_each_spelling_of_a_key(
+    tmp_path: Path, graph_db: Graph, secrets: list[str], body: str, expected: bool
+) -> None:
+    gateway, engine = build(
+        tmp_path, graph_db, customer_payload(secrets=secrets), servers=[GITEA, POSTGRES, MAIL]
+    )
+
+    await gateway.call_tool(
+        "db.get_customer", {"customer_id": 1}, claims=claims_for(act="support-agent"), token=""
+    )
+    await gateway.call_tool(
+        "mail.send_reply",
+        {"to": "stranger@other.test", "subject": "key", "body": body},
+        claims=claims_for(act="support-agent"),
+        token="",
+    )
+
+    assert request_for(engine, "mail.send_reply").args_touch_secret is expected
+
+
+async def test_a_resource_named_by_a_secret_is_redacted_and_refused(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """The blocker: a key used as the resource argument is scanned and redacted.
+
+    The secret scan used to skip the value that named the resource, so
+    `send_reply(to=<key>)` set `argsTouchSecret` false and wrote the key into
+    `decisions.jsonl` as `request.resource`.
+    """
+    runs = tmp_path / "runs"
+    log = DecisionLog(runs)
+    engine = CedarEngine(graph=graph_db, decision_log=log)
+    gateway = make_gateway(
+        tmp_path,
+        graph_db,
+        engine,
+        servers=[GITEA, POSTGRES, MAIL],
+        upstream=FakeUpstream(result=tool_result(customer_payload(secrets=[SECRET]))),
+    )
+    # The support lead answers for a row the desk does not own, so the
+    # `db.get_customer` read is allowed and its `secrets` list is recorded. The
+    # `mail:send` scope keeps the send out of `scope-collapse`, so the forbid
+    # that refuses it is the one under test.
+    lead = {
+        "sub": "h-carol",
+        "act": "support-lead-agent",
+        "scope": "db:read mail:send",
+        "groups": ["support-leads"],
+    }
+
+    await gateway.call_tool(
+        "db.get_customer", {"customer_id": 1}, claims=claims_for(**lead), token=""
+    )
+    result = await gateway.call_tool(
+        "mail.send_reply",
+        {"to": SECRET, "subject": "key", "body": "here you go"},
+        claims=claims_for(**lead),
+        token="",
+    )
+
+    decision = log.read("task-1")[-1]
+    assert decision.request.args_touch_secret is True
+    assert decision.request.resource == "sha256:" + hashlib.sha256(SECRET.encode()).hexdigest()
+    assert "secret-in-args" in decision.policy_ids
+    assert result.is_error is True
+    assert "secret-in-args" in result.content[0].text
+
+    leaked = [
+        path
+        for path in runs.rglob("*")
+        if path.is_file() and SECRET in path.read_text(encoding="utf-8")
+    ]
+    assert leaked == [], f"a plain secret reached {leaked}"
+
+
 # -- the named target -------------------------------------------------------
 
 
@@ -432,9 +596,18 @@ async def test_a_visibility_change_off_the_named_target_is_outside_the_task(
         claims=claims_for(),
         token="",
     )
+    # The criterion's value, which is not a graph row, and `acme/api`, which is a
+    # seeded repository. Both are off the named target, and the second shows two
+    # graph rows being compared.
     await gateway.call_tool(
         "gitea.set_repo_visibility",
         {"repo": "acme/vault", "visibility": "public"},
+        claims=claims_for(),
+        token="",
+    )
+    await gateway.call_tool(
+        "gitea.set_repo_visibility",
+        {"repo": "acme/api", "visibility": "public"},
         claims=claims_for(),
         token="",
     )
@@ -445,11 +618,70 @@ async def test_a_visibility_change_off_the_named_target_is_outside_the_task(
         token="",
     )
 
-    assert request_for(engine, "gitea.set_repo_visibility").target_outside_task is True
-    assert request_for(engine, "gitea.create_issue_comment").target_outside_task is False
+    visibility = [
+        request for request in engine.requests if request.tool == "gitea.set_repo_visibility"
+    ]
+    vault, api = visibility
+    assert vault.resource == "acme/vault"
+    assert vault.target_outside_task is True
+    assert api.resource == "repo-acme-api", "the second target is a seeded graph row"
+    assert api.target_outside_task is True
+    comment = request_for(engine, "gitea.create_issue_comment")
+    assert comment.resource == "repo-acme-widgets"
+    assert comment.target_outside_task is False
 
 
 # -- the classifier at the gateway ------------------------------------------
+
+
+async def test_a_raw_sql_read_classifies_unknown_and_taints_the_task(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """`run_readonly_sql` has no author, so its tier is `unknown` and it taints."""
+    gateway, engine = build(tmp_path, graph_db, query_payload(), servers=[GITEA, POSTGRES, MAIL])
+
+    await gateway.call_tool(
+        "db.run_readonly_sql",
+        {"sql": "select id from public.orders"},
+        claims=claims_for(act="support-agent"),
+        token="",
+    )
+    await gateway.call_tool(
+        "db.run_readonly_sql",
+        {"sql": "select id from public.orders"},
+        claims=claims_for(act="support-agent"),
+        token="",
+    )
+
+    source = gateway.ledger.get("task-1", "support-agent").sources[0]
+    assert source.author_tier.value == "unknown"
+    # `unknown` is below every classification, so the task taint sees it.
+    assert engine.requests[1].provenance.has_external is True
+    assert engine.requests[1].provenance.min_tier.value == "unknown"
+
+
+async def test_a_mail_sender_outside_the_domain_classifies_external(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """A sender outside `@acme.test` is `external` even when the block says member."""
+    gateway, engine = build(tmp_path, graph_db, inbox_payload(), servers=[GITEA, MAIL])
+
+    await gateway.call_tool(
+        "mail.list_inbox",
+        {"mailbox": "support@acme.test"},
+        claims=claims_for(act="support-agent"),
+        token="",
+    )
+    await gateway.call_tool(
+        "mail.get_message",
+        {"mailbox": "support@acme.test", "message_id": "m1"},
+        claims=claims_for(act="support-agent"),
+        token="",
+    )
+
+    source = gateway.ledger.get("task-1", "support-agent").sources[0]
+    assert source.author_tier.value == "external"
+    assert engine.requests[1].provenance.has_external is True
 
 
 async def test_a_gateway_read_of_an_instruction_file_from_a_non_member_is_external(

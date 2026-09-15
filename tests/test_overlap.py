@@ -63,6 +63,16 @@ def test_an_identifier_that_appeared_in_the_source_is_a_hit() -> None:
     assert identifier_hits(source, "copy it out of acme/other now") == []
 
 
+def test_a_slash_between_two_common_words_is_not_a_repository() -> None:
+    """`and/or` is prose. The identifier rule is for URLs and repo-shaped names."""
+    source = "the flag is and/or read/write either/or and the repo is acme/vault"
+
+    assert identifier_hits(source, "choose and/or") == []
+    assert identifier_hits(source, "open read/write") == []
+    assert identifier_hits(source, "either/or") == []
+    assert identifier_hits(source, "the repo is acme/vault") == ["acme/vault"]
+
+
 def test_an_identifier_hit_covers_a_url_an_email_and_an_issue_number() -> None:
     source = "reach ops@acme.test about issue #4321 or read https://runbooks.test/vault"
 

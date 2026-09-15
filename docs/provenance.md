@@ -20,9 +20,9 @@ when the write's words are the agent's own.
 Content taint (`provenance.overlapSources`, `provenance.overlapExternal`) is
 computed for one write or send from that call's argument strings. It names the
 sources whose text overlaps those strings, and whether any of them is external
-tier. It is precise and costs a task nothing until its arguments carry text from
-a source. It is blind to a paraphrase, which is the miss stated at the end of
-this file.
+tier. It is the narrow rule: it fires only when the arguments share text with a
+source. It is not free of false positives, and the cost is stated at the end of
+this file. It is blind to a paraphrase, which is the other miss stated there.
 
 `argsTouchSecret` is content taint restricted to secret values. `targetOutsideTask`
 is the target comparison. Neither is a taint tier.
@@ -63,18 +63,24 @@ instructions is a prompt surface, and its tier follows who last wrote it.
 
 - `substring`: an exact shared run of 24 or more characters.
 - `identifier`: a URL, an email, a repository name, an issue number, or a
-  key-shaped token that appears in both the arguments and the source.
+  key-shaped token that appears in both the arguments and the source. A
+  repository-shaped token whose two halves are both common English words is not
+  an identifier, so `and/or`, `read/write`, and `either/or` do not match.
 - `ngram`: more than three shared word 5-grams.
 
 Both texts are lowercased and their whitespace is collapsed before matching, and
 one source's text is capped at 64 KB. A hit records the source id, its kind, and
-a sample.
+a sample. A shared 24-character run is a hit whether or not it is meaningful: a
+license header, a signature block, or any boilerplate the source and the write
+both carry counts, and the word-pair rejection above is a list rather than a
+grammar, so a pair it does not hold can still match.
 
-The scan excludes the argument value that named the call's own resource. A write
-has to name the repository or mailbox it touches, and that name appears in
-everything read from it, so counting it would make every write overlap every
-read of its own target. Only the exact value is dropped. The body is still
-scanned.
+The overlap scan excludes the argument value that named the call's own resource.
+A write has to name the repository or mailbox it touches, and that name appears
+in everything read from it, so counting it would make every write overlap every
+read of its own target. The comparison is after normalization, so `Acme/Widgets`
+is dropped like `acme/widgets`. The body is still scanned. The secret scan keeps
+the value, and the section on secrets says why.
 
 ## The target the task named
 
@@ -82,6 +88,8 @@ A task's subject is taken from the first call whose arguments resolve to a
 resource. `gitea.get_issue(repo="acme/widgets", number=1)` names
 `repo-acme-widgets`, and that is the task's target for the rest of the task. A
 later call whose resolved resource is not the target sets `targetOutsideTask`.
+The comparison is over the kind and the name, so a row of another kind that
+happens to share an id is not read as the target.
 
 Two costs of this choice, said here rather than found in a run:
 
@@ -103,12 +111,18 @@ The secret set is filled from the `secrets` list a database result carries, from
 the values in a file whose name says it holds secrets (`*.env`, `secrets*`), and
 from key-shaped tokens (`sk_live_`, `ghp_`, `AKIA`) found in any file read. A
 write or send whose argument strings contain a secret as a substring,
-URL-encoded, or base64-encoded sets `argsTouchSecret`.
+URL-encoded, or base64-encoded sets `argsTouchSecret`. The secret scan sees every
+argument value, including the one that names the call's resource. The overlap
+scan drops the resource value so a write does not overlap its own target; the
+secret scan cannot drop it, because a secret used as the resource name is a leak.
 
 The plain values stay in the process. Each one also has a SHA-256 digest, and
 the digest is what the decision log carries. A sample of source text that
-contains a secret is redacted before it is recorded, so the overlap evidence a
-decision line carries holds no value.
+contains a secret is redacted before it is recorded, and a resolved resource that
+contains a secret is replaced with its digest before it enters the request, so
+the audit line for the call carries the digest and a resource that names no row
+in the graph. A file under the run directory therefore carries no plain secret
+value.
 
 ## One `TaskState` per task and actor
 
@@ -165,15 +179,22 @@ something external. It is also the broad rule: once anything external has been
 read, every write or send that leaves the named target is refused, including the
 honest ones. That cost is what the quiet control scenario measures.
 
-Content taint is cheap on a quiet control. A task that read only its own
-material produces no overlap, and a write's arguments are matched against the
-sources in milliseconds. It is precise: a hit names the source and the kind of
-match, so a reader can see what was copied. It does not catch a paraphrase. The
-paraphrase shares no 24-character run, no identifier, and fewer than four shared
-5-grams, and the tests in `tests/test_overlap.py` and
-`tests/test_gateway_taint.py` assert that it produces no hit. A model that
-restated the injection in its own words is the case the content rule misses by
-construction, and the miss is pinned rather than hidden.
+Content taint costs nothing only when there is nothing to match. A task that
+read no source has no text for a hit, and the scan is milliseconds of string
+work. It is not free of false positives. A shared run of 24 characters or more
+is a hit, and a license header, a signature block, or any boilerplate the source
+and the write both carry is 24 characters, so an honest write that repeats a
+source's own phrasing is refused. A slash between two common words is a word
+pair rather than a repository, and the identifier rule rejects the pairs it
+knows, so `and/or` and `read/write` do not fire; a pair outside that list still
+can. A hit names the source and the kind of match, so a reader can see what was
+matched and judge whether it was copied.
+
+Content taint does not catch a paraphrase. The paraphrase shares no 24-character
+run, no identifier, and fewer than four shared 5-grams, and the tests in
+`tests/test_overlap.py` and `tests/test_gateway_taint.py` assert that it produces
+no hit. A model that restated the injection in its own words is the case the
+content rule misses by construction, and the miss is pinned rather than hidden.
 
 Neither rule sees data flow through the model. Warrant observes the value a read
 returned and the strings a write is about to send. It does not observe what the

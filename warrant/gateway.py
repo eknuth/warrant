@@ -545,6 +545,19 @@ class Gateway:
             provenance = provenance.model_copy(update={"task_taint": False})
         resource_name = extract_resource(row.resource_kind, arguments)
         resource = resolve_resource(self.graph, row.resource_kind, resource_name)
+
+        # The task's named target comes from its first exchange, which here is
+        # the first call whose arguments resolve to a resource. `docs/provenance.md`
+        # records why the call's arguments name it rather than a token claim.
+        state = self._task_state(chain.task_id, chain.act)
+        # A resource whose name is a secret the task read is replaced with the
+        # secret's digest before it enters the request. That value names no row
+        # in the graph, so the engine already treats it as unknown, and the
+        # decision line carries the digest rather than the value. `redact` is a
+        # no-op when no secret matches, so an ordinary resource is untouched.
+        resource = state.redact(resource)
+        if not state.targets_named:
+            state.name_target(row.resource_kind, resource)
         request = AuthzRequest(
             chain=chain,
             tool=name,
@@ -555,13 +568,12 @@ class Gateway:
             ts=self._now(),
         )
 
-        # The task's named target comes from its first exchange, which here is
-        # the first call whose arguments resolve to a resource. `docs/provenance.md`
-        # records why the call's arguments name it rather than a token claim.
-        state = self._task_state(chain.task_id, chain.act)
-        if not state.targets_named:
-            state.name_target(row.resource_kind, resource)
-        context = state.context_for(request, arguments, exclude=[resource_name or ""])
+        context = state.context_for(
+            request,
+            arguments,
+            exclude=[resource_name or ""],
+            resource_kind=row.resource_kind,
+        )
         request.overlap_sources = context["overlap_sources"]
         request.overlap_external = context["overlap_external"]
         request.args_touch_secret = context["args_touch_secret"]

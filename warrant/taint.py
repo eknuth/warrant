@@ -154,6 +154,7 @@ class TaskState:
         arguments: Mapping[str, Any],
         *,
         exclude: Iterable[str] = (),
+        resource_kind: str = "",
     ) -> dict[str, Any]:
         """The taint and target fields for one proposed call.
 
@@ -161,23 +162,28 @@ class TaskState:
         The target comparison still runs, so a read that leaves the named target
         is visible in the log even though no shipped rule reads it for a read.
 
-        `exclude` names argument values that are the call's own target. A write
-        has to name the resource it touches, so a `repo` argument that repeats
-        the repository the task is working on is not evidence that the write
-        copied anything: leaving it in made every comment on a repository
-        identifier-overlap every issue read from it, which is the whole
-        paraphrase miss turned back into a hit. The gateway passes the resource
-        name it resolved.
+        The two scans see different strings. The overlap scan honors `exclude`,
+        which names the argument value that is the call's own target: a write has
+        to name the resource it touches, and a `repo` argument that repeats the
+        repository the task is working on is not evidence that the write copied
+        anything. The exclusion is compared after normalization, so
+        `Acme/Widgets` is the same value as `acme/widgets`. The secret scan sees
+        every argument string, excluded or not, because a secret in the value
+        that names the resource is exactly the leak that scan exists to catch.
+
+        `resource_kind` is the graph's kind for the call, and the target
+        comparison is over the `(kind, name)` pair.
         """
-        excluded = set(exclude)
-        strings = [value for value in string_values(arguments) if value not in excluded]
+        excluded = {normalize(value) for value in exclude}
+        all_strings = list(string_values(arguments))
+        overlap_strings = [value for value in all_strings if normalize(value) not in excluded]
         scanned = request.action_kind in SCANNED_KINDS
         overlap_sources: set[str] = set()
         overlap_external = False
         details: list[dict[str, str]] = []
 
-        if scanned and self.content_taint and strings:
-            arguments_text = normalize(" ".join(strings))
+        if scanned and self.content_taint and overlap_strings:
+            arguments_text = normalize(" ".join(overlap_strings))
             for read in self.sources.values():
                 hits = find_hits(read.text, arguments_text)
                 if not hits:
@@ -194,7 +200,8 @@ class TaskState:
                     for hit in hits
                 )
 
-        matched = self._secret_matches(strings) if scanned else []
+        # Every string, including the value that named the resource.
+        matched = self._secret_matches(all_strings) if scanned else []
         for secret in matched:
             details.append(
                 {
@@ -208,12 +215,16 @@ class TaskState:
             "overlap_sources": overlap_sources,
             "overlap_external": overlap_external,
             "args_touch_secret": bool(matched),
-            "target_outside_task": self.target_outside_task(request.resource),
+            "target_outside_task": self.target_outside_task(resource_kind, request.resource),
             "overlap_details": details,
         }
 
-    def target_outside_task(self, resource: str) -> bool:
+    def target_outside_task(self, kind: str, name: str) -> bool:
         """Whether a call's resolved resource leaves the target the task named.
+
+        The comparison is over the `(kind, name)` pair. A name is unique within a
+        kind, and the graph can hold a row of another kind with the same id, so a
+        name-only comparison would read that other row as the task's target.
 
         With no named target the answer is false: a task that never named a
         subject has nothing for a call to be outside of. That is the permissive
@@ -222,7 +233,7 @@ class TaskState:
         """
         if not self.named_targets:
             return False
-        return resource not in {ref.name for ref in self.named_targets}
+        return (kind, name) not in {(ref.kind, ref.name) for ref in self.named_targets}
 
     # -- secrets -----------------------------------------------------------
 

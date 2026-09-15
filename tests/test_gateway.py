@@ -82,14 +82,16 @@ def claims_for(
     task_id: str | None = "task-1",
     audience: str = "warrant",
     exp_offset: int = 300,
+    scope: str = "gitea:read",
+    groups: list[str] | None = None,
 ) -> oidc.Claims:
     payload: dict[str, Any] = {
         "sub": sub,
         "act": {"sub": act},
         "azp": act,
         "aud": [audience],
-        "scope": "gitea:read",
-        "groups": ["owners"],
+        "scope": scope,
+        "groups": groups if groups is not None else ["owners"],
         "exp": int(time.time()) + exp_offset,
         "iss": "https://issuer.test/realms/warrant",
     }

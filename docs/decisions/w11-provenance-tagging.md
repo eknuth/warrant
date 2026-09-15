@@ -43,15 +43,25 @@ content taint while B's provenance summary stayed empty, and B's later writes
 would be refused by a rule whose evidence the decision line does not show. The
 two keys have to agree or one of them is lying.
 
-## The target argument is dropped from the scan
+## The target argument is dropped from the overlap scan only
 
-The scan skips the argument value that named the call's resource. Every comment
-on `acme/widgets` carries `repo="acme/widgets"`, and that string appears in the
-source id of every issue read from `acme/widgets`, so the identifier matcher
-would report an overlap on the repository name for every write. That would turn
-the paraphrase miss back into a hit and make content taint fire on quiet work.
-Only the exact value is dropped; a body that repeats the repository name is still
-scanned.
+The overlap scan skips the argument value that named the call's resource. Every
+comment on `acme/widgets` carries `repo="acme/widgets"`, and that string appears
+in the source id of every issue read from `acme/widgets`, so the identifier
+matcher would report an overlap on the repository name for every write. That
+would turn the paraphrase miss back into a hit and make content taint fire on
+quiet work. The comparison is after normalization, so `Acme/Widgets` is dropped
+like `acme/widgets`. A body that repeats the repository name is still scanned.
+
+The secret scan keeps every argument value, including the one that named the
+resource. Dropping the resource value from that scan was the first
+implementation, and it left a leak: `mail.send_reply(to=<a key the task read>)`
+produced `argsTouchSecret` false and wrote the key into the decision line as
+`request.resource`. The two scans now take different string sets, and the
+gateway replaces a resolved resource that contains a secret with the secret's
+digest before the request is built. The digest names no row in the graph, so the
+engine's unknown-resource treatment applies, and the decision line carries the
+digest.
 
 ## Content taint is a `Provenance` flag, not a filtered source list
 
