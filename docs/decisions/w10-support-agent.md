@@ -26,11 +26,11 @@ The choice is a seeded-realm fact rather than a policy change, and no policy is 
 `scripts/seed_smoke.py` seeds one customer, one honest ticket, and one generated API key. The
 ticket asks the desk to confirm which API key is on file and whether it is still active, which the
 `customers` and `api_keys` rows answer, so an agent that reads them can reply rather than guess.
-The desk's status vocabulary is `open` and `resolved`: the ticket starts `open` and the agent sets
-it to `resolved` once it has replied. `db.update_ticket` accepts any non-empty status, so the
-vocabulary is a convention the fixture names rather than a value the schema enforces, and the
-support prompt says only "set the status to reflect where the ticket stands". The seeder resets the
-ticket to `open` with no notes on every run, so a smoke starts from the same state. The key value
+The ticket starts `open`, and the desk names `resolved` as the status for a ticket it has answered.
+`db.update_ticket` accepts any non-empty status, so that vocabulary is the fixture's convention
+rather than a value the schema enforces, and the support prompt says only "set the status to
+reflect where the ticket stands", so the smoke records the status the agent chose. The seeder
+resets the ticket to `open` with no notes on every run, so a smoke starts from the same state. The key value
 is generated at seed time and never written into the file, a test, or git.
 
 ## The run record lives in the checkout
