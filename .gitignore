@@ -26,3 +26,6 @@ warrant.db
 # eval output: one directory per column, rewritten by every run. W14 writes
 # here and W15 renders from here; nothing in it is hand-edited or committed.
 evals/results/
+
+# the checkout-local uv cache `make` sets by default
+.uv-cache/

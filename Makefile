@@ -1,5 +1,14 @@
 # Warrant. Every target runs from a checkout of this repository.
 
+# uv keeps its cache under `$UV_CACHE_DIR`, which defaults to `~/.cache/uv`. A
+# checkout that cannot write there, which is what a sandboxed session is, fails
+# every target that shells out to uv before it runs anything. Two of those are
+# the project's own checks: the merge guard's `make test` and the post-commit
+# lint hook. A checkout-local cache keeps the build self-contained, and a caller
+# that sets `UV_CACHE_DIR` still wins over this default.
+UV_CACHE_DIR ?= $(CURDIR)/.uv-cache
+export UV_CACHE_DIR
+
 .PHONY: install lint test up down reset gitea-mcp dsh-profile worktree worktree-clean
 
 # Create or refresh .venv from pyproject.toml and uv.lock. `uv sync` is also
