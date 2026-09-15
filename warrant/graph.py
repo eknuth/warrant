@@ -149,6 +149,19 @@ class Graph:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
+    def clear(self) -> None:
+        """Delete every row, children before parents.
+
+        The scenario seeder reloads the whole graph from `infra/graph.yml` and
+        then the scenario's own agents, so it needs the tables emptied first:
+        an upsert leaves a row from the previous scenario behind, and a stale
+        agent is authority a run must not inherit. The four names are literals
+        in this file, so the loop cannot carry a caller's text into SQL.
+        """
+        for table in ("resources", "agents", "tools", "humans"):
+            self._conn.execute(f"DELETE FROM {table}")
+        self._conn.commit()
+
     def seed(self, data: Mapping[str, Any]) -> dict[str, int]:
         """Upsert a whole graph from a parsed seed mapping.
 

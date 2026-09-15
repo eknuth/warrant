@@ -1,6 +1,6 @@
 # W11. Provenance tagging
 
-Date: 2026-09-16. Status: accepted.
+Date: 2026-09-15. Status: accepted.
 
 W11 is the third input the policies read: what the agent read on the way to the
 action, classified by rules, and turned into the context fields the Cedar set

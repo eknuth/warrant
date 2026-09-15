@@ -131,6 +131,23 @@ def test_loading_twice_leaves_the_same_graph(tmp_path: Path) -> None:
         assert len(second.resources()) == 6
 
 
+def test_clear_removes_every_row(tmp_path: Path) -> None:
+    """The scenario seeder reloads the graph, so clear has to be total.
+
+    A `seed` upserts, so a row left behind by the previous scenario would still
+    be authority for the next run.
+    """
+    database = tmp_path / "warrant.db"
+
+    with graph.load(SEED, database) as opened:
+        opened.clear()
+
+        assert opened.humans() == []
+        assert opened.agents() == []
+        assert opened.tools() == []
+        assert opened.resources() == []
+
+
 def test_an_agent_with_an_unknown_owner_is_refused(tmp_path: Path) -> None:
     """The foreign key is what keeps an orphan agent out of the graph."""
     database = tmp_path / "warrant.db"

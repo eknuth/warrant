@@ -249,6 +249,11 @@ services:
       # in a service environment, and the smoke passes them on the exec command
       # line, which is the process that writes the run metadata.
       WARRANT_RUNS_DIR: "/app/runs"
+      # The scenario seeder writes the access graph into the shared runs
+      # directory, and this points the gateway at the same file through the
+      # `./runs` bind mount below. A scenario's agents and its ticket and
+      # customer resource rows then reach the running gateway without a rebuild.
+      WARRANT_GRAPH_DB: "runs/graph/warrant.db"
       WARRANT_COMMIT: ""
       WARRANT_DIRTY: ""
     volumes:
