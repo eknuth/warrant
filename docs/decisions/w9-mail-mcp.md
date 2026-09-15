@@ -37,7 +37,7 @@ answers with `notsupport@acme.test` and `support@acme.test.evil`, so `list_inbox
 
 Mailpit also answers one page at a time, 50 messages by default whatever the match count is. Both
 reads walk its `start` offset until the match count it reports is consumed, bounded at 100 pages
-of 100, so ten thousand matches is the limit one call will read.
+of 50, so five thousand matches is the limit one call will read.
 
 ## The raw URL is the record and the decoded query is a convenience
 
