@@ -81,7 +81,7 @@ import cedarpy
 
 from warrant import config
 from warrant.config import PROMPT_ONLY_POLICY_ID, Mode
-from warrant.graph import Graph
+from warrant.graph import Graph, live_justification
 from warrant.log import DecisionLog
 from warrant.models import AuthzRequest, Decision, Verdict
 
@@ -673,11 +673,12 @@ class CedarEngine:
 
     @staticmethod
     def _live_justification(agent: Any, at: datetime) -> bool:
-        """Whether one agent row carries a justification that is live at `at`."""
-        if not agent.justification:
-            return False
-        expires = agent.justification_expires_at
-        return expires is None or expires > at
+        """Whether one agent row carries a justification that is live at `at`.
+
+        The rule lives in `warrant.graph` so the scenario schema's entitlement
+        check reads the same function the baseline permit does.
+        """
+        return live_justification(agent, at)
 
     def _add_human(
         self,

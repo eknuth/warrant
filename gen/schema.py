@@ -44,13 +44,15 @@ Field-by-field documentation lives in `docs/decisions/w12-scenario-seeders.md`.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from warrant.graph import Agent, live_justification
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCENARIO_DIR = Path(__file__).resolve().parent / "scenarios"
@@ -112,6 +114,43 @@ def shipped_agent_rows() -> dict[str, dict[str, Any]]:
 def shipped_human_ids() -> dict[str, str]:
     """The shipped human ids, keyed by login."""
     return {str(row["login"]): str(row["id"]) for row in graph_seed_data().get("humans", [])}
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    """A graph field's ISO 8601 value as an aware datetime, or None."""
+    if value is None or value == "":
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _agent_rows(scenario: Scenario, by_login: dict[str, str]) -> dict[str, Agent]:
+    """The shipped agents plus the scenario's own, in the graph's own shape.
+
+    The entitlement check filters these through `live_justification`, the same
+    function the engine's `_entitled_tools` calls, so the schema and the
+    baseline permit agree on which agents confer authority.
+    """
+    agents: dict[str, Agent] = {}
+    for row in shipped_agent_rows().values():
+        agents[str(row["id"])] = Agent(
+            id=str(row["id"]),
+            client_id=str(row["client_id"]),
+            owner_human_id=row.get("owner_human_id"),
+            justification=str(row.get("justification", "")),
+            justification_expires_at=_parse_iso(row.get("justification_expires_at")),
+            allowed_tools=[str(tool) for tool in row.get("allowed_tools", [])],
+        )
+    for agent in scenario.seed.graph.agents:
+        agents[agent.client_id] = Agent(
+            id=agent.client_id,
+            client_id=agent.client_id,
+            owner_human_id=by_login.get(agent.owner),
+            justification=agent.justification,
+            justification_expires_at=_parse_iso(agent.justification_expires_at),
+            allowed_tools=list(agent.allowed_tools),
+        )
+    return agents
 
 
 # The agent the role code exchanges as, by task kind. `agents/triage.py` and
@@ -518,14 +557,20 @@ class Scenario(BaseModel):
             )
 
     def _check_agents_are_scenario_owned(self) -> None:
-        """A scenario may add agents, not override a shipped one.
+        """A scenario may add agents, not override a shipped one, and not repeat one.
 
         The gateway upserts `infra/graph.yml` when it starts, so a scenario's
         override of a shipped agent id would be reverted by the next restart.
         Refusing it makes the failure a load error instead of a scenario that
-        runs under a different justification than the file says.
+        runs under a different justification than the file says. Two scenario
+        agents with one id would collide the same way a duplicate customer or
+        ticket does, with the last one silently winning.
         """
         shipped = set(shipped_agent_rows())
+        ids = [agent.client_id for agent in self.seed.graph.agents]
+        repeated = sorted({client_id for client_id in ids if ids.count(client_id) > 1})
+        if repeated:
+            raise ValueError(f"two scenario agents share a client_id: {repeated}")
         for agent in self.seed.graph.agents:
             if agent.client_id in shipped:
                 raise ValueError(
@@ -552,19 +597,16 @@ class Scenario(BaseModel):
         """The task's user has to reach the tools its kind's agent holds.
 
         The role code exchanges as one fixed client per kind, so the run only
-        works when the human named owns an agent entitled to that client's
+        works when the human named owns a live agent entitled to that client's
         tools. That union is `onBehalfOf.entitledTools`, which the baseline
-        permit requires.
+        permit requires. An agent whose justification is empty or expired
+        confers nothing, through the engine's own `live_justification`, so a
+        scenario cannot rely on an agent the baseline would refuse.
         """
         humans = graph_human_logins()
         by_login = shipped_human_ids()
-        agents: dict[str, dict[str, Any]] = dict(shipped_agent_rows())
-        for agent in self.seed.graph.agents:
-            agents[agent.client_id] = {
-                "id": agent.client_id,
-                "owner_human_id": by_login.get(agent.owner),
-                "allowed_tools": list(agent.allowed_tools),
-            }
+        now = datetime.now(UTC)
+        agents = _agent_rows(self, by_login)
         for task in self.tasks:
             if task.user not in humans:
                 raise ValueError(
@@ -579,13 +621,13 @@ class Scenario(BaseModel):
             user_id = by_login[task.user]
             entitled: set[str] = set()
             for row in agents.values():
-                if row.get("owner_human_id") == user_id:
-                    entitled.update(str(tool) for tool in row.get("allowed_tools", []))
-            needed = {str(tool) for tool in kind_agent.get("allowed_tools", [])}
+                if row.owner_human_id == user_id and live_justification(row, now):
+                    entitled.update(row.allowed_tools)
+            needed = set(kind_agent.allowed_tools)
             missing = sorted(needed - entitled)
             if missing:
                 raise ValueError(
-                    f"task {task.subject!r} runs as {task.user!r}, whose agents do not hold "
+                    f"task {task.subject!r} runs as {task.user!r}, whose live agents do not hold "
                     f"{missing}; the baseline permit needs the user entitled to them"
                 )
 

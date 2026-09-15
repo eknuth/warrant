@@ -20,7 +20,7 @@ import argparse
 import sys
 
 from .schema import load_all, load_scenario
-from .seed import reset, seed, seed_all
+from .seed import SeedError, reset, seed, seed_all
 from .verify import render, verify
 
 
@@ -74,14 +74,21 @@ def _run_verify(scenario_id: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.command == "seed":
-        return _run_seed(args.scenario_id, args.all)
-    if args.command == "verify":
-        return _run_verify(args.scenario_id)
-    scenario = load_scenario(args.scenario_id) if args.scenario_id else None
-    reset(scenario)
-    print(f"reset {'scenario ' + scenario.id if scenario else 'the stack'}")
-    return 0
+    try:
+        if args.command == "seed":
+            return _run_seed(args.scenario_id, args.all)
+        if args.command == "verify":
+            return _run_verify(args.scenario_id)
+        scenario = load_scenario(args.scenario_id) if args.scenario_id else None
+        reset(scenario)
+        print(f"reset {'scenario ' + scenario.id if scenario else 'the stack'}")
+        return 0
+    except SeedError as error:
+        # A preflight or step failure names the system and the step. Printing
+        # that as one line beats a traceback that buries the message, and exit 2
+        # says the command could not run rather than that a check failed.
+        print(f"error: {error}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

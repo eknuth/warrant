@@ -9,6 +9,15 @@
 UV_CACHE_DIR ?= $(CURDIR)/.uv-cache
 export UV_CACHE_DIR
 
+# The main checkout's runs directory, absolute. `make up` from a worktree has to
+# mount the same directory the seeder writes its graph to, and compose resolves
+# a relative bind source against the directory the command runs from. Deriving
+# the path from `scripts/repo_root.sh` makes the mount checkout-independent, so
+# a stack started from a worktree still shares one graph with the seeder.
+REPO_ROOT := $(shell bash scripts/repo_root.sh)
+WARRANT_RUNS_HOST_DIR ?= $(REPO_ROOT)/runs
+export WARRANT_RUNS_HOST_DIR
+
 .PHONY: install lint test up down reset gitea-mcp postgres-mcp mail-mcp dsh-profile worktree worktree-clean
 
 # Create or refresh .venv from pyproject.toml and uv.lock. `uv sync` is also
@@ -33,6 +42,7 @@ test:
 # while the JVM is still starting and the realm import has not finished, so
 # anything run straight after `make reset` races the import.
 up:
+	@mkdir -p "$(WARRANT_RUNS_HOST_DIR)" "$(WARRANT_RUNS_HOST_DIR)/graph"
 	docker compose up -d --wait
 
 down:
@@ -42,6 +52,7 @@ down:
 # Keycloak realm store, and later an empty database and mailbox.
 reset:
 	docker compose down -v
+	@mkdir -p "$(WARRANT_RUNS_HOST_DIR)" "$(WARRANT_RUNS_HOST_DIR)/graph"
 	docker compose up -d --wait
 
 # The Gitea MCP resource server on :9101. The agent connects to this, so it has

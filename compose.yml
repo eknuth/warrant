@@ -249,16 +249,18 @@ services:
       # in a service environment, and the smoke passes them on the exec command
       # line, which is the process that writes the run metadata.
       WARRANT_RUNS_DIR: "/app/runs"
-      # The scenario seeder writes the access graph into the shared runs
-      # directory, and this absolute path is the same file through the `./runs`
-      # bind mount below. It is absolute on purpose: a relative value would
-      # resolve against the container's working directory, and a caller that
-      # overrides WARRANT_RUNS_DIR must still share one graph with the seeder.
+      # The scenario seeder writes the access graph into the host runs
+      # directory the Makefile passes as WARRANT_RUNS_HOST_DIR, and this absolute
+      # container path is the same file through the bind mount below. The mount
+      # source is absolute from `make up`, so a stack started from a worktree
+      # still mounts the main checkout's runs and shares one graph with the
+      # seeder. The container path is absolute because a relative value would
+      # resolve against the container's working directory.
       WARRANT_GRAPH_DB: "/app/runs/graph/warrant.db"
       WARRANT_COMMIT: ""
       WARRANT_DIRTY: ""
     volumes:
-      - ./runs:/app/runs
+      - ${WARRANT_RUNS_HOST_DIR:-./runs}:/app/runs
     ports:
       - "9100:9100"
     depends_on:

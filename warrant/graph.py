@@ -109,6 +109,22 @@ def _load_json_list(raw: str) -> list[str]:
     return [str(item) for item in value]
 
 
+def live_justification(agent: Agent, at: datetime) -> bool:
+    """Whether one agent row carries a justification that is live at `at`.
+
+    This is the rule the baseline permit's `justificationValid` reads and the
+    same one the entitlement union filters on: an agent with no justification
+    text, or with an expiry at or before `at`, confers nothing. The engine
+    decides a request at its own timestamp; a caller checking a scenario file
+    before a run passes now, so a scenario cannot rely on an agent the baseline
+    would refuse.
+    """
+    if not agent.justification:
+        return False
+    expires = agent.justification_expires_at
+    return expires is None or expires > at
+
+
 def _parse_time(raw: str | None) -> datetime | None:
     if raw is None or raw == "":
         return None

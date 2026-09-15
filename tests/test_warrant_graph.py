@@ -148,6 +148,30 @@ def test_clear_removes_every_row(tmp_path: Path) -> None:
         assert opened.resources() == []
 
 
+def test_live_justification_needs_text_and_a_future_expiry() -> None:
+    """The one rule the baseline permit and the scenario schema both read."""
+    from datetime import UTC, datetime
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+
+    def agent(justification: str, expires: datetime | None) -> graph.Agent:
+        return graph.Agent(
+            id="a",
+            client_id="a",
+            owner_human_id="h-bob",
+            justification=justification,
+            justification_expires_at=expires,
+            allowed_tools=[],
+        )
+
+    assert graph.live_justification(agent("why", None), now) is True
+    assert graph.live_justification(agent("why", datetime(2027, 1, 1, tzinfo=UTC)), now) is True
+    assert graph.live_justification(agent("", None), now) is False
+    assert graph.live_justification(agent("", datetime(2027, 1, 1, tzinfo=UTC)), now) is False
+    assert graph.live_justification(agent("why", datetime(2025, 1, 1, tzinfo=UTC)), now) is False
+    assert graph.live_justification(agent("why", now), now) is False
+
+
 def test_an_agent_with_an_unknown_owner_is_refused(tmp_path: Path) -> None:
     """The foreign key is what keeps an orphan agent out of the graph."""
     database = tmp_path / "warrant.db"

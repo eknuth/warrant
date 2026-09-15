@@ -65,6 +65,11 @@ TICKET_SENSITIVITY = "internal"
 # reads the message back by.
 MESSAGE_ID_DOMAIN = "scenario.warrant.test"
 
+# The four tables `infra/postgres/schema.sql` creates. The Postgres preflight
+# requires all four before the reset deletes anything, so a database without the
+# schema is refused rather than half-reset.
+SUPPORT_TABLES = ("api_keys", "customers", "notes", "tickets")
+
 
 def default_graph_db() -> Path:
     """The access graph the seeder writes and the compose gateway reads.
@@ -302,12 +307,16 @@ def write_seed_manifest(report: SeedReport) -> Path:
 
 
 def preflight(settings: SeedSettings, mail_settings: MailSettings) -> None:
-    """Check every system is reachable before the reset deletes anything.
+    """Check every system is reachable and ready before the reset deletes anything.
 
     A partial reset is worse than a refused one: the org comes back empty while
     the database still holds the previous scenario, and the caller sees a
     traceback rather than the name of the system that was down. Every check runs
     first, and each failure names the system.
+
+    Postgres is checked for the four support tables and not only for a socket.
+    A database that answers and has no schema would otherwise pass this point,
+    the org would be deleted, and the seeder would fail on its first insert.
     """
     with gitea_client(settings) as client:
         try:
@@ -323,10 +332,20 @@ def preflight(settings: SeedSettings, mail_settings: MailSettings) -> None:
     try:
         with psycopg.connect(settings.dsn(), connect_timeout=5) as conn:
             conn.execute("select 1")
+            rows = conn.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+            ).fetchall()
     except psycopg.Error as exc:
         raise SeedError(
             f"postgres preflight failed at {settings.postgres_host}:{settings.postgres_port}: {exc}"
         ) from exc
+    present = {str(row[0]) for row in rows}
+    missing = sorted(set(SUPPORT_TABLES) - present)
+    if missing:
+        raise SeedError(
+            f"postgres preflight: the support schema is missing {missing} in "
+            f"{settings.postgres_db}; run `make reset` to load infra/postgres/schema.sql"
+        )
     url = f"{mail_settings.mail_url.rstrip('/')}/api/v1/messages"
     try:
         response = httpx.get(url, timeout=15.0)

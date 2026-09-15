@@ -18,6 +18,7 @@ import yaml
 import gen.__main__ as cli
 from gen.schema import SCENARIO_DIR, Scenario, load_scenario
 from gen.seed import (
+    SeedError,
     SeedReport,
     default_graph_db,
     reset_graph,
@@ -176,3 +177,62 @@ def test_the_verify_cli_has_no_all_flag() -> None:
     """Finding 7: only the last seeded scenario can be in place, so --all is gone."""
     with pytest.raises(SystemExit):
         cli.main(["verify", "--all"])
+
+
+def test_the_seed_cli_reports_a_seed_error_as_one_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Finding 6: a failed step prints its name, not a traceback."""
+
+    def explode(scenario: object) -> SeedReport:
+        raise SeedError("postgres preflight: the support schema is missing ['customers']")
+
+    monkeypatch.setattr(cli, "seed", explode)
+
+    assert cli.main(["seed", "08-quiet-control"]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: postgres preflight")
+    assert "Traceback" not in captured.err
+
+
+def test_the_compose_mount_and_graph_path_agree_with_the_seeder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding 1: the mount source and WARRANT_GRAPH_DB name the seeder's own file.
+
+    A worktree's `make up` mounts `${WARRANT_RUNS_HOST_DIR}`, which the Makefile
+    exports as an absolute main-checkout path, and the gateway opens
+    `/app/runs/graph/warrant.db` through it. Both have to land on
+    `default_graph_db()`, or verify passes green against a graph the gateway
+    never reads.
+    """
+    monkeypatch.delenv("WARRANT_GRAPH_DB", raising=False)
+    monkeypatch.delenv("WARRANT_RUNS_DIR", raising=False)
+    monkeypatch.delenv("WARRANT_RUNS_HOST_DIR", raising=False)
+    compose = yaml.safe_load((REPO / "compose.yml").read_text(encoding="utf-8"))
+    warrant = compose["services"]["warrant"]
+
+    mount = next(volume for volume in warrant["volumes"] if volume.endswith(":/app/runs"))
+    source = mount[: -len(":/app/runs")]
+    if source.startswith("${"):
+        name, default = source[2:-1].split(":-", 1)
+        assert name == "WARRANT_RUNS_HOST_DIR"
+        host_runs = (main_checkout() / default).resolve()
+    else:
+        host_runs = Path(source).resolve()
+    assert host_runs == (main_checkout() / "runs").resolve()
+
+    graph = warrant["environment"]["WARRANT_GRAPH_DB"]
+    assert graph == "/app/runs/graph/warrant.db"
+    host_graph = host_runs / Path(graph).relative_to("/app/runs")
+    assert host_graph.resolve() == default_graph_db().resolve()
+
+
+def test_the_makefile_exports_and_creates_the_absolute_mount() -> None:
+    makefile = (REPO / "Makefile").read_text(encoding="utf-8")
+
+    assert "WARRANT_RUNS_HOST_DIR" in makefile
+    assert "scripts/repo_root.sh" in makefile
+    assert "export WARRANT_RUNS_HOST_DIR" in makefile
+    assert 'mkdir -p "$(WARRANT_RUNS_HOST_DIR)" "$(WARRANT_RUNS_HOST_DIR)/graph"' in makefile

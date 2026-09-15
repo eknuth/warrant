@@ -49,27 +49,35 @@ placeholder.
 
 ## The seeded graph is the graph the running gateway reads
 
-The seeder writes its graph to `runs/graph/warrant.db` under the main checkout, and `compose.yml`
-sets `WARRANT_GRAPH_DB` to the absolute `/app/runs/graph/warrant.db` on the gateway. `./runs` is
-bind-mounted at `/app/runs`, so the container and the host open one file, and the gateway reads an
-agent row per request rather than caching it. A scenario's agents and its ticket and customer rows
-reach the running gateway with no rebuild and no restart.
+The seeder writes its graph to `runs/graph/warrant.db` under the main checkout. `compose.yml` mounts
+`${WARRANT_RUNS_HOST_DIR:-./runs}` at `/app/runs`, and the Makefile exports `WARRANT_RUNS_HOST_DIR`
+as an absolute path derived from `scripts/repo_root.sh`. That is what makes the mount the main
+checkout's runs even when `make up` runs from a worktree: a relative bind source would resolve
+against the worktree, and the seeder would write a graph the gateway never opens. The Makefile also
+creates the host runs and graph directories before `up`, so a fresh clone does not get a root-owned
+bind-mount target. The gateway's `WARRANT_GRAPH_DB` is the absolute `/app/runs/graph/warrant.db`,
+the same file through the mount. The gateway reads an agent row per request rather than caching it,
+so a scenario's agents and its ticket and customer rows reach the running gateway with no rebuild
+and no restart.
 
 The seeder's default is deliberately not derived from `WARRANT_RUNS_DIR`. A column points
 `WARRANT_RUNS_DIR` at its own records directory so one cell's run records live together, and the
 graph is not a run record: if the graph path followed that override, the seeder would write one file
 while the gateway read another and every scenario row would be invisible to the decision path.
-`WARRANT_GRAPH_DB` wins when it is set, the same variable the gateway's own settings read, so a
-caller that points both at one file gets the same behavior. The shipped `infra/graph.yml` still
-loads at gateway start, which upserts the shipped rows and leaves a scenario's added rows alone.
+`WARRANT_GRAPH_DB` wins when it is set, the same variable the gateway's own settings read. The eval
+runner runs the gateway in compose; a gateway started by hand on the host without `WARRANT_GRAPH_DB`
+is out of scope, and `.env.example` says so. The shipped `infra/graph.yml` still loads at gateway
+start, which upserts the shipped rows and leaves a scenario's added rows alone.
 
 ## A scenario owns a run root, and W15 points a cell at it
 
 `runs/scenarios/<id>` is the scenario's run root. `seed` clears it and creates it fresh, then writes
-`seed.json` naming the scenario and what was seeded, and the CLI prints the path. W15 sets
-`WARRANT_RUNS_DIR` to that root for one cell, so every task record the run makes lands under it and
-the next seed of the same scenario clears them. Without that, a run's records under the default
-`runs/<task_id>` survive a reseed and a later run reads a previous run's ledger.
+`seed.json` naming the scenario, the repo and user names, and the row counts. The file carries no
+generated credential and no timestamp, so the same scenario always writes the same bytes. The CLI
+prints the path. W15 sets `WARRANT_RUNS_DIR` to that root for one cell, so every task record the run
+makes lands under it and the next seed of the same scenario clears them. Without that, a run's
+records under the default `runs/<task_id>` survive a reseed and a later run reads a previous run's
+ledger.
 
 ## Gitea file commits are authored as the login the scenario names
 

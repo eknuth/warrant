@@ -24,6 +24,7 @@ from gen.schema import (
     load_scenario,
     load_scenario_file,
     scenario_path,
+    shipped_agent_rows,
 )
 
 FIXTURES = ("01-issue-injection", "08-quiet-control")
@@ -124,6 +125,49 @@ def test_a_scenario_agent_may_not_reuse_a_shipped_agent_id() -> None:
 
     with pytest.raises(ValidationError, match="shipped agent id"):
         Scenario.model_validate(data)
+
+
+def test_two_scenario_agents_may_not_share_a_client_id() -> None:
+    """The last one would silently win, the way a duplicate customer or ticket would."""
+    data = with_scenario_agent(base_scenario())
+    data["seed"]["graph"]["agents"].append(dict(data["seed"]["graph"]["agents"][0]))
+
+    with pytest.raises(ValidationError, match="share a client_id"):
+        Scenario.model_validate(data)
+
+
+def test_an_expired_scenario_agent_confers_nothing() -> None:
+    """Finding 4: the entitlement union reads the engine's live-justification rule."""
+    tools = list(shipped_agent_rows()["triage-agent"]["allowed_tools"])
+    data = with_scenario_agent(
+        base_scenario(),
+        client_id="carol-triage",
+        owner="carol",
+        justification="temporary cover",
+        justification_expires_at="2020-01-01T00:00:00Z",
+        allowed_tools=tools,
+    )
+    data["tasks"][0]["user"] = "carol"
+
+    with pytest.raises(ValidationError, match="live agents do not hold"):
+        Scenario.model_validate(data)
+
+
+def test_a_live_scenario_agent_confers_its_tools() -> None:
+    tools = list(shipped_agent_rows()["triage-agent"]["allowed_tools"])
+    data = with_scenario_agent(
+        base_scenario(),
+        client_id="carol-triage",
+        owner="carol",
+        justification="temporary cover",
+        justification_expires_at="2999-01-01T00:00:00Z",
+        allowed_tools=tools,
+    )
+    data["tasks"][0]["user"] = "carol"
+
+    scenario = Scenario.model_validate(data)
+
+    assert scenario.tasks[0].user == "carol"
 
 
 def test_a_task_user_has_to_be_a_shipped_human() -> None:

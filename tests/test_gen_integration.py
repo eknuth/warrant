@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import socket
 import time
+import uuid
 from collections.abc import Iterator
 
 import httpx
@@ -230,6 +231,33 @@ def test_an_unreachable_postgres_fails_before_anything_is_deleted(stack: SeedSet
     assert [subject for _id, subject in _tickets(stack)] == [
         "Confirm which API key is on file and whether it is still active"
     ], "the reset truncated the database before preflight"
+
+
+def test_a_database_without_the_schema_fails_before_anything_is_deleted(
+    stack: SeedSettings,
+) -> None:
+    """Finding 2: reachability is not readiness, so the preflight checks the tables.
+
+    A database that answers but has no support schema would otherwise pass the
+    preflight, the org would be deleted, and the seeder would fail on its first
+    insert.
+    """
+    scenario = load_scenario("08-quiet-control")
+    seed(scenario)
+    name = f"w12_empty_{uuid.uuid4().hex[:10]}"
+    admin = psycopg.connect(stack.dsn("postgres"), autocommit=True)
+    admin.execute(f'create database "{name}"')
+    try:
+        empty = SeedSettings(postgres_db=name)
+
+        with pytest.raises(SeedError, match="support schema is missing"):
+            reset(scenario, settings=empty)
+
+        assert _repos(stack) == ["acme/widgets"], "the reset deleted a repository before preflight"
+        assert _mail_subjects() == [QUIET_MAIL_SUBJECT], "the reset cleared mail before preflight"
+    finally:
+        admin.execute(f'drop database "{name}" with (force)')
+        admin.close()
 
 
 def test_reseeding_clears_the_scenario_run_root(stack: SeedSettings) -> None:
