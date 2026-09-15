@@ -107,8 +107,8 @@ URL-encoded, or base64-encoded sets `argsTouchSecret`.
 
 The plain values stay in the process. Each one also has a SHA-256 digest, and
 the digest is what the decision log carries. A sample of source text that
-contains a secret is redacted before it is recorded, so a decision line never
-holds a value.
+contains a secret is redacted before it is recorded, so the overlap evidence a
+decision line carries holds no value.
 
 ## One `TaskState` per task and actor
 
