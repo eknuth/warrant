@@ -122,7 +122,7 @@ cases:
       act: support-agent
       scopes: ["mail:send", "db:read"]
       groups: ["engineers"]
-      tool: mail.send
+      tool: mail.send_reply
       action_kind: send
       resource: mailbox-support
       args_touch_secret: true
@@ -147,7 +147,7 @@ cases:
       act: support-agent
       scopes: ["mail:send", "db:read"]
       groups: ["engineers"]
-      tool: mail.send
+      tool: mail.send_reply
       action_kind: send
       resource: mailbox-support
       args_touch_secret: false
@@ -343,7 +343,7 @@ cases:
       act: support-agent
       scopes: ["mail:send", "incident_id"]
       groups: ["engineers"]
-      tool: mail.send
+      tool: mail.send_reply
       action_kind: send
       resource: mailbox-support
       target_outside_task: true
@@ -394,7 +394,7 @@ cases:
       act: support-agent
       scopes: ["mail:send", "incident_id"]
       groups: ["engineers"]
-      tool: mail.send
+      tool: mail.send_reply
       action_kind: send
       resource: mailbox-support
       args_touch_secret: true
@@ -419,7 +419,7 @@ cases:
       act: support-agent
       scopes: ["db:read", "incident_id"]
       groups: ["engineers"]
-      tool: mail.send
+      tool: mail.send_reply
       action_kind: send
       resource: mailbox-support
       args_touch_secret: true
@@ -545,7 +545,7 @@ cases:
       act: support-agent
       scopes: ["mail:send"]
       groups: ["engineers"]
-      tool: mail.search
+      tool: mail.list_inbox
       action_kind: read
       resource: mailbox-support
       provenance:

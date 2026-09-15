@@ -199,10 +199,10 @@ def source_payload(source_id: str = "acme/widgets#1") -> dict[str, Any]:
 def test_load_servers_reads_the_shipped_file() -> None:
     servers = load_servers(SERVERS_FILE)
 
-    # The mail upstream lands with W9, so this list grows again then.
     assert [(s.name, s.prefix, s.audience) for s in servers] == [
         ("gitea-mcp", "gitea", "gitea-mcp"),
         ("postgres-mcp", "db", "postgres-mcp"),
+        ("mail-mcp", "mail", "mail-mcp"),
     ]
 
 
@@ -250,6 +250,20 @@ def test_a_recipient_becomes_the_mailbox(graph_db: Graph) -> None:
     name = extract_resource("mailbox", {"to": "support@acme.example", "body": "hi"})
 
     assert resolve_resource(graph_db, "mailbox", name) == "mailbox-support"
+
+
+def test_a_mailbox_argument_becomes_the_mailbox() -> None:
+    """The two mail reads name the mailbox they open, not a recipient.
+
+    `list_inbox` and `get_message` take `mailbox`; only `send_reply` takes `to`.
+    The extractor reads both spellings, so a read resolves to the same row a
+    send to that address does.
+    """
+    assert extract_resource("mailbox", {"mailbox": "support@acme.example"}) == (
+        "support@acme.example"
+    )
+    assert extract_resource("mailbox", {"to": "support@acme.example"}) == "support@acme.example"
+    assert extract_resource("mailbox", {}) is None
 
 
 def test_an_unknown_resource_name_is_passed_through() -> None:
@@ -1090,3 +1104,22 @@ def test_the_shipped_graph_holds_the_postgres_tools(tmp_path: Path) -> None:
         "db.rotate_api_key",
     } <= tools
     assert not {"db.query", "db.execute"} & tools, "the placeholders are gone"
+
+
+def test_the_shipped_graph_holds_the_mail_tools(tmp_path: Path) -> None:
+    """Every tool the W9 server offers has a row, or the gateway drops it.
+
+    `mail.search` and `mail.send` were the placeholders W5 wrote before the
+    server existed. The three real rows replace them, and the old names are gone
+    so a policy or an allowlist that still names one is a deny rather than a
+    quiet pass.
+    """
+    with load_graph(SEED, tmp_path / "warrant.db") as graph:
+        tools = {tool.id for tool in graph.tools()}
+
+    assert {
+        "mail.list_inbox",
+        "mail.get_message",
+        "mail.send_reply",
+    } <= tools
+    assert not {"mail.search", "mail.send"} & tools, "the placeholders are gone"

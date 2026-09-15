@@ -20,10 +20,7 @@ servers:
     url: http://postgres-mcp:9102/mcp
     audience: postgres-mcp
 
-# The mail server arrives with W9. Its graph rows exist already, so the gateway
-# re-exports them as soon as the upstream is listed.
-#
-#  - name: mail-mcp
-#    prefix: mail
-#    url: http://mail-mcp:9103/mcp
-#    audience: mail-mcp
+  - name: mail-mcp
+    prefix: mail
+    url: http://mail-mcp:9103/mcp
+    audience: mail-mcp

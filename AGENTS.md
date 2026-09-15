@@ -129,11 +129,10 @@ The profile, the hooks, and the skills below are the project's own extension poi
 ```
 warrant/
   AGENTS.md          this file
-  Makefile           install, lint, test, up, down, reset, gitea-mcp, dsh-profile,
-                     worktree, worktree-clean
-  compose.yml        the local stack: Keycloak, gitea, and the W6 gateway with
-                     its upstream; postgres and mailpit commented until the
-                     issues that add them
+  Makefile           install, lint, test, up, down, reset, gitea-mcp, postgres-mcp,
+                     mail-mcp, dsh-profile, worktree, worktree-clean
+  compose.yml        the local stack: Keycloak, gitea, postgres, mailpit, and
+                     the W6 gateway with its upstream
   warrant/           the authorization service (W5, W6)
   servers/           gitea_mcp, postgres_mcp, mail_mcp (W3, W8, W9)
   agents/            providers, triage, support (W4, W10)

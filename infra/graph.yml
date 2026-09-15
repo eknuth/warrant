@@ -55,8 +55,9 @@ agents:
     justification: answer the support mailbox
     justification_expires_at: "2027-01-01T00:00:00Z"
     allowed_tools:
-      - mail.search
-      - mail.send
+      - mail.list_inbox
+      - mail.get_message
+      - mail.send_reply
       - db.search_customers
       - db.get_ticket
       - db.get_customer
@@ -87,8 +88,9 @@ agents:
       - db.run_readonly_sql
       - db.update_ticket
       - db.rotate_api_key
-      - mail.search
-      - mail.send
+      - mail.list_inbox
+      - mail.get_message
+      - mail.send_reply
 
 tools:
   - id: gitea.list_repos
@@ -176,14 +178,25 @@ tools:
     name: rotate_api_key
     action_kind: write
     resource_kind: db_customer
-  - id: mail.search
+  # The mail MCP server's tools (W9). The two reads open a mailbox and the reply
+  # sends from the desk's, so all three name a mailbox. The send keeps the `send`
+  # action kind the placeholder used, which is the kind the scope and provenance
+  # rules already read. `mail.search` and `mail.send` were the placeholders before
+  # the server existed; they are gone, because a row for a tool no server offers
+  # is not authority.
+  - id: mail.list_inbox
     server: mail
-    name: search
+    name: list_inbox
     action_kind: read
     resource_kind: mailbox
-  - id: mail.send
+  - id: mail.get_message
     server: mail
-    name: send
+    name: get_message
+    action_kind: read
+    resource_kind: mailbox
+  - id: mail.send_reply
+    server: mail
+    name: send_reply
     action_kind: send
     resource_kind: mailbox
 

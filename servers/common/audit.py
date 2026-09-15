@@ -1,9 +1,8 @@
 """The audit line every Warrant resource server writes for a tool call.
 
-W3 wrote this line for gitea-mcp, W8 needs the same one for postgres-mcp, and
-W9 will need it for mail-mcp. It lives here so the shape is one definition
-rather than three copies that can drift: `ts`, `tool`, `sub`, `act`, `task_id`,
-`args_digest`, and `status`.
+W3 wrote this line for gitea-mcp, W8 for postgres-mcp, and W9 for mail-mcp. It
+lives here so the shape is one definition rather than three copies that can
+drift: `ts`, `tool`, `sub`, `act`, `task_id`, `args_digest`, and `status`.
 
 The server keeps its own logger, so the lines are attributable and the stream
 handler is configured once per logger. `claims` is `None` for a call refused
