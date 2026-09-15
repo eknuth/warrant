@@ -22,6 +22,11 @@ from warrant.graph import Graph
 
 REPO = "repo"
 DB_TABLE = "db_table"
+# A ticket and a customer are rows, not tables. The postgres MCP server names one
+# by id, so the extractor reads the id argument and W12 seeds the resource row
+# whose owner and classification the subject rule then reads.
+DB_TICKET = "db_ticket"
+DB_CUSTOMER = "db_customer"
 MAILBOX = "mailbox"
 
 # A string that names no graph row, and says so in the id itself, for a name
@@ -65,6 +70,12 @@ def extract_resource(resource_kind: str, args: Mapping[str, Any]) -> str | None:
             return None
         match = _TABLE.search(statement)
         return match.group(1) if match else None
+    if resource_kind == DB_TICKET:
+        return _first(args.get("ticket_id"))
+    if resource_kind == DB_CUSTOMER:
+        # `search_customers` takes a free-text query rather than an id, so a
+        # search resolves only when the query is a customer the graph holds.
+        return _first(args.get("customer_id")) or _first(args.get("query"))
     if resource_kind == MAILBOX:
         return _first(args.get("to"))
     return None

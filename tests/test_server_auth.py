@@ -22,8 +22,8 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from servers.common.audit import args_digest, audit_record
 from servers.common.auth import BearerAuthMiddleware, MissingBearer, current_claims, parse_bearer
-from servers.gitea_mcp.server import args_digest, audit_record
 from warrant.oidc import verify
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

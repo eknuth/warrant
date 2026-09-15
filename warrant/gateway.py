@@ -2,7 +2,7 @@
 
 An agent no longer holds a token for a resource server. It holds an on-behalf-of
 token for `warrant`, connects to this server, and calls the re-exported tools
-(`gitea.get_issue`, `db.query`, `mail.send`). For each call the gateway:
+(`gitea.get_issue`, `db.get_ticket`, `mail.send`). For each call the gateway:
 
 1. Verifies the bearer for the `warrant` audience. A token minted for an
    upstream resource server is refused here, which is what stops an agent from

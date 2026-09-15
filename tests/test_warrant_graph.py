@@ -38,7 +38,15 @@ def test_an_agent_row_round_trips_through_sqlite(loaded: graph.Graph) -> None:
     assert agent.justification == "answer the support mailbox"
     assert agent.justification_expires_at is not None
     assert agent.justification_expires_at.year == 2027
-    assert agent.allowed_tools == ["mail.search", "mail.send", "db.query"]
+    assert agent.allowed_tools == [
+        "mail.search",
+        "mail.send",
+        "db.search_customers",
+        "db.get_ticket",
+        "db.get_customer",
+        "db.run_readonly_sql",
+        "db.update_ticket",
+    ]
 
 
 def test_a_human_row_round_trips_through_sqlite(loaded: graph.Graph) -> None:
@@ -118,7 +126,7 @@ def test_loading_twice_leaves_the_same_graph(tmp_path: Path) -> None:
     with graph.load(SEED, database) as second:
         assert len(second.humans()) == 3
         assert len(second.agents()) == 4
-        assert len(second.tools()) == 14
+        assert len(second.tools()) == 18
         assert len(second.resources()) == 6
 
 

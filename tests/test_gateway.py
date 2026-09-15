@@ -199,8 +199,10 @@ def source_payload(source_id: str = "acme/widgets#1") -> dict[str, Any]:
 def test_load_servers_reads_the_shipped_file() -> None:
     servers = load_servers(SERVERS_FILE)
 
+    # The mail upstream lands with W9, so this list grows again then.
     assert [(s.name, s.prefix, s.audience) for s in servers] == [
-        ("gitea-mcp", "gitea", "gitea-mcp")
+        ("gitea-mcp", "gitea", "gitea-mcp"),
+        ("postgres-mcp", "db", "postgres-mcp"),
     ]
 
 
@@ -971,3 +973,36 @@ async def test_a_per_tool_forbid_refuses_under_the_graph_schema(
     assert denied.is_error is True
     assert decided[0].verdict is Verdict.deny
     assert decided[0].policy_ids == ["forbid-comment"], "the forbid fired, not the default deny"
+
+
+def test_a_ticket_argument_becomes_the_ticket_row() -> None:
+    """The postgres tools name a row by id, and the extractor reads that id."""
+    assert extract_resource("db_ticket", {"ticket_id": "10"}) == "10"
+    assert extract_resource("db_ticket", {}) is None
+
+
+def test_a_customer_argument_becomes_the_customer_row() -> None:
+    """`search_customers` carries a query rather than an id, and both work."""
+    assert extract_resource("db_customer", {"customer_id": "3"}) == "3"
+    assert extract_resource("db_customer", {"query": "acme"}) == "acme"
+    assert extract_resource("db_customer", {}) is None
+
+
+def test_the_shipped_graph_holds_the_postgres_tools(tmp_path: Path) -> None:
+    """Every tool the W8 server offers has a row, or the gateway drops it.
+
+    `list_tools` re-exports only tools the graph knows, so a missing row is a
+    tool the agent is never shown, which is how W8 arrived unreachable.
+    """
+    with load_graph(SEED, tmp_path / "warrant.db") as graph:
+        tools = {tool.id for tool in graph.tools()}
+
+    assert {
+        "db.search_customers",
+        "db.get_ticket",
+        "db.get_customer",
+        "db.run_readonly_sql",
+        "db.update_ticket",
+        "db.rotate_api_key",
+    } <= tools
+    assert not {"db.query", "db.execute"} & tools, "the placeholders are gone"

@@ -197,7 +197,7 @@ cases:
       act: support-agent
       scopes: ["db:read"]
       groups: ["engineers"]
-      tool: db.query
+      tool: db.run_readonly_sql
       action_kind: read
       resource: table-support-billing
       provenance:
@@ -521,7 +521,7 @@ cases:
       act: support-agent
       scopes: ["db:read"]
       groups: ["engineers"]
-      tool: db.query
+      tool: db.run_readonly_sql
       action_kind: read
       resource: table-orders
       provenance:
@@ -569,7 +569,7 @@ cases:
       act: support-lead-agent
       scopes: ["db:read"]
       groups: ["support-leads"]
-      tool: db.query
+      tool: db.run_readonly_sql
       action_kind: read
       resource: table-orders
       provenance:
@@ -775,7 +775,7 @@ cases:
       act: triage-agent
       scopes: ["db:read"]
       groups: ["owners"]
-      tool: db.query
+      tool: db.run_readonly_sql
       action_kind: read
       resource: table-orders
     expect:

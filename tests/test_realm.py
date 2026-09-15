@@ -334,3 +334,22 @@ def test_support_leads_is_a_defined_group_with_one_member() -> None:
     ]
 
     assert members == ["carol"]
+
+
+def test_a_support_agent_console_token_can_be_exchanged() -> None:
+    """The console token names the agent clients the exchange may act for.
+
+    `aud-triage-agent` was the only audience on a console login, so Keycloak
+    refused `support-agent -> postgres-mcp` with 403 and the support path had no
+    way to obtain a token. The support agent gets the same mapper the triage
+    agent has, and both ride the console login by default.
+    """
+    scope = next(scope for scope in REALM["clientScopes"] if scope["name"] == "aud-support-agent")
+    mapper = next(m for m in scope["protocolMappers"] if m.get("protocolMapper"))
+
+    assert mapper["protocolMapper"] == "oidc-audience-mapper"
+    assert mapper["config"]["included.client.audience"] == "support-agent"
+    assert mapper["config"]["access.token.claim"] == "true"
+
+    console = client("console")
+    assert {"aud-triage-agent", "aud-support-agent"} <= set(console.get("defaultClientScopes", []))

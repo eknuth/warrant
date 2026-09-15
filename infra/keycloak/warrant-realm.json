@@ -104,7 +104,7 @@
       "attributes": {
         "pkce.code.challenge.method": "S256"
       },
-      "defaultClientScopes": ["aud-triage-agent"],
+      "defaultClientScopes": ["aud-triage-agent", "aud-support-agent"],
       "optionalClientScopes": ["gitea:read", "db:read", "mail:send"]
     },
     {
@@ -344,6 +344,28 @@
           "consentRequired": false,
           "config": {
             "included.client.audience": "triage-agent",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "name": "aud-support-agent",
+      "description": "Adds support-agent to the audience so support-agent may exchange the console token.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "audience-support-agent",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "support-agent",
             "access.token.claim": "true",
             "id.token.claim": "false"
           }

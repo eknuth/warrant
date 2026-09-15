@@ -1,5 +1,6 @@
-# One image for the Python services in the local stack: the gitea MCP resource
-# server and the warrant gateway. The repository is the build context.
+# One image for the Python services in the local stack: the gitea and postgres
+# MCP resource servers and the warrant gateway. The repository is the build
+# context.
 #
 # uv is copied from its own pinned image rather than installed with pip, because
 # uv.lock is written for it and the copy is one static binary. The version is
@@ -24,5 +25,5 @@ RUN uv sync --frozen --no-dev
 COPY . .
 
 ENV PATH="/opt/venv/bin:$PATH"
-EXPOSE 9100 9101
+EXPOSE 9100 9101 9102
 CMD ["python", "-m", "warrant", "serve"]

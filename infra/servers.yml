@@ -15,13 +15,13 @@ servers:
     url: http://gitea-mcp:9101/mcp
     audience: gitea-mcp
 
-# The postgres and mail servers arrive with W8 and W9. Their graph rows exist
-# already, so the gateway re-exports them as soon as the upstream is listed.
-#
-#  - name: postgres-mcp
-#    prefix: db
-#    url: http://postgres-mcp:9102/mcp
-#    audience: postgres-mcp
+  - name: postgres-mcp
+    prefix: db
+    url: http://postgres-mcp:9102/mcp
+    audience: postgres-mcp
+
+# The mail server arrives with W9. Its graph rows exist already, so the gateway
+# re-exports them as soon as the upstream is listed.
 #
 #  - name: mail-mcp
 #    prefix: mail
