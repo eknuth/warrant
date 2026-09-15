@@ -22,11 +22,8 @@ only when a forge is built, which is what keeps a unit test free of the stack.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
 from typing import Any, Literal
 
 import uvicorn
@@ -34,6 +31,7 @@ from mcp.server.mcpserver import Context, MCPServer
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from starlette.applications import Starlette
 
+from servers.common.audit import args_digest, configure_audit_logging, log_audit
 from servers.common.auth import (
     BearerAuthMiddleware,
     attach_claims,
@@ -120,65 +118,13 @@ def build_forge(settings: ServerSettings) -> Forge:
     )
 
 
-def args_digest(args: dict[str, Any]) -> str:
-    """A stable digest of a tool call's arguments.
-
-    The arguments can carry issue bodies and file contents, so the audit line
-    records a digest rather than the values. Canonical JSON (sorted keys, no
-    extra whitespace) is what makes the digest stable across runs.
-    """
-    canonical = json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def audit_record(
-    tool: str,
-    claims: Claims | None,
-    digest: str,
-    status: str,
-    *,
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    """One tool call's structured log line as a dict.
-
-    The keys are fixed: `ts`, `tool`, `sub`, `act`, `task_id`, `args_digest`,
-    `status`. `sub` is the human the token is about, `act` is the agent client
-    the realm configured, and `status` is `ok`, `error`, or `refused`.
-
-    `claims` is `None` for a call refused before any claim was verified, which
-    is the one case where the caller fields are null rather than absent: the
-    line still records that the tool was called and what it was asked to do.
-    """
-    moment = now or datetime.now(UTC)
-    return {
-        "ts": moment.isoformat().replace("+00:00", "Z"),
-        "tool": tool,
-        "sub": claims.sub if claims else None,
-        "act": claims.act.sub if claims else None,
-        "task_id": claims.task_id if claims else None,
-        "args_digest": digest,
-        "status": status,
-    }
-
-
 def _log_audit(tool: str, claims: Claims | None, digest: str, status: str) -> None:
-    AUDIT_LOGGER.info(json.dumps(audit_record(tool, claims, digest, status), sort_keys=True))
+    """Write one audit line in the shape `servers.common.audit` defines."""
+    log_audit(AUDIT_LOGGER, tool, claims, digest, status)
 
 
 def _configure_audit_logging() -> None:
-    """Emit the audit lines as bare JSON on their own stream handler.
-
-    Left to the root logger they would pick up uvicorn's formatter and stop
-    being one JSON object per line. Done here rather than at import so a test
-    that imports this module does not reconfigure logging.
-    """
-    if AUDIT_LOGGER.handlers:
-        return
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(message)s"))
-    AUDIT_LOGGER.addHandler(handler)
-    AUDIT_LOGGER.setLevel(logging.INFO)
-    AUDIT_LOGGER.propagate = False
+    configure_audit_logging(AUDIT_LOGGER)
 
 
 def _claims_for(ctx: Context, policy: BearerPolicy, tool: str) -> Claims:

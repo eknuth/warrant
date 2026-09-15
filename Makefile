@@ -9,7 +9,7 @@
 UV_CACHE_DIR ?= $(CURDIR)/.uv-cache
 export UV_CACHE_DIR
 
-.PHONY: install lint test up down reset gitea-mcp dsh-profile worktree worktree-clean
+.PHONY: install lint test up down reset gitea-mcp postgres-mcp dsh-profile worktree worktree-clean
 
 # Create or refresh .venv from pyproject.toml and uv.lock. `uv sync` is also
 # what a clean clone runs first; there is no other install step.
@@ -51,6 +51,12 @@ reset:
 gitea-mcp:
 	uv run python -m servers.gitea_mcp.server
 
+# The postgres MCP resource server on :9102. Same shape as `gitea-mcp`: the
+# agent reaches this, so it has to be running for a support run. It reads the
+# support database the `postgres` compose service serves.
+postgres-mcp:
+	uv run python -m servers.postgres_mcp.server
+
 # Install the dsh profiles from infra/dsh/ into $DSH_HOME (default ~/.dsh).
 # Reproducible and idempotent; see infra/dsh/install-profile.sh.
 dsh-profile:
@@ -91,10 +97,6 @@ worktree-clean:
 # Each block names the target that issue will add, so its purpose is visible
 # before the target exists. A commented target is not a target: `make` does not
 # see it, and the scaffold test checks `make` rather than this text.
-#
-# W8, the postgres MCP resource server on :9102.
-# postgres-mcp:
-# 	uv run python -m servers.postgres_mcp.server
 #
 # W9, the mail MCP resource server on :9103.
 # mail-mcp:

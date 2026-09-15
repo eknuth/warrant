@@ -91,7 +91,18 @@ class CallResult:
 
     @property
     def content(self) -> str:
-        """The string handed back to the model as the tool's answer."""
+        """The string handed back to the model as the tool's answer.
+
+        The MCP text block is the server's own rendering of the result for a
+        model to read, and the structured payload is the machine-readable copy
+        beside it. The postgres server keeps `secrets` out of the text and puts
+        it in the structured payload, so handing the payload to the model would
+        put every key value in the model's input a second time. The text block
+        wins whenever there is one; the payload is the fallback for a server
+        that returns structured content and no text.
+        """
+        if self.text:
+            return self.text
         if self.payload is not None:
             return json.dumps(self.payload, sort_keys=True, default=str)
         return self.text

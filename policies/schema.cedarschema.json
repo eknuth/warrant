@@ -199,7 +199,43 @@
           }
         }
       },
-      "db.execute": {
+      "db.get_customer": {
+        "memberOf": [
+          {
+            "id": "read"
+          }
+        ],
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
+        }
+      },
+      "db.get_ticket": {
+        "memberOf": [
+          {
+            "id": "read"
+          }
+        ],
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
+        }
+      },
+      "db.rotate_api_key": {
         "memberOf": [
           {
             "id": "write"
@@ -217,10 +253,46 @@
           }
         }
       },
-      "db.query": {
+      "db.run_readonly_sql": {
         "memberOf": [
           {
             "id": "read"
+          }
+        ],
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
+        }
+      },
+      "db.search_customers": {
+        "memberOf": [
+          {
+            "id": "read"
+          }
+        ],
+        "appliesTo": {
+          "principalTypes": [
+            "Agent"
+          ],
+          "resourceTypes": [
+            "Resource"
+          ],
+          "context": {
+            "type": "RequestContext"
+          }
+        }
+      },
+      "db.update_ticket": {
+        "memberOf": [
+          {
+            "id": "write"
           }
         ],
         "appliesTo": {

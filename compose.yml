@@ -2,9 +2,10 @@
 #
 # W1 ships Keycloak, the identity provider every later service authenticates
 # against. W3 adds Gitea, the forge the MCP server is a resource server in
-# front of. Postgres (W8) and mailpit (W9) arrive with the issues that need
-# them; their blocks are commented at the bottom so the shape of the stack is
-# visible before the services are.
+# front of. W8 adds Postgres, the support database the second resource server
+# reads and writes. Mailpit (W9) arrives with the issue that needs it; its block
+# is commented at the bottom so the shape of the stack is visible before the
+# service is.
 #
 # `docker compose` reads `.env` from this directory for every value below, so
 # credentials live in `.env` and never in this file. `.env.example` lists the
@@ -95,6 +96,35 @@ services:
       retries: 30
       start_period: 20s
 
+  # --- W8 --------------------------------------------------------------------
+  # The support database behind the postgres resource server. The schema is
+  # mounted into the image's init directory, so a clean volume gets the tables
+  # and no rows; W12 seeds the rows. `make reset` drops the volume and the next
+  # `up` loads the schema again.
+  postgres:
+    image: postgres:17
+    ports:
+      - "5432:5432"
+    environment:
+      # The password is a credential and comes from `.env`; the user and the
+      # database are not, so they live here the way Keycloak's admin username
+      # does. The server's settings name the same user and database, and compose
+      # overrides only the host.
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set: add it to .env}"
+      POSTGRES_USER: "warrant"
+      POSTGRES_DB: "support"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Read-only: the postgres image runs this once, at initdb, and never
+      # reads it again.
+      - ./infra/postgres/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "warrant", "-d", "support"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
   # --- W6 --------------------------------------------------------------------
   # The gateway and the Gitea resource server it fronts. Both are built from
   # the one Dockerfile. The upstream port is `expose`d, not published: on the
@@ -125,6 +155,29 @@ services:
       gitea:
         condition: service_healthy
 
+  # The postgres resource server. Same image and the same network shape as the
+  # gitea one: one built image, `expose` instead of `ports`, and the token
+  # issuer overridden for the compose network. Only the host is overridden for
+  # the database, so the user and database name come from `.env` and the code's
+  # defaults, which are the two values the postgres service above was started
+  # with.
+  postgres-mcp:
+    build:
+      context: .
+    image: warrant-local:latest
+    command: ["python", "-m", "servers.postgres_mcp.server"]
+    env_file: [.env]
+    environment:
+      POSTGRES_HOST: "postgres"
+      POSTGRES_MCP_HOST: "0.0.0.0"
+      POSTGRES_MCP_PORT: "9102"
+      WARRANT_OIDC_ISSUER: "http://keycloak:8080/realms/warrant"
+    expose:
+      - "9102"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   warrant:
     build:
       context: .
@@ -143,23 +196,17 @@ services:
         condition: service_healthy
       gitea-mcp:
         condition: service_started
+      postgres-mcp:
+        condition: service_started
 
 volumes:
   keycloak-data:
   gitea-data:
+  postgres-data:
 
 # --- later issues, commented until the issue that needs them ---------------
 # Each block is a complete service definition. Uncommenting it and adding the
 # volume it names is the whole change.
-#
-#  postgres:
-#    image: postgres:17
-#    ports:
-#      - "5432:5432"
-#    environment:
-#      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set: add it to .env}"
-#    volumes:
-#      - postgres-data:/var/lib/postgresql/data
 #
 #  mailpit:
 #    image: axllent/mailpit

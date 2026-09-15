@@ -54,7 +54,14 @@ agents:
     owner_human_id: h-bob
     justification: answer the support mailbox
     justification_expires_at: "2027-01-01T00:00:00Z"
-    allowed_tools: [mail.search, mail.send, db.query]
+    allowed_tools:
+      - mail.search
+      - mail.send
+      - db.search_customers
+      - db.get_ticket
+      - db.get_customer
+      - db.run_readonly_sql
+      - db.update_ticket
   # Empty justification on purpose: an agent an owner stood up without saying
   # why. `justification_valid` is false for it, which is the deny-safe case.
   - id: orphan-agent
@@ -62,7 +69,7 @@ agents:
     owner_human_id: h-carol
     justification: ""
     justification_expires_at: null
-    allowed_tools: [db.query, gitea.search_code]
+    allowed_tools: [db.search_customers, db.get_ticket, gitea.search_code]
   # Carol's live agent. The support-leads exemption is only reachable through a
   # permit, so the person who carries the group needs an agent she owns with a
   # live justification and the tools the exemption is about. Without this row the
@@ -73,7 +80,15 @@ agents:
     owner_human_id: h-carol
     justification: answer escalated billing and mailbox questions for the desk
     justification_expires_at: null
-    allowed_tools: [db.query, mail.search, mail.send]
+    allowed_tools:
+      - db.search_customers
+      - db.get_ticket
+      - db.get_customer
+      - db.run_readonly_sql
+      - db.update_ticket
+      - db.rotate_api_key
+      - mail.search
+      - mail.send
 
 tools:
   - id: gitea.list_repos
@@ -126,16 +141,41 @@ tools:
     name: set_repo_visibility
     action_kind: write
     resource_kind: repo
-  - id: db.query
+  # The postgres MCP server's tools (W8). `db.run_readonly_sql` resolves to a
+  # table through the FROM in its statement; the ticket and customer tools name a
+  # row, and W12 seeds the resource rows whose owners the subject rule reads.
+  # `db.query` and `db.execute` were the placeholders before the server existed;
+  # they are gone, because a row for a tool no server offers is not authority.
+  - id: db.search_customers
     server: db
-    name: query
+    name: search_customers
+    action_kind: read
+    resource_kind: db_customer
+  - id: db.get_ticket
+    server: db
+    name: get_ticket
+    action_kind: read
+    resource_kind: db_ticket
+  - id: db.get_customer
+    server: db
+    name: get_customer
+    action_kind: read
+    resource_kind: db_customer
+  - id: db.run_readonly_sql
+    server: db
+    name: run_readonly_sql
     action_kind: read
     resource_kind: db_table
-  - id: db.execute
+  - id: db.update_ticket
     server: db
-    name: execute
+    name: update_ticket
     action_kind: write
-    resource_kind: db_table
+    resource_kind: db_ticket
+  - id: db.rotate_api_key
+    server: db
+    name: rotate_api_key
+    action_kind: write
+    resource_kind: db_customer
   - id: mail.search
     server: mail
     name: search

@@ -7,6 +7,7 @@ many calls it makes, when it stops, and what it records.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -225,6 +226,57 @@ async def test_a_completed_reply_carries_its_finish_reason() -> None:
     outcome, _ = await triage_loop(a_task(), provider, RecordingTools(), system_prompt="system")
 
     assert outcome.finish_reason == "stop"
+
+
+async def test_a_tool_result_reaches_the_model_without_the_secrets_list() -> None:
+    """The loop hands the model the server's text block, not the payload.
+
+    The postgres server keeps a key value out of its text block once and lists
+    it in `secrets` in the structured payload. If the loop converted the payload
+    to JSON, the model would read the key a second time and the claim that the
+    value appears once would be false.
+    """
+    secret = "fixture-key-alpha"
+
+    class RecordingProvider(ScriptedProvider):
+        def __init__(self) -> None:
+            super().__init__(
+                [
+                    Turn(
+                        role="assistant",
+                        tool_uses=[ToolUse(id="s1", name="get_issue", args={})],
+                    ),
+                    Turn(role="assistant", text="done"),
+                ]
+            )
+            self.seen: list[list[Turn]] = []
+
+        async def run(self, messages: list[Turn], tools: list[ToolSchema]) -> Turn:
+            self.seen.append(list(messages))
+            return await super().run(messages, tools)
+
+    provider = RecordingProvider()
+    tools = RecordingTools(
+        result=CallResult(
+            tool="get_issue",
+            endpoint="db",
+            payload={
+                "api_keys": [{"id": 1, "key_value": secret}],
+                "secrets": [secret],
+                "source": SOURCE,
+            },
+            text=json.dumps({"api_keys": [{"id": 1, "key_value": secret}], "source": SOURCE}),
+            is_error=False,
+            sources=[SOURCE],
+        )
+    )
+
+    await triage_loop(a_task(), provider, tools, system_prompt="system")
+
+    tool_turn = provider.seen[1][-1]
+    content = "".join(block.content for block in tool_turn.tool_results)
+    assert secret in content, "the value the server meant the model to see is there"
+    assert '"secrets"' not in content, "the structured payload is not what the model reads"
 
 
 async def test_a_repeated_source_is_recorded_once() -> None:

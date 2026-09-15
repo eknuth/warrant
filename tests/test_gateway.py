@@ -199,8 +199,10 @@ def source_payload(source_id: str = "acme/widgets#1") -> dict[str, Any]:
 def test_load_servers_reads_the_shipped_file() -> None:
     servers = load_servers(SERVERS_FILE)
 
+    # The mail upstream lands with W9, so this list grows again then.
     assert [(s.name, s.prefix, s.audience) for s in servers] == [
-        ("gitea-mcp", "gitea", "gitea-mcp")
+        ("gitea-mcp", "gitea", "gitea-mcp"),
+        ("postgres-mcp", "db", "postgres-mcp"),
     ]
 
 
@@ -253,6 +255,83 @@ def test_a_recipient_becomes_the_mailbox(graph_db: Graph) -> None:
 def test_an_unknown_resource_name_is_passed_through() -> None:
     assert resolve_resource(None, "repo", "acme/unknown") == "acme/unknown"
     assert resolve_resource(None, "repo", None) == ""
+
+
+def test_a_free_text_customer_search_resolves_only_to_exactly_one_row() -> None:
+    """`search_customers` takes text, and a decision needs one subject.
+
+    The query string is not an id, so it resolves only when it is the `name` of
+    exactly one graph row. A query matching no row resolves to something the
+    graph has no row for, so the engine's unknown-resource path applies instead
+    of a decision against the row the query was not bounded by.
+    """
+    with Graph(":memory:") as graph:
+        graph.seed(
+            {
+                "humans": [{"id": "h-alice", "login": "alice", "groups": []}],
+                "resources": [
+                    {
+                        "id": "customer-acme-1",
+                        "kind": "db_customer",
+                        "name": "Acme",
+                        "owner_human_id": "h-alice",
+                        "sensitivity": "internal",
+                    }
+                ],
+            }
+        )
+
+        assert resolve_resource(graph, "db_customer", "Acme") == "customer-acme-1"
+        unmatched = resolve_resource(graph, "db_customer", "Globex")
+        assert graph.resource(unmatched) is None, "an unmatched name names no row"
+
+
+def test_a_customer_query_matching_several_rows_is_unresolved() -> None:
+    """Two rows named the same are not a subject a read can be decided against."""
+    with Graph(":memory:") as graph:
+        graph.seed(
+            {
+                "humans": [{"id": "h-alice", "login": "alice", "groups": []}],
+                "resources": [
+                    {
+                        "id": "customer-acme-1",
+                        "kind": "db_customer",
+                        "name": "Acme",
+                        "owner_human_id": "h-alice",
+                        "sensitivity": "internal",
+                    },
+                    {
+                        "id": "customer-acme-2",
+                        "kind": "db_customer",
+                        "name": "Acme",
+                        "owner_human_id": "h-alice",
+                        "sensitivity": "confidential",
+                    },
+                ],
+            }
+        )
+
+        resolved = resolve_resource(graph, "db_customer", "Acme")
+
+        assert graph.resource(resolved) is None, "a tie must not become a known row"
+
+
+def test_a_multi_table_statement_is_decided_against_its_first_table() -> None:
+    """The current behavior, pinned so a change to it is visible.
+
+    `select c.name, k.key_value from customers c join api_keys k ...` is a read
+    of two tables, and the decision is made against the first one the extractor
+    finds, `customers`. A policy that keys on `api_keys` never sees the call.
+    One resource cannot name several tables, so the fix is a policy or resource
+    model that can and belongs to W7 and W12; this test is the visible record
+    that it is open.
+    """
+    sql = "select c.name, k.key_value from customers c join api_keys k on k.customer_id = c.id"
+
+    name = extract_resource("db_table", {"sql": sql})
+
+    assert name == "customers", "the first FROM wins, not the table that holds the key"
+    assert "api_keys" in sql, "and the statement really does read the key table"
 
 
 def test_extract_sources_keeps_the_record_that_carried_the_block() -> None:
@@ -971,3 +1050,43 @@ async def test_a_per_tool_forbid_refuses_under_the_graph_schema(
     assert denied.is_error is True
     assert decided[0].verdict is Verdict.deny
     assert decided[0].policy_ids == ["forbid-comment"], "the forbid fired, not the default deny"
+
+
+def test_a_ticket_argument_becomes_the_ticket_row() -> None:
+    """The postgres tools name a row by id, and the extractor reads that id.
+
+    The schema declares `ticket_id` as an integer, so that is the spelling a real
+    caller sends. The string form still resolves, because W12 seeds the resource
+    with `name` set to the id as a string and both spellings become that string.
+    """
+    assert extract_resource("db_ticket", {"ticket_id": 10}) == "10"
+    assert extract_resource("db_ticket", {"ticket_id": "10"}) == "10"
+    assert extract_resource("db_ticket", {}) is None
+
+
+def test_a_customer_argument_becomes_the_customer_row() -> None:
+    """`search_customers` carries a query rather than an id, and both work."""
+    assert extract_resource("db_customer", {"customer_id": 3}) == "3"
+    assert extract_resource("db_customer", {"customer_id": "3"}) == "3"
+    assert extract_resource("db_customer", {"query": "acme"}) == "acme"
+    assert extract_resource("db_customer", {}) is None
+
+
+def test_the_shipped_graph_holds_the_postgres_tools(tmp_path: Path) -> None:
+    """Every tool the W8 server offers has a row, or the gateway drops it.
+
+    `list_tools` re-exports only tools the graph knows, so a missing row is a
+    tool the agent is never shown, which is how W8 arrived unreachable.
+    """
+    with load_graph(SEED, tmp_path / "warrant.db") as graph:
+        tools = {tool.id for tool in graph.tools()}
+
+    assert {
+        "db.search_customers",
+        "db.get_ticket",
+        "db.get_customer",
+        "db.run_readonly_sql",
+        "db.update_ticket",
+        "db.rotate_api_key",
+    } <= tools
+    assert not {"db.query", "db.execute"} & tools, "the placeholders are gone"

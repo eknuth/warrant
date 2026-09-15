@@ -7,7 +7,7 @@ The ticket cites this file as `004-gateway-hop.md`. W6 is the issue that made th
 ## Decision
 
 Warrant is an MCP server on `:9100/mcp` and the only MCP endpoint an agent reaches. It re-exports
-each upstream server's tools under a prefix (`gitea.get_issue`, `db.query`, `mail.send`), verifies
+each upstream server's tools under a prefix (`gitea.get_issue`, `db.get_ticket`, `mail.send`), verifies
 the incoming token for the `warrant` audience, decides every call, and forwards allowed calls to the
 upstream the graph names.
 
@@ -135,7 +135,7 @@ it true rather than nearly true.
 ## What the id reconciliation cost
 
 The graph's agent ids are now the identity provider's client ids (`triage-agent`, `support-agent`,
-`orphan-agent`) and its tool ids are the gateway's re-exports (`gitea.get_issue`, `db.query`,
+`orphan-agent`) and its tool ids are the gateway's re-exports (`gitea.get_issue`, `db.get_ticket`,
 `mail.send`). Before this, the graph held `agent-triage` and `gitea.search`, and the gateway would
 have found no agent for `act.sub=triage-agent` and no action kind for the tool it was asked to
 forward. `python -m warrant.graph load` upserts and does not delete, so a `warrant.db` written from

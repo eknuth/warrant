@@ -632,7 +632,7 @@ def test_escalation_does_not_answer_a_call_the_agent_could_never_make(
         _request(
             sub="h-alice",
             act="support-agent",
-            tool="db.execute",
+            tool="db.rotate_api_key",
             resource="table-orders",
             action_kind=ActionKind.write,
             scopes=["db:read", "incident_id"],
