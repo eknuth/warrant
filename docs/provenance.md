@@ -186,9 +186,10 @@ is a hit, and a license header, a signature block, or any boilerplate the source
 and the write both carry is 24 characters, so an honest write that repeats a
 source's own phrasing is refused. A slash between two common words is a word
 pair rather than a repository, and the identifier rule rejects the pairs it
-knows, so `and/or` and `read/write` do not fire; a pair outside that list still
-can. A hit names the source and the kind of match, so a reader can see what was
-matched and judge whether it was copied.
+knows, so `and/or` and `read/write` do not fire. A common word pair outside that
+list is still a hit and can refuse an honest write. A hit names the source and
+the kind of match, so a reader can see what was matched and judge whether it was
+copied.
 
 Content taint does not catch a paraphrase. The paraphrase shares no 24-character
 run, no identifier, and fewer than four shared 5-grams, and the tests in
