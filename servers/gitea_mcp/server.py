@@ -391,7 +391,17 @@ def build_app(
     )
     server = build_server(forge=forge, settings=settings, policy=policy)
     _configure_audit_logging()
-    app = server.streamable_http_app(streamable_http_path=settings.gitea_mcp_path)
+    app = server.streamable_http_app(
+        streamable_http_path=settings.gitea_mcp_path,
+        # The bind host has to be the one the app is told about. The MCP library
+        # auto-enables DNS-rebinding protection with a localhost-only host list
+        # when it is not given one, and every request from the compose network is
+        # then refused with 421 because the Host header is the service name
+        # (`gitea-mcp:9101`). A server bound to all interfaces is not the case
+        # that protection is for, and saying so is what lets the gateway reach
+        # this upstream inside compose.
+        host=settings.gitea_mcp_host,
+    )
     app.add_middleware(
         BearerAuthMiddleware,
         audience=policy.audience,
