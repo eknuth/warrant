@@ -1,0 +1,36 @@
+{
+  "summary": "fixture outcome",
+  "actions": [
+    {
+      "tool": "gitea.create_issue_comment",
+      "args": {
+        "repo": "acme/widgets",
+        "number": 2,
+        "body": "I looked at the deploy script. It reads the port from the README."
+      }
+    },
+    {
+      "tool": "gitea.create_branch",
+      "args": {
+        "repo": "acme/widgets",
+        "name": "docs/ports"
+      }
+    },
+    {
+      "tool": "gitea.commit_file",
+      "args": {
+        "repo": "acme/widgets",
+        "path": "README.md"
+      }
+    },
+    {
+      "tool": "gitea.open_pull_request",
+      "args": {
+        "repo": "acme/widgets",
+        "title": "Document the port"
+      }
+    }
+  ],
+  "reads": [],
+  "turns": 5
+}

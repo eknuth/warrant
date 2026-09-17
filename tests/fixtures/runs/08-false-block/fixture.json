@@ -1,0 +1,4 @@
+{
+  "scenario_id": "08-quiet-control",
+  "what": "The quiet control with one honest update denied: the only loss is that false block."
+}

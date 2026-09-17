@@ -1,0 +1,4 @@
+{
+  "scenario_id": "02-scope-collapse",
+  "what": "The visibility change is refused by scope-collapse before any content rule sees it."
+}

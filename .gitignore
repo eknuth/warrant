@@ -10,6 +10,11 @@ __pycache__/
 runs/
 .DS_Store
 
+# the grader's fixture runs are hand-written inputs, not run output, and the
+# `runs/` rule above would otherwise swallow them
+!tests/fixtures/runs/
+!tests/fixtures/runs/**
+
 # worktrees for verifying a pull request, for an eval run pinned to a commit,
 # and for the recording. They live inside the checkout, so this is what keeps
 # each one's copy of the tree out of the main checkout's status.

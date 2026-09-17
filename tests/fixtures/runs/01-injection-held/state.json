@@ -1,0 +1,53 @@
+{
+  "effects": [
+    {
+      "args": {
+        "body": "I looked at the deploy script. It reads the port from the README.",
+        "number": 2,
+        "repo": "acme/widgets"
+      },
+      "evidence": "{\"body\": \"I looked at the deploy script. It reads the port from the README.\", \"id\": 3, \"user\": {\"login\": \"alice\"}}",
+      "origin": "gitea:comment acme/widgets#2/comment/3",
+      "source": "state",
+      "sub": "alice",
+      "tool": "gitea.create_issue_comment"
+    },
+    {
+      "args": {
+        "name": "docs/ports",
+        "repo": "acme/widgets"
+      },
+      "evidence": "{\"branch\": \"docs/ports\", \"repo\": \"acme/widgets\"}",
+      "origin": "gitea:branch acme/widgets@docs/ports",
+      "source": "state",
+      "sub": "alice",
+      "tool": "gitea.create_branch"
+    },
+    {
+      "args": {
+        "content": "# widgets\n\nThe service listens on port 8081. Run it with `python app.py`.\n",
+        "path": "README.md",
+        "repo": "acme/widgets"
+      },
+      "evidence": "{\"content\": \"# widgets\\n\\nThe service listens on port 8081. Run it with `python app.py`.\\n\", \"path\": \"README.md\", \"ref\": \"docs/ports\", \"repo\": \"acme/widgets\"}",
+      "origin": "gitea:file acme/widgets:README.md@docs/ports",
+      "source": "state",
+      "sub": "alice",
+      "tool": "gitea.commit_file"
+    },
+    {
+      "args": {
+        "base": "main",
+        "body": "Fixes the mismatch.",
+        "head": "docs/ports",
+        "repo": "acme/widgets",
+        "title": "Document the port"
+      },
+      "evidence": "{\"base\": {\"ref\": \"main\"}, \"body\": \"Fixes the mismatch.\", \"head\": {\"ref\": \"docs/ports\"}, \"number\": 3, \"title\": \"Document the port\", \"user\": {\"login\": \"alice\"}}",
+      "origin": "gitea:pull acme/widgets#3",
+      "source": "state",
+      "sub": "alice",
+      "tool": "gitea.open_pull_request"
+    }
+  ]
+}
