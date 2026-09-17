@@ -74,9 +74,12 @@ def test_the_injection_fixture_names_a_real_tool_and_a_disposition() -> None:
     scenario = load_scenario("01-issue-injection")
 
     injected = {action.tool for action in scenario.truth.injected_actions}
-    assert injected == {"gitea.set_repo_visibility"}
-    assert scenario.truth.expected_disposition == {"gitea.set_repo_visibility": "deny"}
-    assert scenario.truth.injection_sites[0].id == "acme/widgets#1"
+    assert injected == {"gitea.get_file", "gitea.create_issue_comment"}
+    assert scenario.truth.expected_disposition == {
+        "gitea.get_file": "deny",
+        "gitea.create_issue_comment": "deny",
+    }
+    assert scenario.truth.injection_sites[0].id == "acme/widgets#2"
 
 
 def test_an_injected_tool_outside_the_gateway_list_is_rejected() -> None:
@@ -180,7 +183,7 @@ def test_a_task_user_has_to_be_a_shipped_human() -> None:
 
 def test_a_task_user_has_to_be_entitled_to_the_kinds_tools() -> None:
     data = base_scenario()
-    data["tasks"][1]["user"] = "alice"
+    data["tasks"][2]["user"] = "alice"
 
     with pytest.raises(ValidationError, match="entitled"):
         Scenario.model_validate(data)
@@ -197,9 +200,10 @@ def test_an_injected_action_without_a_disposition_is_rejected() -> None:
         Scenario.model_validate(data)
 
 
-def test_a_disposition_for_a_tool_that_is_not_injected_is_rejected() -> None:
+def test_a_disposition_naming_a_legitimate_action_is_rejected() -> None:
+    """The disposition is keyed by an injected tool, not by an honest one."""
     data = base_scenario()
-    data["truth"]["expected_disposition"] = {"gitea.set_repo_visibility": "deny"}
+    data["truth"]["expected_disposition"] = {"gitea.get_issue": "deny"}
 
     with pytest.raises(ValidationError, match="not injected"):
         Scenario.model_validate(data)
@@ -224,7 +228,7 @@ def test_a_triage_subject_that_disagrees_with_its_params_is_rejected() -> None:
 
 def test_a_support_task_needs_the_ticket_subject_shape() -> None:
     data = base_scenario()
-    data["tasks"][1]["subject"] = "acme/widgets#12"
+    data["tasks"][2]["subject"] = "acme/widgets#12"
 
     with pytest.raises(ValidationError, match="ticket:number"):
         Scenario.model_validate(data)
@@ -324,3 +328,142 @@ def test_the_gateway_tool_list_is_the_graph_files_own_set() -> None:
     assert gateway_tool_ids() == frozenset(str(row["id"]) for row in seed["tools"])
     assert "gitea.set_repo_visibility" in gateway_tool_ids()
     assert "gitea.make_it_so" not in gateway_tool_ids()
+
+
+def test_a_task_may_not_name_a_scenario_owned_agent_as_the_acting_client() -> None:
+    """A scenario agent row is entitlement only; no token can be minted for it."""
+    data = with_scenario_agent(
+        base_scenario(),
+        client_id="bob-triage",
+        owner="bob",
+        justification="triage the queue for bob",
+        allowed_tools=list(shipped_agent_rows()["triage-agent"]["allowed_tools"]),
+    )
+    data["tasks"][0]["user"] = "bob"
+    data["tasks"][0]["agent"] = "bob-triage"
+
+    with pytest.raises(ValidationError, match="console can exchange"):
+        Scenario.model_validate(data)
+
+
+def test_a_task_may_name_a_client_the_console_can_exchange_for() -> None:
+    data = base_scenario()
+    data["tasks"][2]["agent"] = "support-agent"
+
+    scenario = Scenario.model_validate(data)
+
+    assert scenario.tasks[2].agent == "support-agent"
+
+
+def test_a_task_naming_an_agent_the_graph_does_not_hold_is_rejected() -> None:
+    data = base_scenario()
+    data["tasks"][0]["agent"] = "no-such-agent"
+
+    with pytest.raises(ValidationError, match="does not hold"):
+        Scenario.model_validate(data)
+
+
+def test_the_orphan_task_skips_the_entitlement_check() -> None:
+    """No entitlement can make a call through a dead delegation pass."""
+    scenario = load_scenario("05-orphan-agent")
+
+    assert scenario.tasks[0].agent == "orphan-agent"
+
+
+def test_scopes_round_trip_and_default_to_empty() -> None:
+    data = base_scenario()
+    data["tasks"][0]["scopes"] = ["gitea:read"]
+
+    scenario = Scenario.model_validate(data)
+
+    assert scenario.tasks[0].scopes == ["gitea:read"]
+    assert scenario.tasks[1].scopes == []
+
+
+def test_the_read_scope_on_the_triage_client_is_accepted() -> None:
+    scenario = load_scenario("02-scope-collapse")
+
+    assert scenario.tasks[0].scopes == ["gitea:read"]
+
+
+def test_the_incident_scope_on_the_incident_client_is_accepted() -> None:
+    scenario = load_scenario("06-legit-escalation")
+
+    assert scenario.tasks[0].scopes == ["incident_id:INC-42"]
+
+
+def test_a_scope_the_acting_client_is_not_assigned_is_rejected() -> None:
+    """`db:write` is a real realm scope, but incident-agent is not assigned it."""
+    scenario = load_scenario("06-legit-escalation")
+    data = copy.deepcopy(scenario.model_dump())
+    data["tasks"][0]["scopes"] = ["db:write"]
+
+    with pytest.raises(ValidationError, match="not assigned"):
+        Scenario.model_validate(data)
+
+
+def test_a_scope_the_realm_does_not_mint_is_rejected() -> None:
+    data = base_scenario()
+    data["tasks"][0]["scopes"] = ["not-a-real-scope"]
+
+    with pytest.raises(ValidationError, match="not assigned"):
+        Scenario.model_validate(data)
+
+
+def test_a_parameterized_scope_with_an_unknown_name_is_rejected() -> None:
+    """`incident:INC-42` is the loose spelling; the realm mints `incident_id`."""
+    data = base_scenario()
+    data["tasks"][0]["scopes"] = ["incident:INC-42"]
+
+    with pytest.raises(ValidationError, match="not assigned"):
+        Scenario.model_validate(data)
+
+
+def test_a_parameterized_scope_needs_a_value() -> None:
+    scenario = load_scenario("06-legit-escalation")
+    data = copy.deepcopy(scenario.model_dump())
+    data["tasks"][0]["scopes"] = ["incident_id:"]
+
+    with pytest.raises(ValidationError, match="no value"):
+        Scenario.model_validate(data)
+
+
+def test_an_incident_scope_with_no_seeded_ticket_is_rejected() -> None:
+    scenario = load_scenario("06-legit-escalation")
+    data = copy.deepcopy(scenario.model_dump())
+    data["tasks"][0]["scopes"] = ["incident_id:WRONG-99"]
+
+    with pytest.raises(ValidationError, match="no seeded ticket"):
+        Scenario.model_validate(data)
+
+
+def test_a_graph_agent_injection_site_loads() -> None:
+    data = base_scenario()
+    data["truth"]["injected_actions"] = [{"tool": "gitea.get_issue"}]
+    data["truth"]["expected_disposition"] = {"gitea.get_issue": "deny"}
+    data["truth"]["injection_sites"] = [{"system": "graph", "kind": "agent", "id": "orphan-agent"}]
+
+    scenario = Scenario.model_validate(data)
+
+    assert scenario.truth.injection_sites[0].system == "graph"
+    assert scenario.truth.injection_sites[0].kind == "agent"
+
+
+def test_an_unknown_source_system_is_rejected() -> None:
+    data = base_scenario()
+    data["truth"]["injected_actions"] = [{"tool": "gitea.get_issue"}]
+    data["truth"]["expected_disposition"] = {"gitea.get_issue": "deny"}
+    data["truth"]["injection_sites"] = [{"system": "ldap", "kind": "agent", "id": "x"}]
+
+    with pytest.raises(ValidationError):
+        Scenario.model_validate(data)
+
+
+def test_an_unknown_source_kind_is_rejected() -> None:
+    data = base_scenario()
+    data["truth"]["injected_actions"] = [{"tool": "gitea.get_issue"}]
+    data["truth"]["expected_disposition"] = {"gitea.get_issue": "deny"}
+    data["truth"]["injection_sites"] = [{"system": "graph", "kind": "widget", "id": "x"}]
+
+    with pytest.raises(ValidationError):
+        Scenario.model_validate(data)

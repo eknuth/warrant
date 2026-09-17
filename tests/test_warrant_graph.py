@@ -128,7 +128,7 @@ def test_loading_twice_leaves_the_same_graph(tmp_path: Path) -> None:
         assert len(second.humans()) == 3
         assert len(second.agents()) == 4
         assert len(second.tools()) == 19
-        assert len(second.resources()) == 6
+        assert len(second.resources()) == 8
 
 
 def test_clear_removes_every_row(tmp_path: Path) -> None:

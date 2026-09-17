@@ -104,7 +104,12 @@
       "attributes": {
         "pkce.code.challenge.method": "S256"
       },
-      "defaultClientScopes": ["aud-triage-agent", "aud-support-agent"],
+      "defaultClientScopes": [
+        "aud-triage-agent",
+        "aud-support-agent",
+        "aud-orphan-agent",
+        "aud-incident-agent"
+      ],
       "optionalClientScopes": ["gitea:read", "db:read", "mail:send"]
     },
     {
@@ -162,6 +167,25 @@
         "standard.token.exchange.enabled": "true"
       },
       "defaultClientScopes": ["gitea:read", "orphan-agent-obo"],
+      "optionalClientScopes": ["task-id", "incident_id"]
+    },
+    {
+      "clientId": "incident-agent",
+      "name": "Incident agent",
+      "description": "Confidential agent client for the incident scenario. It holds the database and mail tools, including the key rotation, and its default scopes deliberately omit db:write so a write collapses the scope and reaches a person instead.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "secret": "${WARRANT_AGENT_CLIENT_SECRET}",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "attributes": {
+        "standard.token.exchange.enabled": "true"
+      },
+      "defaultClientScopes": ["db:read", "mail:send", "incident-agent-obo"],
       "optionalClientScopes": ["task-id", "incident_id"]
     },
     {
@@ -304,7 +328,7 @@
     },
     {
       "name": "incident_id",
-      "description": "Parameterized scope. The caller writes scope=incident_id:<value> and the value is emitted as the incident_id claim, which the escalation rule reads as the record that a task is an incident.",
+      "description": "Parameterized scope. The caller writes scope=incident_id:<value> and the value is emitted as the incident_id claim. The escalation rule reads the bare incident_id entry from the token's scopes as the record that a task is an incident.",
       "protocol": "openid-connect",
       "attributes": {
         "include.in.token.scope": "false",
@@ -366,6 +390,50 @@
           "consentRequired": false,
           "config": {
             "included.client.audience": "support-agent",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "name": "aud-orphan-agent",
+      "description": "Adds orphan-agent to the audience so orphan-agent may exchange the console token. Without it the orphan scenario cannot obtain a token at all and the orphan rule is never reached.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "audience-orphan-agent",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "orphan-agent",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "name": "aud-incident-agent",
+      "description": "Adds incident-agent to the audience so incident-agent may exchange the console token.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "audience-incident-agent",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "incident-agent",
             "access.token.claim": "true",
             "id.token.claim": "false"
           }
@@ -533,6 +601,77 @@
           "consentRequired": false,
           "config": {
             "included.client.audience": "gitea-mcp",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        },
+        {
+          "name": "audience-warrant",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "warrant",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        },
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "access.token.claim": "true",
+            "id.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "name": "incident-agent-obo",
+      "description": "Dedicated on-behalf-of scope for incident-agent. Only incident-agent has it.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "act",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "act",
+            "claim.value": "{\"sub\":\"incident-agent\"}",
+            "jsonType.label": "JSON",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false"
+          }
+        },
+        {
+          "name": "audience-postgres-mcp",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "postgres-mcp",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        },
+        {
+          "name": "audience-mail-mcp",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "mail-mcp",
             "access.token.claim": "true",
             "id.token.claim": "false"
           }

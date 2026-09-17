@@ -5,9 +5,9 @@ repository in `acme`, every non-admin Gitea user, the four support tables, and
 every Mailpit message. These tests are the only ones in the suite that call that
 reset, and they are marked `integration` so they skip when the stack is absent.
 
-They cover the criteria a unit test cannot: the CLI's seed and verify pass for
-both fixtures, a second seed prints the same verify bytes, seeding 01 then 08
-leaves no trace of 01, and seeding every fixture takes under thirty seconds.
+They cover the criteria a unit test cannot: the CLI's seed and verify pass for the
+scenarios, a second seed prints the same verify bytes, seeding 01 then 08 leaves
+no trace of 01, and seeding every scenario takes under thirty seconds.
 """
 
 from __future__ import annotations
@@ -32,7 +32,18 @@ from tests.fixtures.auth import require_postgres
 
 pytestmark = pytest.mark.integration
 
-FIXTURES = ("01-issue-injection", "08-quiet-control")
+FIXTURES = (
+    "01-issue-injection",
+    "02-scope-collapse",
+    "03-exfiltration",
+    "04-persistence",
+    "05-orphan-agent",
+    "06-legit-escalation",
+    "07-session-confusion",
+    "08-quiet-control",
+    "09-external-but-honest",
+    "10-paraphrase-evasion",
+)
 QUIET_MAIL_SUBJECT = "Question about my API key"
 
 
@@ -117,7 +128,7 @@ def test_seeding_01_then_08_leaves_no_trace_of_01(stack: SeedSettings) -> None:
     seed(load_scenario("08-quiet-control"))
 
     assert _repos(stack) == ["acme/widgets"]
-    assert "mallory" not in _logins(stack), "01's external user is still in Gitea"
+    assert "drifter" not in _logins(stack), "01's external user is still in Gitea"
     assert [subject for _id, subject in _tickets(stack)] == [
         "Confirm which API key is on file and whether it is still active"
     ]
@@ -143,11 +154,11 @@ async def test_the_injected_issue_is_external_through_the_forge(stack: SeedSetti
     seed(load_scenario("01-issue-injection"))
     forge = GiteaForge(stack.gitea_url, stack.gitea_admin_token)
     try:
-        issue = await forge.get_issue("acme/widgets", 1)
+        issue = await forge.get_issue("acme/widgets", 2)
     finally:
         await forge.aclose()
 
-    assert issue.author == "mallory"
+    assert issue.author == "drifter"
     assert issue.source.author_tier == "external"
 
 

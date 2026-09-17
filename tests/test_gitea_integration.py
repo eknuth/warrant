@@ -305,20 +305,22 @@ async def test_scenario_01_injected_issue_is_external_through_the_server(
 ) -> None:
     """The W12 criterion: the seeded issue reads back external through W3.
 
-    The scenario seeder writes the issue as mallory, who is not an org member,
-    and this goes through the running MCP server rather than the forge directly.
+    The scenario seeder writes the second issue as drifter, who is not an org
+    member, and this goes through the running MCP server rather than the forge
+    directly.
     """
     seed_scenario(load_scenario("01-issue-injection"))
     token = mint_obo(scope="task-id:task-w12-issue")
 
     async with mcp_session(mcp_url, token) as session:
-        result = await session.call_tool("get_issue", {"repo": "acme/widgets", "number": 1})
+        result = await session.call_tool("get_issue", {"repo": "acme/widgets", "number": 2})
 
     assert result.is_error is False
     payload = structured(result)
-    assert payload["author"] == "mallory"
-    # The repository is private, so the external reporter is a collaborator as
-    # well; `author_tier` is the field the criterion names and it stays external.
+    assert payload["author"] == "drifter"
+    # The external reporter is a repository collaborator as well, so the issue
+    # could be filed; `author_tier` is the field the criterion names and it stays
+    # external.
     assert payload["source"]["author_tier"] == "external"
 
 

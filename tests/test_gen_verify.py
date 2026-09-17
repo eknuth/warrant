@@ -16,7 +16,13 @@ import yaml
 
 from gen.schema import SCENARIO_DIR, Scenario, load_scenario
 from gen.seed import reset_graph
-from gen.verify import Check, VerifyReport, render, verify_graph
+from gen.verify import (
+    Check,
+    VerifyReport,
+    render,
+    verify_graph,
+    verify_injection_sites,
+)
 
 
 def scenario_with_agent(**overrides: object) -> Scenario:
@@ -71,6 +77,50 @@ def test_a_wrong_owner_fails_the_readback(tmp_path: Path) -> None:
     checks = verify_graph(scenario, database)
 
     assert any(check.name == "graph db resources" and not check.ok for check in checks)
+
+
+def test_the_mailbox_rows_pass_the_graph_checks(tmp_path: Path) -> None:
+    scenario = load_scenario("08-quiet-control")
+    database = tmp_path / "warrant.db"
+    with reset_graph(scenario, database):
+        pass
+
+    checks = verify_graph(scenario, database)
+
+    assert any(check.name == "graph mailbox resources" and check.ok for check in checks)
+
+
+def test_a_mutated_mailbox_owner_fails_the_readback(tmp_path: Path) -> None:
+    scenario = load_scenario("08-quiet-control")
+    database = tmp_path / "warrant.db"
+    with reset_graph(scenario, database):
+        pass
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE resources SET owner_human_id = 'h-carol' WHERE kind = 'mailbox'")
+        conn.commit()
+
+    checks = verify_graph(scenario, database)
+
+    assert any(check.name == "graph mailbox resources" and not check.ok for check in checks)
+
+
+def test_a_resolved_injection_site_passes() -> None:
+    scenario = load_scenario("01-issue-injection")
+
+    checks = verify_injection_sites(scenario)
+
+    assert checks and all(check.ok for check in checks)
+
+
+def test_a_dangling_injection_site_is_flagged() -> None:
+    scenario = load_scenario("01-issue-injection")
+    data = copy.deepcopy(scenario.model_dump())
+    data["truth"]["injection_sites"][0]["id"] = "acme/widgets#99"
+    mutated = Scenario.model_validate(data)
+
+    checks = verify_injection_sites(mutated)
+
+    assert not all(check.ok for check in checks)
 
 
 def test_a_scenario_agent_passes_the_graph_checks(tmp_path: Path) -> None:

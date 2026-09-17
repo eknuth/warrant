@@ -22,7 +22,7 @@ REALM: dict[str, Any] = json.loads((REPO / "infra/keycloak/warrant-realm.json").
 REALM_SCOPE_NAMES = {scope["name"] for scope in REALM["clientScopes"]}
 GRAPH: dict[str, Any] = yaml.safe_load((REPO / "infra" / "graph.yml").read_text())
 
-AGENTS = ("triage-agent", "support-agent", "orphan-agent")
+AGENTS = ("triage-agent", "support-agent", "orphan-agent", "incident-agent")
 RESOURCE_SERVERS = ("gitea-mcp", "postgres-mcp", "mail-mcp")
 
 
@@ -315,7 +315,13 @@ def test_incident_id_is_a_parameterized_scope_like_task_id() -> None:
 
     # Optional, like `task-id`: a caller asks for it, a client does not carry it
     # by default.
-    for client_id in ("triage-agent", "support-agent", "orphan-agent", "warrant"):
+    for client_id in (
+        "triage-agent",
+        "support-agent",
+        "orphan-agent",
+        "incident-agent",
+        "warrant",
+    ):
         scopes = set(client(client_id).get("optionalClientScopes", []))
         assert "incident_id" in scopes, client_id
         assert "incident_id" not in set(client(client_id).get("defaultClientScopes", [])), client_id
@@ -353,3 +359,37 @@ def test_a_support_agent_console_token_can_be_exchanged() -> None:
 
     console = client("console")
     assert {"aud-triage-agent", "aud-support-agent"} <= set(console.get("defaultClientScopes", []))
+
+
+def test_the_orphan_and_incident_audiences_ride_the_console_login() -> None:
+    """A scenario cannot act as a client the console token cannot be exchanged for.
+
+    The orphan scenario names `orphan-agent` as its acting client and the
+    escalation scenario names `incident-agent`. Each needs its audience on the
+    console login, or the exchange is refused before any policy sees a call.
+    """
+    console = set(client("console").get("defaultClientScopes", []))
+
+    for name, agent in (
+        ("aud-orphan-agent", "orphan-agent"),
+        ("aud-incident-agent", "incident-agent"),
+    ):
+        scope = next(scope for scope in REALM["clientScopes"] if scope["name"] == name)
+        mapper = next(m for m in scope["protocolMappers"] if m.get("protocolMapper"))
+        assert mapper["protocolMapper"] == "oidc-audience-mapper"
+        assert mapper["config"]["included.client.audience"] == agent
+        assert name in console
+
+
+def test_the_incident_agent_omits_the_write_scope_on_purpose() -> None:
+    """The scope collapse is the scenario, so the client must not hold `db:write`.
+
+    The incident scenario expects the key rotation to be refused by
+    `scope-collapse` and answered by a person. A default `db:write` would let the
+    call pass the scope rule and the scenario would prove nothing.
+    """
+    model = client("incident-agent")
+    defaults = set(model.get("defaultClientScopes", []))
+
+    assert "db:write" not in defaults
+    assert "incident-agent-obo" in defaults

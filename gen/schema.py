@@ -2,8 +2,8 @@
 
 A scenario file is deterministic YAML. It names what to seed in the org, the
 database, the inbox, and the access graph, which tasks to run, and what the
-grader should see. W13 writes the remaining six files; the two fixtures here
-are minimal and honest, and W13 may rewrite them.
+grader should see. W13 wrote the other eight files and rewrote the two fixtures
+that W12 left here.
 
 The models validate more than shape. A task's `subject` has to agree with its
 `params`, a ticket has to name a customer this file seeds, an issue author has
@@ -17,16 +17,21 @@ is the authority for the shipped ids, and the gateway upserts it at startup, so
 a scenario override would be reverted by the next restart. Scenario-owned
 agents use new ids and sit beside the shipped ones.
 
-A task's `user` is checked two ways. It has to be one of the shipped humans, and
-it has to be entitled to the tools the task's kind implies: the role code
-exchanges as one fixed client per kind, so the human named has to own an agent
-that holds those tools, which is the union the baseline permit reads as
-`onBehalfOf.entitledTools`.
+A task's `user` and `agent` are checked against both the graph and the realm. A
+task names an agent, defaulting to the shipped client for its kind; the agent has
+to be a client the console can exchange for, which is the set the realm's
+console audiences name, and it has to have a graph row for the allowlist and the
+justification. A scenario-owned agent row is entitlement only and can never be
+the acting client. The human named has to own a live agent that holds the acting
+agent's tools, which is the union the baseline permit reads as
+`onBehalfOf.entitledTools`. A task's `scopes` are checked against the realm's
+client scopes, so a scope the realm does not mint fails at load rather than
+becoming a silent deny.
 
-`expected_disposition` is keyed by the injected action's tool. A block with an
+`expected_disposition` is keyed by an injected action's tool. A block with an
 injected action and no disposition for it, or a disposition naming a tool that
-is not injected, is rejected: those are the two ways a truth block can look
-complete while saying nothing about what should happen.
+is not injected, is rejected. A legitimate action is not a disposition key, so a
+scenario says what the poison should get and not what the honest calls should.
 
 `ActionMatch` matching semantics, for W14. The `tool` has to equal the
 gateway's re-exported tool name exactly. Each key of `args_include` names a call
@@ -43,6 +48,7 @@ Field-by-field documentation lives in `docs/decisions/w12-scenario-seeders.md`.
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -57,6 +63,7 @@ from warrant.graph import Agent, live_justification
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCENARIO_DIR = Path(__file__).resolve().parent / "scenarios"
 GRAPH_SEED = REPO_ROOT / "infra" / "graph.yml"
+REALM_SEED = REPO_ROOT / "infra" / "keycloak" / "warrant-realm.json"
 
 Disposition = Literal["allow", "deny", "escalate"]
 Visibility = Literal["public", "private"]
@@ -114,6 +121,92 @@ def shipped_agent_rows() -> dict[str, dict[str, Any]]:
 def shipped_human_ids() -> dict[str, str]:
     """The shipped human ids, keyed by login."""
     return {str(row["login"]): str(row["id"]) for row in graph_seed_data().get("humans", [])}
+
+
+@lru_cache(maxsize=1)
+def realm_seed_data() -> dict[str, Any]:
+    """`infra/keycloak/warrant-realm.json` as a mapping, read once per process.
+
+    The realm is the authority for the scopes a run can request and the clients
+    it can exchange as, the same way `infra/graph.yml` is the authority for the
+    tools. Reading it here makes a scope or an acting client the realm does not
+    mint a load error rather than a silent deny at run time.
+    """
+    data = json.loads(REALM_SEED.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise SchemaError(f"{REALM_SEED} did not parse to a mapping")
+    return data
+
+
+def realm_client_assigned_scopes(client_id: str) -> frozenset[str]:
+    """The client scopes a realm client is assigned, default and optional.
+
+    The assignment is what the token exchange can carry back for that client; a
+    scope the client is not assigned is refused by the realm rather than
+    silently dropped. Reading the client's own lists rather than the realm's
+    global scope table is what makes that refusal a load error.
+    """
+    clients = {str(row["clientId"]): row for row in realm_seed_data().get("clients", [])}
+    client = clients.get(client_id)
+    if client is None:
+        return frozenset()
+    return frozenset(
+        str(name)
+        for name in list(client.get("defaultClientScopes", []))
+        + list(client.get("optionalClientScopes", []))
+    )
+
+
+def realm_parameterized_scope_names() -> frozenset[str]:
+    """The client scopes the realm mints a `<name>:<value>` value for."""
+    return frozenset(
+        str(scope["name"])
+        for scope in realm_seed_data().get("clientScopes", [])
+        if str(scope.get("attributes", {}).get("is.parameterized.scope", "")).lower() == "true"
+    )
+
+
+def realm_acting_agents() -> frozenset[str]:
+    """The clients a console login can be exchanged for.
+
+    The console's own scopes carry the `aud-<agent>` audience mappers, so the
+    clients those mappers name are the ones the console token can be exchanged
+    for. Each also has to allow token exchange. This is the set a task may name
+    as its acting client; a scenario-owned agent row is entitlement only.
+
+    The console's optional scopes are read as well as its default scopes, so an
+    optional audience scope on the console widens the legal acting-client set.
+    """
+    data = realm_seed_data()
+    clients = {str(row["clientId"]): row for row in data.get("clients", [])}
+    console = clients.get("console")
+    if console is None:
+        return frozenset()
+    scopes = {str(scope["name"]): scope for scope in data.get("clientScopes", [])}
+    assigned = list(console.get("defaultClientScopes", [])) + list(
+        console.get("optionalClientScopes", [])
+    )
+    named: set[str] = set()
+    for name in assigned:
+        scope = scopes.get(str(name))
+        if scope is None:
+            continue
+        for mapper in scope.get("protocolMappers", []):
+            if mapper.get("protocolMapper") != "oidc-audience-mapper":
+                continue
+            audience = mapper.get("config", {}).get("included.client.audience")
+            if audience:
+                named.add(str(audience))
+    return frozenset(
+        client_id
+        for client_id in named
+        if str(
+            clients.get(client_id, {})
+            .get("attributes", {})
+            .get("standard.token.exchange.enabled", "")
+        ).lower()
+        == "true"
+    )
 
 
 def _parse_iso(value: str | None) -> datetime | None:
@@ -206,12 +299,29 @@ class ActionMatch(BaseModel):
 
 
 class SourceRef(BaseModel):
-    """Where the poison lives: one record in one seeded system."""
+    """Where the poison lives: one record in one seeded system.
+
+    The first three systems hold the seeded objects. `graph` names the access
+    graph's own rows, which is the one seed block that lives in this file rather
+    than in a system the reset rebuilds from the database, the org, or the
+    inbox. The orphan scenario's poison is the agent row itself, so it is the
+    first site that has to reach the graph.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    system: Literal["gitea", "db", "mail"]
-    kind: Literal["repo", "file", "issue", "comment", "customer", "ticket", "note", "message"]
+    system: Literal["gitea", "db", "mail", "graph"]
+    kind: Literal[
+        "repo",
+        "file",
+        "issue",
+        "comment",
+        "customer",
+        "ticket",
+        "note",
+        "message",
+        "agent",
+    ]
     id: str
     note: str = ""
 
@@ -455,6 +565,16 @@ class TaskSpec(BaseModel):
     task. Tasks that share a non-empty `concurrent_group` run together through
     W10's `run_concurrent`; that runner is W15's to call, and this field is the
     grouping it reads.
+
+    `agent` names the client the run exchanges as. It defaults to the shipped
+    client the task's kind uses, which is what the two fixtures rely on, and a
+    task may name another agent the graph holds. The orphan scenario names
+    `orphan-agent`, whose justification is empty: the task is the orphan case,
+    every call through it is refused, and the entitlement check is skipped
+    because no entitlement can make a call pass. `scopes` is the scope set the
+    run has to request, as the realm spells it (`gitea:read`, or the
+    parameterized `incident_id:INC-42`). An empty list means the agent client's
+    own defaults.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -463,6 +583,8 @@ class TaskSpec(BaseModel):
     user: str
     subject: str
     params: dict[str, Any] = Field(default_factory=dict)
+    agent: str | None = None
+    scopes: list[str] = Field(default_factory=list)
     concurrent_group: str | None = None
 
     @model_validator(mode="after")
@@ -494,8 +616,9 @@ class Truth(BaseModel):
     `legitimate_actions` are calls the task should be allowed to make.
     `injected_actions` are calls the poison asks for and the run must not make.
     `expected_disposition` is keyed by an injected action's tool; every injected
-    tool needs one and no other key is allowed. `escalation_allowed` says
-    whether a denial may be answered by a person.
+    tool needs one and no other key is allowed, so a legitimate action is not a
+    disposition key. `escalation_allowed` says whether a denial may be answered
+    by a person.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -540,6 +663,7 @@ class Scenario(BaseModel):
         self._check_agents_are_scenario_owned()
         self._check_owners()
         self._check_task_users()
+        self._check_task_scopes()
         self._check_gitea()
         self._check_repos_have_graph_rows()
         return self
@@ -594,41 +718,119 @@ class Scenario(BaseModel):
                 )
 
     def _check_task_users(self) -> None:
-        """The task's user has to reach the tools its kind's agent holds.
+        """The task's user has to reach the tools its acting agent holds.
 
-        The role code exchanges as one fixed client per kind, so the run only
-        works when the human named owns a live agent entitled to that client's
-        tools. That union is `onBehalfOf.entitledTools`, which the baseline
-        permit requires. An agent whose justification is empty or expired
-        confers nothing, through the engine's own `live_justification`, so a
-        scenario cannot rely on an agent the baseline would refuse.
+        The acting agent is the client the run exchanges as. It defaults to the
+        shipped client for the task's kind and a task may name another, but it
+        has to be a client the console can be exchanged for: a scenario-owned
+        agent row is entitlement only and no token can be minted for it. The
+        row also has to exist in the graph, because the allowlist and the
+        justification come from there.
+
+        The run then only works when the human named owns a live agent entitled
+        to the acting agent's tools. That union is
+        `onBehalfOf.entitledTools`, which the baseline permit requires. An agent
+        whose justification is empty or expired confers nothing, through the
+        engine's own `live_justification`, so a scenario cannot rely on an agent
+        the baseline would refuse.
+
+        When the acting agent itself has no live justification the task is the
+        orphan case: `10-orphan.cedar` refuses every call, no entitlement can
+        change that, and the check is skipped rather than asking a user to be
+        entitled to a client that may not act. The task's user is still checked
+        against the shipped humans, so the file cannot name a caller the realm
+        has never heard of.
         """
         humans = graph_human_logins()
         by_login = shipped_human_ids()
         now = datetime.now(UTC)
         agents = _agent_rows(self, by_login)
+        acting_clients = realm_acting_agents()
         for task in self.tasks:
             if task.user not in humans:
                 raise ValueError(
                     f"task {task.subject!r} names user {task.user!r}, "
                     f"who is not one of the shipped humans {sorted(humans)}"
                 )
-            kind_agent = agents.get(KIND_AGENT[task.kind])
-            if kind_agent is None:
+            acting_id = task.agent or KIND_AGENT[task.kind]
+            acting = agents.get(acting_id)
+            if acting is None:
                 raise ValueError(
-                    f"the graph has no {KIND_AGENT[task.kind]!r} row for a {task.kind} task"
+                    f"task {task.subject!r} names agent {acting_id!r}, "
+                    "which the access graph does not hold"
                 )
+            if acting_id not in acting_clients:
+                raise ValueError(
+                    f"task {task.subject!r} names agent {acting_id!r}, which is not a client "
+                    f"the console can exchange for; the realm has {sorted(acting_clients)}"
+                )
+            if not live_justification(acting, now):
+                continue
             user_id = by_login[task.user]
             entitled: set[str] = set()
             for row in agents.values():
                 if row.owner_human_id == user_id and live_justification(row, now):
                     entitled.update(row.allowed_tools)
-            needed = set(kind_agent.allowed_tools)
+            needed = set(acting.allowed_tools)
             missing = sorted(needed - entitled)
             if missing:
                 raise ValueError(
                     f"task {task.subject!r} runs as {task.user!r}, whose live agents do not hold "
                     f"{missing}; the baseline permit needs the user entitled to them"
+                )
+
+    def _check_task_scopes(self) -> None:
+        """Every declared scope has to be one the acting client is assigned.
+
+        The token exchange can carry back less than a client holds, and a scope
+        the client is not assigned is refused by the realm rather than silently
+        dropped, so the check reads the acting client's own default and optional
+        scopes instead of the realm's global scope table. A parameterized scope
+        is written `<name>:<value>` and needs a non-empty value; a
+        non-parameterized scope has to be the whole string. The realm file does
+        not carry Keycloak's built-in scopes such as `openid` or `profile`, so
+        those are rejected here too, which is a limit of reading the file rather
+        than a need any scenario has.
+
+        A declared `incident_id:<value>` is also tied to the seed: at least one
+        ticket this file seeds has to carry that incident id, because the value
+        is the record the escalation reads and a value no ticket carries cannot
+        be the incident the task is about.
+        """
+        parameterized = realm_parameterized_scope_names()
+        for task in self.tasks:
+            acting_id = task.agent or KIND_AGENT[task.kind]
+            assigned = realm_client_assigned_scopes(acting_id)
+            for scope in task.scopes:
+                if scope in parameterized:
+                    raise ValueError(
+                        f"task {task.subject!r} declares parameterized scope {scope!r} with no "
+                        "value"
+                    )
+                if scope in assigned:
+                    continue
+                name, separator, value = scope.partition(":")
+                if separator and name in parameterized and name in assigned:
+                    if not value:
+                        raise ValueError(
+                            f"task {task.subject!r} declares parameterized scope {scope!r} with "
+                            "no value"
+                        )
+                    if name == "incident_id":
+                        seeded = {
+                            ticket.incident_id
+                            for ticket in self.seed.db.tickets
+                            if ticket.incident_id
+                        }
+                        if value not in seeded:
+                            raise ValueError(
+                                f"task {task.subject!r} declares incident scope {scope!r}, but "
+                                f"no seeded ticket carries {value!r}; seeded: {sorted(seeded)}"
+                            )
+                    continue
+                raise ValueError(
+                    f"task {task.subject!r} declares scope {scope!r}, which the acting client "
+                    f"{acting_id!r} is not assigned; the client has {sorted(assigned)}"
                 )
 
     def _check_gitea(self) -> None:
