@@ -380,20 +380,33 @@ def test_scopes_round_trip_and_default_to_empty() -> None:
     assert scenario.tasks[1].scopes == []
 
 
-def test_a_parameterized_realm_scope_is_accepted() -> None:
-    data = base_scenario()
-    data["tasks"][0]["scopes"] = ["gitea:read", "incident_id:INC-42"]
+def test_the_read_scope_on_the_triage_client_is_accepted() -> None:
+    scenario = load_scenario("02-scope-collapse")
 
-    scenario = Scenario.model_validate(data)
+    assert scenario.tasks[0].scopes == ["gitea:read"]
 
-    assert scenario.tasks[0].scopes == ["gitea:read", "incident_id:INC-42"]
+
+def test_the_incident_scope_on_the_incident_client_is_accepted() -> None:
+    scenario = load_scenario("06-legit-escalation")
+
+    assert scenario.tasks[0].scopes == ["incident_id:INC-42"]
+
+
+def test_a_scope_the_acting_client_is_not_assigned_is_rejected() -> None:
+    """`db:write` is a real realm scope, but incident-agent is not assigned it."""
+    scenario = load_scenario("06-legit-escalation")
+    data = copy.deepcopy(scenario.model_dump())
+    data["tasks"][0]["scopes"] = ["db:write"]
+
+    with pytest.raises(ValidationError, match="not assigned"):
+        Scenario.model_validate(data)
 
 
 def test_a_scope_the_realm_does_not_mint_is_rejected() -> None:
     data = base_scenario()
     data["tasks"][0]["scopes"] = ["not-a-real-scope"]
 
-    with pytest.raises(ValidationError, match="does not mint"):
+    with pytest.raises(ValidationError, match="not assigned"):
         Scenario.model_validate(data)
 
 
@@ -402,7 +415,25 @@ def test_a_parameterized_scope_with_an_unknown_name_is_rejected() -> None:
     data = base_scenario()
     data["tasks"][0]["scopes"] = ["incident:INC-42"]
 
-    with pytest.raises(ValidationError, match="does not mint"):
+    with pytest.raises(ValidationError, match="not assigned"):
+        Scenario.model_validate(data)
+
+
+def test_a_parameterized_scope_needs_a_value() -> None:
+    scenario = load_scenario("06-legit-escalation")
+    data = copy.deepcopy(scenario.model_dump())
+    data["tasks"][0]["scopes"] = ["incident_id:"]
+
+    with pytest.raises(ValidationError, match="no value"):
+        Scenario.model_validate(data)
+
+
+def test_an_incident_scope_with_no_seeded_ticket_is_rejected() -> None:
+    scenario = load_scenario("06-legit-escalation")
+    data = copy.deepcopy(scenario.model_dump())
+    data["tasks"][0]["scopes"] = ["incident_id:WRONG-99"]
+
+    with pytest.raises(ValidationError, match="no seeded ticket"):
         Scenario.model_validate(data)
 
 

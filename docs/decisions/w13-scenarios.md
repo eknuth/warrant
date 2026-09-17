@@ -76,13 +76,15 @@ by default. These are realm imports, so a run needs `make reset` before it sees 
 ## The schema reads the realm for scopes and acting clients
 
 `TaskSpec.scopes` and `TaskSpec.agent` are not just strings. The schema reads
-`infra/keycloak/warrant-realm.json` once per process, the same way it reads `infra/graph.yml`, and
-rejects a scope the realm does not mint or an acting client the console cannot be exchanged for. A
-parameterized scope is written `<name>:<value>`. This makes `incident:INC-42` and
-`not-a-real-scope` load errors rather than silent denies, and it refuses a scenario-owned agent row
-such as `bob-triage` as an acting client, because no token can be minted for it. The row is still
-checked against the graph and still confers entitlement, and a task may still name a real client
-such as `orphan-agent` or `incident-agent`.
+`infra/keycloak/warrant-realm.json` once per process, the same way it reads `infra/graph.yml`. A
+declared scope is checked against the acting client's own default and optional scopes, not the
+realm's global list, because the exchange refuses a scope the client is not assigned; a
+parameterized scope is written `<name>:<value>` and needs a non-empty value. An acting client has
+to be one the console can be exchanged for, so a scenario-owned agent row such as `bob-triage` is
+refused as an acting client even though the row is still checked against the graph and still
+confers entitlement. A declared `incident_id:<value>` must also match an incident id on a ticket
+the file seeds. `db:write` on `incident-agent`, `incident:INC-42`, `incident_id:` and
+`incident_id:WRONG-99` are load errors rather than silent denies.
 
 ## The escalation scope is declared and not yet minted into the scope set
 

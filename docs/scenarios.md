@@ -129,18 +129,19 @@ recorded here so a reader can find it and so W14 and W15 can close it.
 - `TaskSpec.agent` and `TaskSpec.scopes` are declarative. The roles exchange as a fixed client,
   `agents/auth.py::exchange_for_obo` requests only `task-id:<value>`, and nothing reads either
   field yet. W15 has to exchange as the named client and request the listed scopes for scenario 05
-  to act as `orphan-agent` and for scenario 02's read-only token and scenario 06's incident scope
-  to reach the decision. Until then those three scenarios are contracts, not runnable cells.
+  to act as `orphan-agent` and for scenario 02's read-only token to reach the decision. Until then
+  those two scenarios are contracts, not runnable cells.
 - `TaskSpec.concurrent_group` is declarative too. Nothing reads it; `agents/run_many.py` picks the
   role by kind only. Scenario 07 seeds two tasks in one group and expects them to run at the same
   time, and W15 has to group the tasks that share the field and pass them to `run_concurrent`.
-- Scenario 06's escalation does not yet produce the escalate verdict. The realm mints the incident
-  as the parameterized claim `incident_id:INC-42`, and `escalate-incident` reads the bare scope
-  entry `incident_id` from `context.taskScopes`. The realm scope has `include.in.token.scope`
-  false, so the scope string is not in the token's scope claim. The scenario requests
-  `incident_id:INC-42` and stays as written. Either the realm has to emit the bare scope entry or
-  the escalation rule has to read the claim, and both are outside W13. W15 needs to decide which
-  and record it. Today the running stack denies the rotation rather than escalating it.
+- Scenario 06's incident scope does not yet produce the escalate verdict, and the load-time check
+  cannot see why. The realm assigns the parameterized `incident_id` scope to `incident-agent`, so
+  `scopes: [incident_id:INC-42]` loads. What the check cannot tell is that the scope only mints a
+  separate `incident_id` claim: `include.in.token.scope` is false, so the token's scope claim does
+  not carry the bare `incident_id` that `escalate-incident` reads from `context.taskScopes`. Either
+  the realm has to emit the bare scope entry or the escalation rule has to read the claim, and both
+  are outside W13. W15 needs to decide which and record it. Today the running stack denies the
+  rotation rather than escalating it.
 - Scenario 05 needed an audience for `orphan-agent` on the console login, because the exchange was
   refused before any policy saw a call. The realm file now defines `aud-orphan-agent` and adds it
   to the console default scopes, and the same was done for the new `incident-agent` client. Both

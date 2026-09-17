@@ -138,9 +138,23 @@ def realm_seed_data() -> dict[str, Any]:
     return data
 
 
-def realm_client_scope_names() -> frozenset[str]:
-    """Every client-scope name the realm defines."""
-    return frozenset(str(scope["name"]) for scope in realm_seed_data().get("clientScopes", []))
+def realm_client_assigned_scopes(client_id: str) -> frozenset[str]:
+    """The client scopes a realm client is assigned, default and optional.
+
+    The assignment is what the token exchange can carry back for that client; a
+    scope the client is not assigned is refused by the realm rather than
+    silently dropped. Reading the client's own lists rather than the realm's
+    global scope table is what makes that refusal a load error.
+    """
+    clients = {str(row["clientId"]): row for row in realm_seed_data().get("clients", [])}
+    client = clients.get(client_id)
+    if client is None:
+        return frozenset()
+    return frozenset(
+        str(name)
+        for name in list(client.get("defaultClientScopes", []))
+        + list(client.get("optionalClientScopes", []))
+    )
 
 
 def realm_parameterized_scope_names() -> frozenset[str]:
@@ -159,6 +173,9 @@ def realm_acting_agents() -> frozenset[str]:
     clients those mappers name are the ones the console token can be exchanged
     for. Each also has to allow token exchange. This is the set a task may name
     as its acting client; a scenario-owned agent row is entitlement only.
+
+    The console's optional scopes are read as well as its default scopes, so an
+    optional audience scope on the console widens the legal acting-client set.
     """
     data = realm_seed_data()
     clients = {str(row["clientId"]): row for row in data.get("clients", [])}
@@ -763,25 +780,57 @@ class Scenario(BaseModel):
                 )
 
     def _check_task_scopes(self) -> None:
-        """Every declared scope has to be one the realm mints.
+        """Every declared scope has to be one the acting client is assigned.
 
-        A scope the realm does not define is accepted by a run and then never
-        appears in the token, so a policy that reads it denies forever. The
-        realm's client-scope names are the authority, and a parameterized scope
-        is written `<name>:<value>`.
+        The token exchange can carry back less than a client holds, and a scope
+        the client is not assigned is refused by the realm rather than silently
+        dropped, so the check reads the acting client's own default and optional
+        scopes instead of the realm's global scope table. A parameterized scope
+        is written `<name>:<value>` and needs a non-empty value; a
+        non-parameterized scope has to be the whole string. The realm file does
+        not carry Keycloak's built-in scopes such as `openid` or `profile`, so
+        those are rejected here too, which is a limit of reading the file rather
+        than a need any scenario has.
+
+        A declared `incident_id:<value>` is also tied to the seed: at least one
+        ticket this file seeds has to carry that incident id, because the value
+        is the record the escalation reads and a value no ticket carries cannot
+        be the incident the task is about.
         """
-        names = realm_client_scope_names()
         parameterized = realm_parameterized_scope_names()
         for task in self.tasks:
+            acting_id = task.agent or KIND_AGENT[task.kind]
+            assigned = realm_client_assigned_scopes(acting_id)
             for scope in task.scopes:
-                if scope in names:
+                if scope in parameterized:
+                    raise ValueError(
+                        f"task {task.subject!r} declares parameterized scope {scope!r} with no "
+                        "value"
+                    )
+                if scope in assigned:
                     continue
-                name, separator, _ = scope.partition(":")
-                if separator and name in parameterized:
+                name, separator, value = scope.partition(":")
+                if separator and name in parameterized and name in assigned:
+                    if not value:
+                        raise ValueError(
+                            f"task {task.subject!r} declares parameterized scope {scope!r} with "
+                            "no value"
+                        )
+                    if name == "incident_id":
+                        seeded = {
+                            ticket.incident_id
+                            for ticket in self.seed.db.tickets
+                            if ticket.incident_id
+                        }
+                        if value not in seeded:
+                            raise ValueError(
+                                f"task {task.subject!r} declares incident scope {scope!r}, but "
+                                f"no seeded ticket carries {value!r}; seeded: {sorted(seeded)}"
+                            )
                     continue
                 raise ValueError(
-                    f"task {task.subject!r} declares scope {scope!r}, which the realm does not "
-                    f"mint; known scopes include {sorted(names)}"
+                    f"task {task.subject!r} declares scope {scope!r}, which the acting client "
+                    f"{acting_id!r} is not assigned; the client has {sorted(assigned)}"
                 )
 
     def _check_gitea(self) -> None:
