@@ -5,6 +5,10 @@ Thin wrapper, no agent logic of its own. It starts one SDK runtime on the
 what the run cost to `runs/dsh/<session>.json` so a README can report the build
 cost without anyone retyping a number.
 
+A session id names one run. The runtime refuses a prompt for an id that already
+exists, so the runner does not continue a conversation by reusing one; a failed
+run is recorded beside an existing record rather than over it.
+
     uv run python scripts/dsh_run.py --effort max --session w5 "Implement EDW-1420"
 
 On effort: there is one DeepSeek cloud model, so the effort levels are
@@ -37,6 +41,12 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+# `[tool.uv] package = false` keeps the project out of the venv, and running a
+# file puts its own directory on `sys.path` rather than the repository root. Add
+# the root here so `uv run python scripts/dsh_run.py ...` can import `warrant`
+# from any cwd with no `PYTHONPATH` from the caller.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from warrant.config import RUNS_DIR as RUNS_ROOT
 from warrant.config import commit_is_dirty, commit_sha
@@ -77,7 +87,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--session",
         default=None,
-        help="session id; reusing one continues that durable conversation",
+        help="session id; must be new and one path component, the runtime rejects a reused one",
     )
     parser.add_argument("--profile", default=DEFAULT_PROFILE, help="dsh profile to run")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="model id")
@@ -103,6 +113,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="bound each turn; unbounded by default",
     )
     args = parser.parse_args(argv)
+    if args.session is not None:
+        try:
+            record_stem(args.session)
+        except ValueError as exc:
+            parser.error(str(exc))
     if not args.prompt:
         text = sys.stdin.read().strip()
         if not text:
@@ -148,6 +163,36 @@ def write_record(path: Path, record: dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
     tmp.replace(path)
+
+
+def record_stem(session_id: str) -> str:
+    """The record's file stem for one session id.
+
+    A session id names one file under the runs directory, so an id that is not a
+    single path component is refused. `--session ../../x` would otherwise make
+    the record path climb out of that directory, and the record is written for a
+    failed run too, so a runtime that rejects the id does not make the write
+    unreachable.
+    """
+    if not session_id or session_id in (".", "..") or Path(session_id).name != session_id:
+        raise ValueError(f"session id {session_id!r} must be one path component")
+    return session_id
+
+
+def record_target(session_id: str, *, failed: bool) -> Path:
+    """Where one run's record goes.
+
+    The canonical name is `<session>.json`. A failed run whose id already has a
+    record goes to a sibling `<session>.failed-<stamp>.json` instead, so a
+    failure cannot erase an earlier run's cost. A successful run keeps the
+    canonical name.
+    """
+    stem = record_stem(session_id)
+    base = RUNS_DIR / f"{stem}.json"
+    if not failed or not base.exists():
+        return base
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
+    return RUNS_DIR / f"{stem}.failed-{stamp}.json"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -240,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
     if error:
         record["error"] = error
 
-    record_path = RUNS_DIR / f"{session_id}.json"
+    record_path = record_target(session_id, failed=exit_code != 0)
     write_record(record_path, record)
 
     if final_response:

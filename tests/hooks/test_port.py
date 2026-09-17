@@ -465,6 +465,57 @@ def test_double_run_passes_when_nothing_is_running(tmp_path: Path) -> None:
     assert proc.stderr == ""
 
 
+def test_double_run_passes_when_only_a_shell_mentions_the_runner(tmp_path: Path) -> None:
+    """A shell whose argv names the runner is not a running runner.
+
+    The default pattern matches any command line naming `scripts/dsh_run.py`, so
+    a shell that merely mentions the file counted as a run and refused the next
+    one. Only a process shaped like a run may block.
+    """
+    marker = subprocess.Popen(["bash", "-c", "sleep 30; : scripts/dsh_run.py"])
+    try:
+        time.sleep(0.3)
+        proc = run_hook(
+            DOUBLE,
+            bash_payload(
+                "uv run python scripts/dsh_run.py --effort low --session t 'print(1)'", tmp_path
+            ),
+        )
+    finally:
+        marker.kill()
+        marker.wait(timeout=10)
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+
+
+def test_double_run_blocks_a_runner_shaped_process_by_default(tmp_path: Path) -> None:
+    """A real runner process blocks with no pattern override.
+
+    The process runs a script named `dsh_run.py`, so it has the shape the default
+    scan looks for even though no marker pattern is set.
+    """
+    script = tmp_path / "scripts" / "dsh_run.py"
+    script.parent.mkdir()
+    script.write_text("import time\ntime.sleep(30)\n")
+    marker = subprocess.Popen([sys.executable, str(script)])
+    try:
+        time.sleep(0.3)
+        proc = run_hook(
+            DOUBLE,
+            bash_payload(
+                "uv run python scripts/dsh_run.py --effort low --session t 'print(1)'", tmp_path
+            ),
+        )
+    finally:
+        marker.kill()
+        marker.wait(timeout=10)
+
+    assert proc.returncode == 2
+    assert "already running" in proc.stderr
+    assert str(marker.pid) in proc.stderr
+
+
 def test_double_run_ignores_a_mention_inside_a_commit_message(tmp_path: Path) -> None:
     proc = run_hook(
         DOUBLE,

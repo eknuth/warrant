@@ -15,6 +15,12 @@ or with `gen/emit.py`; or has `zsh`, `bash`, `sh`, or a bare path at its head
 whose script basename is `*pass*.sh` (the one English word that shape catches,
 `bypass.sh`, is excluded).
 
+A match counts only when the running process is itself shaped like a run. The
+default pattern matches any command line that names the runner, which includes a
+shell whose arguments merely mention the filename; that process is ignored now.
+`WARRANT_RUN_PATTERN` is taken at face value, so a test can still plant a
+harmless marker process and have the hook find it.
+
 A command that only mentions a pass script or a run inside a string or a
 filename (`grep`, `cat`, `echo`, `git commit -m`) passes: a pass runs for a
 while and the hook must not refuse every command for that long. Text after a
@@ -73,12 +79,19 @@ def strip_prefixes(tokens: list[str]) -> list[str]:
     return tokens
 
 
+PYTHON = re.compile(r"^python[0-9.]*$")
+
+
 def python_args(tokens: list[str]) -> list[str] | None:
-    """The arguments after a `python`, `python3`, or `uv run python[3]` head, else None."""
-    if tokens[0] in ("python", "python3"):
+    """The arguments after a `python`, `python3`, or `uv run python[3]` head, else None.
+
+    The head may be a path, which is what a running process shows for an
+    interpreter (`/venv/bin/python3.12`). The basename is the name to match.
+    """
+    if PYTHON.match(Path(tokens[0]).name):
         return tokens[1:]
     if tokens[0] == "uv" and len(tokens) >= 3 and tokens[1] == "run":
-        if tokens[2] in ("python", "python3"):
+        if PYTHON.match(Path(tokens[2]).name):
             return tokens[3:]
     return None
 
@@ -110,18 +123,51 @@ def starts_run(segment: list[str]) -> bool:
     return False
 
 
-def running_pids(pattern: str) -> list[str]:
+def process_listing(pattern: str) -> list[tuple[str, str]]:
+    """(pid, command line) for each process `pgrep -f` matches.
+
+    BSD `pgrep` wants `-fl` for the command line; procps wants `-af`. On BSD
+    `-af` means something else (include ancestors) and prints bare pids, so the
+    platform picks the flag rather than trying one and parsing what comes back.
+    """
+    flag = "-fl" if sys.platform == "darwin" else "-af"
     try:
-        proc = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, timeout=5)
+        proc = subprocess.run(["pgrep", flag, pattern], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.TimeoutExpired):
         return []
-    return [pid for pid in proc.stdout.split() if pid.isdigit() and int(pid) != os.getpid()]
+    listing: list[tuple[str, str]] = []
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split(maxsplit=1)
+        if parts and parts[0].isdigit():
+            listing.append((parts[0], parts[1] if len(parts) > 1 else ""))
+    return listing
 
 
-def check(command: str, pattern: str) -> str | None:
+def running_pids(pattern: str, *, require_runner: bool) -> list[str]:
+    """The pids matching `pattern`, minus this process and, when asked, non-runners.
+
+    The default pattern matches any command line that names the runner, which
+    includes a shell that merely mentions the filename. When the caller has not
+    overridden the pattern, a match only counts if its own command line is
+    shaped like a run, so the hook sees an actual runner. An explicit
+    `WARRANT_RUN_PATTERN` is taken at face value, because the test that plants a
+    marker process relies on that.
+    """
+    pids: list[str] = []
+    for pid, command in process_listing(pattern):
+        if int(pid) == os.getpid():
+            continue
+        if require_runner and not any(starts_run(seg) for seg in segments(command)):
+            continue
+        pids.append(pid)
+    return pids
+
+
+def check(command: str, override: str | None) -> str | None:
     if not any(starts_run(seg) for seg in segments(command)):
         return None
-    pids = running_pids(pattern)
+    pattern = override or DEFAULT_PATTERN
+    pids = running_pids(pattern, require_runner=not override)
     if not pids:
         return None
     return (
@@ -139,7 +185,7 @@ def run() -> int:
     command = payload["tool_input"]["command"]
     if not isinstance(command, str):
         return 0
-    reason = check(command, os.environ.get("WARRANT_RUN_PATTERN", DEFAULT_PATTERN))
+    reason = check(command, os.environ.get("WARRANT_RUN_PATTERN"))
     if reason:
         print(reason, file=sys.stderr)
         return 2
