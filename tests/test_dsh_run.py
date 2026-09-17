@@ -76,6 +76,30 @@ def test_record_target_keeps_an_existing_record_from_a_failed_run(
     assert runner.record_target("s", failed=True) != tmp_path / "s.json"
 
 
+def test_session_id_cannot_climb_out_of_the_runs_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A session id names a file, not a path.
+
+    `--session ../../x` made `record_target` return a path above the runs
+    directory, and the record is written on a failed run too, so the escape was
+    reachable even when the runtime rejected the id.
+    """
+    runner = load_runner()
+    monkeypatch.setattr(runner, "RUNS_DIR", tmp_path / "runs" / "dsh")
+
+    with pytest.raises(ValueError):
+        runner.record_target("../../escaped", failed=True)
+
+    with pytest.raises(SystemExit) as exit_info:
+        runner.main(["--session", "../../escaped", "hello"])
+    capsys.readouterr()
+
+    assert exit_info.value.code == 2
+    assert not (tmp_path / "escaped.json").exists()
+    assert not (tmp_path / "runs" / "dsh").exists()
+
+
 class _FakeHarness:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs

@@ -87,7 +87,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--session",
         default=None,
-        help="session id; must be new, the runtime rejects a reused one",
+        help="session id; must be new and one path component, the runtime rejects a reused one",
     )
     parser.add_argument("--profile", default=DEFAULT_PROFILE, help="dsh profile to run")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="model id")
@@ -113,6 +113,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="bound each turn; unbounded by default",
     )
     args = parser.parse_args(argv)
+    if args.session is not None:
+        try:
+            record_stem(args.session)
+        except ValueError as exc:
+            parser.error(str(exc))
     if not args.prompt:
         text = sys.stdin.read().strip()
         if not text:
@@ -160,6 +165,20 @@ def write_record(path: Path, record: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def record_stem(session_id: str) -> str:
+    """The record's file stem for one session id.
+
+    A session id names one file under the runs directory, so an id that is not a
+    single path component is refused. `--session ../../x` would otherwise make
+    the record path climb out of that directory, and the record is written for a
+    failed run too, so a runtime that rejects the id does not make the write
+    unreachable.
+    """
+    if not session_id or session_id in (".", "..") or Path(session_id).name != session_id:
+        raise ValueError(f"session id {session_id!r} must be one path component")
+    return session_id
+
+
 def record_target(session_id: str, *, failed: bool) -> Path:
     """Where one run's record goes.
 
@@ -168,11 +187,12 @@ def record_target(session_id: str, *, failed: bool) -> Path:
     failure cannot erase an earlier run's cost. A successful run keeps the
     canonical name.
     """
-    base = RUNS_DIR / f"{session_id}.json"
+    stem = record_stem(session_id)
+    base = RUNS_DIR / f"{stem}.json"
     if not failed or not base.exists():
         return base
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
-    return RUNS_DIR / f"{session_id}.failed-{stamp}.json"
+    return RUNS_DIR / f"{stem}.failed-{stamp}.json"
 
 
 def main(argv: list[str] | None = None) -> int:
