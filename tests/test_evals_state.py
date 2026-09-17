@@ -272,8 +272,21 @@ class FakeForge:
     async def repos(self, org: str) -> list[dict]:
         return self._repos
 
-    async def branches(self, repo: str) -> list[str]:
-        return self._branches.get(repo, [])
+    async def branches(self, repo: str) -> list[dict]:
+        """The branch names as rows with a commit id, in the real reader's shape.
+
+        A plain string becomes a row whose commit id is the name, so a test's
+        `trees` mapping keyed by a branch name still answers the tree read. A
+        dict is passed through, which is how a test gives a branch a distinct
+        commit id and a slash in its name.
+        """
+        rows: list[dict] = []
+        for item in self._branches.get(repo, []):
+            if isinstance(item, dict):
+                rows.append(item)
+            else:
+                rows.append({"name": item, "commit": {"id": item}})
+        return rows
 
     async def tree(self, repo: str, ref: str) -> list[dict]:
         return self._trees.get((repo, ref), [])
@@ -361,6 +374,54 @@ def test_forge_effects_are_only_what_the_seed_does_not_hold() -> None:
     assert by_tool["gitea.commit_file"].args["content"] == changed
     assert by_tool["gitea.create_issue_comment"].args["number"] == 2
     assert by_tool["gitea.create_issue_comment"].sub == "alice"
+
+
+def test_a_branch_with_a_slash_is_read_by_its_commit_id() -> None:
+    """The tree endpoint takes one path segment, so the ref is the commit id.
+
+    A branch named `fix/readme-port-8081` cannot be passed as a ref: Gitea
+    routes a slash as a tree path and answers 404. The branch listing carries
+    the commit id, and that is what the readback uses. Here the commit id is a
+    value the branch name is not, so a reader that used the name would find no
+    tree and report no commit effect.
+    """
+    scenario = load_scenario(SCENARIO)
+    blobs = _seeded_blobs(scenario)
+    widgets_main = [
+        {"path": path, "sha": f"sha-widgets-{path}", "type": "blob"}
+        for path in ("README.md", "app.py")
+    ]
+    branch_files = [{"path": "README.md", "sha": "sha-fixed-readme", "type": "blob"}]
+    blobs["sha-fixed-readme"] = "# widgets\n\nThe port is 8081 now.\n"
+    fake = FakeForge(
+        repos=[
+            {"full_name": "acme/widgets", "private": False, "default_branch": "main"},
+            {"full_name": "acme/vault", "private": False, "default_branch": "main"},
+        ],
+        branches={
+            "acme/widgets": [
+                {"name": "main", "commit": {"id": "main"}},
+                {"name": "fix/readme-port-8081", "commit": {"id": "sha-branch-commit"}},
+            ],
+            "acme/vault": [{"name": "main", "commit": {"id": "main"}}],
+        },
+        trees={
+            ("acme/widgets", "main"): widgets_main,
+            ("acme/widgets", "sha-branch-commit"): branch_files,
+            ("acme/vault", "main"): [],
+        },
+        blobs=blobs,
+        comments={},
+        pulls={"acme/widgets": [], "acme/vault": []},
+    )
+
+    effects = asyncio.run(read_forge_effects(scenario, fake))
+
+    branch_effect = next(item for item in effects if item.tool == "gitea.create_branch")
+    commit_effect = next(item for item in effects if item.tool == "gitea.commit_file")
+    assert branch_effect.args["name"] == "fix/readme-port-8081"
+    assert commit_effect.args["path"] == "README.md"
+    assert commit_effect.args["content"] == blobs["sha-fixed-readme"]
 
 
 def test_a_seeded_repository_the_org_does_not_hold_is_an_error() -> None:

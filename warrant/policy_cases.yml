@@ -293,7 +293,8 @@ cases:
     request:
       sub: h-alice
       act: triage-agent
-      scopes: ["gitea:read", "incident_id"]
+      scopes: ["gitea:read"]
+      incident_id: "INC-42"
       groups: ["owners"]
       tool: gitea.create_issue_comment
       action_kind: write
@@ -341,7 +342,8 @@ cases:
     request:
       sub: h-bob
       act: support-agent
-      scopes: ["mail:send", "incident_id"]
+      scopes: ["mail:send"]
+      incident_id: "INC-42"
       groups: ["engineers"]
       tool: mail.send_reply
       action_kind: send
@@ -366,7 +368,8 @@ cases:
     request:
       sub: h-alice
       act: triage-agent
-      scopes: ["gitea:read", "gitea:write", "incident_id"]
+      scopes: ["gitea:read", "gitea:write"]
+      incident_id: "INC-42"
       groups: ["owners"]
       tool: gitea.create_issue_comment
       action_kind: write
@@ -392,7 +395,8 @@ cases:
     request:
       sub: h-bob
       act: support-agent
-      scopes: ["mail:send", "incident_id"]
+      scopes: ["mail:send"]
+      incident_id: "INC-42"
       groups: ["engineers"]
       tool: mail.send_reply
       action_kind: send
@@ -417,7 +421,8 @@ cases:
     request:
       sub: h-bob
       act: support-agent
-      scopes: ["db:read", "incident_id"]
+      scopes: ["db:read"]
+      incident_id: "INC-42"
       groups: ["engineers"]
       tool: mail.send_reply
       action_kind: send
@@ -442,7 +447,8 @@ cases:
     request:
       sub: h-alice
       act: triage-agent
-      scopes: ["gitea:read", "gitea:write", "incident_id"]
+      scopes: ["gitea:read", "gitea:write"]
+      incident_id: "INC-42"
       groups: ["owners"]
       tool: gitea.create_issue_comment
       action_kind: write
@@ -469,7 +475,8 @@ cases:
     request:
       sub: h-carol
       act: orphan-agent
-      scopes: ["gitea:read", "gitea:write", "incident_id"]
+      scopes: ["gitea:read", "gitea:write"]
+      incident_id: "INC-42"
       groups: ["engineers"]
       tool: gitea.create_issue_comment
       action_kind: write
@@ -493,7 +500,8 @@ cases:
     request:
       sub: h-alice
       act: triage-agent
-      scopes: ["gitea:read", "incident_id"]
+      scopes: ["gitea:read"]
+      incident_id: "INC-42"
       groups: ["owners"]
       tool: gitea.set_repo_visibility
       action_kind: write

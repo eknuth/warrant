@@ -161,6 +161,7 @@ def build_request(fixture: Mapping[str, Any], case_name: str = "case") -> AuthzR
         scopes=[str(scope) for scope in fixture.get("scopes", [])],
         groups=[str(group) for group in fixture.get("groups", [])],
         token_exp=_time(fixture.get("token_exp", DEFAULT_TOKEN_EXP), "token_exp", case_name),
+        incident_id=(str(fixture["incident_id"]) if fixture.get("incident_id") else None),
     )
     provenance = Provenance(
         task_id=task_id, sources=_sources(provenance_raw.get("sources"), case_name)

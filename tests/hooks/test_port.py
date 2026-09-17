@@ -453,6 +453,31 @@ def test_double_run_blocks_when_a_run_is_already_going(tmp_path: Path) -> None:
     assert str(marker.pid) in proc.stderr
 
 
+def test_double_run_blocks_the_eval_runner_with_no_emit_flag(tmp_path: Path) -> None:
+    """W15's runner is a run, even though it has no `--emit` flag.
+
+    The ported Receipts hook only recognized `-m evals.run` when `--emit` was
+    present, so every Warrant eval run was invisible to the guard.
+    """
+    marker = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "warrant-eval-marker"]
+    )
+    env = {**os.environ, "WARRANT_RUN_PATTERN": "warrant-eval-marker"}
+    try:
+        time.sleep(0.3)
+        proc = run_hook(
+            DOUBLE,
+            bash_payload("uv run python -m evals.run --scenarios 08 --ablations full", tmp_path),
+            env=env,
+        )
+    finally:
+        marker.kill()
+        marker.wait(timeout=10)
+
+    assert proc.returncode == 2
+    assert "already running" in proc.stderr
+
+
 def test_double_run_passes_when_nothing_is_running(tmp_path: Path) -> None:
     proc = run_hook(
         DOUBLE,

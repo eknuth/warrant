@@ -190,3 +190,74 @@ def test_the_refusal_classes_are_distinct() -> None:
         for other in classes:
             if one is not other:
                 assert not issubclass(one, other), (one, other)
+
+
+# -- the incident claim, and the discovery split W15 adds -------------------
+
+
+def test_the_incident_id_claim_is_normalized_like_task_id(keys: tuple[str, str]) -> None:
+    """The parameterized scope mapper writes the incident as a one-element list."""
+    private_pem, public_pem = keys
+
+    claims = verify(
+        token_for(private_pem, incident_id=["INC-42"]),
+        AUDIENCE,
+        key=public_pem,
+        issuer=ISSUER,
+    )
+
+    assert claims.incident_id == "INC-42"
+
+
+def test_the_incident_id_claim_accepts_a_plain_string(keys: tuple[str, str]) -> None:
+    private_pem, public_pem = keys
+
+    claims = verify(
+        token_for(private_pem, incident_id="INC-42"),
+        AUDIENCE,
+        key=public_pem,
+        issuer=ISSUER,
+    )
+
+    assert claims.incident_id == "INC-42"
+
+
+def test_the_signing_keys_come_from_the_discovery_issuer(
+    keys: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The issuer a token must name and the URL its keys come from can differ.
+
+    The host mints `iss=localhost`; the container fetches the same realm's keys
+    at `keycloak`. The token is checked against the first and verified with the
+    second, which is what lets one gateway accept host-minted tokens.
+    """
+    private_pem, public_pem = keys
+    asked: list[str | None] = []
+
+    def fake_jwks(issuer: str | None = None) -> str:
+        asked.append(issuer)
+        return public_pem
+
+    monkeypatch.setattr("warrant.oidc.jwks", fake_jwks)
+    internal = "https://keycloak.internal/realms/warrant"
+
+    claims = verify(token_for(private_pem), AUDIENCE, issuer=ISSUER, discovery_issuer=internal)
+
+    assert claims.sub == "alice-id"
+    assert asked == [internal]
+
+
+def test_a_token_from_another_issuer_is_refused_even_with_the_key(
+    keys: tuple[str, str],
+) -> None:
+    """The discovery issuer changes where keys come from, not which iss is valid."""
+    private_pem, public_pem = keys
+
+    with pytest.raises(InvalidToken):
+        verify(
+            token_for(private_pem, iss="https://somewhere.else/realms/warrant"),
+            AUDIENCE,
+            key=public_pem,
+            issuer=ISSUER,
+            discovery_issuer="https://keycloak.internal/realms/warrant",
+        )

@@ -18,7 +18,7 @@ REPO_ROOT := $(shell bash scripts/repo_root.sh)
 WARRANT_RUNS_HOST_DIR ?= $(REPO_ROOT)/runs
 export WARRANT_RUNS_HOST_DIR
 
-.PHONY: install lint test up down reset gitea-mcp postgres-mcp mail-mcp dsh-profile worktree worktree-clean
+.PHONY: install lint test up down reset gitea-mcp postgres-mcp mail-mcp dsh-profile worktree worktree-clean evals smoke
 
 # Create or refresh .venv from pyproject.toml and uv.lock. `uv sync` is also
 # what a clean clone runs first; there is no other install step.
@@ -108,6 +108,19 @@ worktree-clean:
 	git worktree remove ".worktrees/$(NAME)"
 	git worktree prune
 	@echo "removed: .worktrees/$(NAME)"
+
+# W15. The full matrix: every scenario under every ablation, three repeats. The
+# runner rebuilds the image, seeds each cell, restarts the gateway into the
+# ablation, runs the tasks, grades, and renders the column's report. W17 runs
+# this and analyzes it; the target exists so the command is one word.
+evals:
+	@if [ -z "$(COLUMN)" ]; then echo "usage: make evals COLUMN=<name>" >&2; exit 2; fi
+	uv run python -m evals.run --scenarios all --ablations all --repeats 3 --column "$(COLUMN)"
+
+# W15. The two-scenario smoke the acceptance criteria name: 08 and 01 once under
+# `full`, end to end with a real model, then the column's report.
+smoke:
+	uv run python -m evals.run --scenarios 08,01 --ablations full --repeats 1 --column smoke
 
 # --- later issues, commented until the issue that needs them ----------------
 # Each block names the target that issue will add, so its purpose is visible

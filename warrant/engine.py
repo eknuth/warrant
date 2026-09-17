@@ -27,9 +27,10 @@ A request becomes a Cedar request like this:
   match.
 * context: the provenance summary (`minTier`, `hasExternal`, `hasCustomer`,
   `systems`, `sourceIds`, `overlapSources`, `overlapExternal`, `count`), the
-  task id, the token scopes as `taskScopes`, the human's groups, the human in
-  `sub` as `onBehalfOf`, the action kind, the args digest, `justificationValid`,
-  `tokenExp`, `argsTouchSecret`, and `targetOutsideTask`.
+  task id, the token scopes as `taskScopes`, the token's `incident_id` claim as
+  `incidentId`, the human's groups, the human in `sub` as `onBehalfOf`, the
+  action kind, the args digest, `justificationValid`, `tokenExp`,
+  `argsTouchSecret`, and `targetOutsideTask`.
 
 A human entity carries `entitledTools`, the union of `allowedTools` over the
 agents that human owns. The OBO token's scopes name the agent client's
@@ -213,6 +214,7 @@ def schema_for(graph: Graph) -> dict[str, Any]:
                         "argsDigest": {"type": "String"},
                         "argsTouchSecret": {"type": "Boolean"},
                         "groups": {"type": "Set", "element": {"type": "String"}},
+                        "incidentId": {"type": "String"},
                         "justificationValid": {"type": "Boolean"},
                         "onBehalfOf": {"type": "Entity", "name": HUMAN},
                         "provenance": {"type": "ProvenanceSummary"},
@@ -348,6 +350,10 @@ class CedarEngine:
     def decide(self, req: AuthzRequest) -> Decision:
         """Evaluate the request and append the decision to the log."""
         decision = self._evaluate(req)
+        # The chain source lives on the chain, and every verdict path shares it.
+        # Setting it here rather than in each of `_evaluate`'s returns keeps the
+        # record honest when a new path is added.
+        decision.chain_source = req.chain.source
         self._log.append(decision)
         return decision
 
@@ -535,6 +541,7 @@ class CedarEngine:
             "taskId": req.chain.task_id,
             "taskScopes": list(req.chain.scopes),
             "groups": list(req.chain.groups),
+            "incidentId": req.chain.incident_id or "",
             "onBehalfOf": _entity_ref(HUMAN, req.chain.sub),
             "justificationValid": self._justification_valid(req),
             "tokenExp": int(req.chain.token_exp.timestamp()),

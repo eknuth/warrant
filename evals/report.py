@@ -1,11 +1,14 @@
 """Render `report.md` from the `grade.json` files under `evals/results/`.
 
-    uv run python -m evals.report
+    uv run python -m evals.report --results-dir evals/results/<column>
 
-The layout is one directory per cell, `<ablation>/<scenario>/<repeat>`, which is
-where W15 writes each graded run. Every number is read from a `grade.json`; the
-output is a pure function of the directory, with no timestamps and one rounding
-function, so rendering the same results twice gives the same bytes.
+The layout is one directory per cell, `<ablation>/<model>/<scenario>/<repeat>`,
+under a column directory that W15 names. The reader globs four levels, which is
+the W15 shape, and the W14 three-level shape `<ablation>/<scenario>/<repeat>` is
+read too so a column written before the model level existed still renders. Every
+number is read from a `grade.json`; the output is a pure function of the
+directory, with no timestamps and one rounding function, so rendering the same
+results twice gives the same bytes.
 
 Three tables. One per ablation, with a row per scenario and a column per repeat,
 carrying each cell's score and whether the run held. A summary with a row per
@@ -46,10 +49,18 @@ def read_grades(results_dir: Path = RESULTS_DIR) -> tuple[list[Grade], list[str]
     A file the current schema cannot read is listed rather than raising: results
     accumulate across schema changes, and an old file beside a new one is the
     expected shape.
+
+    Both cell depths are read. W15 writes
+    `<ablation>/<model>/<scenario>/<repeat>/grade.json`; the W14 shape without
+    the model level is still read, so a column from before this change renders.
+    A path is a cell when a `grade.json` sits at one of those two depths under
+    the directory the caller passed, which the runner points at one column.
     """
     grades: list[Grade] = []
     unreadable: list[str] = []
-    for path in sorted(Path(results_dir).glob("*/*/*/grade.json")):
+    paths = sorted(Path(results_dir).glob("*/*/*/grade.json"))
+    paths += sorted(Path(results_dir).glob("*/*/*/*/grade.json"))
+    for path in paths:
         try:
             grades.append(Grade.model_validate_json(path.read_text(encoding="utf-8")))
         except (ValueError, OSError) as error:

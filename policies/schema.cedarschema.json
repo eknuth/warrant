@@ -57,6 +57,9 @@
               "type": "String"
             }
           },
+          "incidentId": {
+            "type": "String"
+          },
           "justificationValid": {
             "type": "Boolean"
           },

@@ -367,6 +367,7 @@ def _request(
     provenance: Provenance | None = None,
     scopes: list[str] | None = None,
     groups: list[str] | None = None,
+    incident_id: str | None = None,
     **overrides: Any,
 ) -> AuthzRequest:
     chain = Chain(
@@ -376,6 +377,7 @@ def _request(
         scopes=scopes if scopes is not None else ["gitea:read", "gitea:write"],
         groups=groups if groups is not None else ["owners"],
         token_exp=datetime(2030, 1, 1, tzinfo=UTC),
+        incident_id=incident_id,
     )
     data: dict[str, Any] = {
         "chain": chain,
@@ -635,7 +637,8 @@ def test_escalation_does_not_answer_a_call_the_agent_could_never_make(
             tool="db.rotate_api_key",
             resource="table-orders",
             action_kind=ActionKind.write,
-            scopes=["db:read", "incident_id"],
+            scopes=["db:read"],
+            incident_id="INC-42",
             groups=["owners"],
         )
     )
@@ -676,7 +679,8 @@ def test_escalation_does_not_answer_a_tainted_visibility_change(
             tool="gitea.set_repo_visibility",
             resource="repo-acme-api",
             action_kind=ActionKind.write,
-            scopes=["gitea:read", "incident_id"],
+            scopes=["gitea:read"],
+            incident_id="INC-42",
             groups=["owners"],
             provenance=external,
         )
@@ -720,3 +724,51 @@ def test_a_table_row_cannot_pass_on_an_engine_error(tmp_path: Path) -> None:
     assert result.decision.policy_ids == []
     assert result.decision.reasons, "an unevaluated request has to say so"
     assert not result.ok, "a row may not pass on a request no policy evaluated"
+
+
+def test_escalation_reads_the_incident_claim_not_a_scope_entry(
+    graph_db: Graph, decision_log: DecisionLog
+) -> None:
+    """Scenario 06's gap: the realm mints a claim, so the policy reads the claim.
+
+    The same scope collapse without the claim stays a deny, and adding the
+    claim turns the same call into the escalate both the scenario and the
+    record expect. A bare `incident_id` in `scopes` proves nothing now: the
+    claim is the field the permit reads.
+    """
+    loaded = CedarEngine(policies_dir=POLICIES, graph=graph_db, decision_log=decision_log)
+    common = dict(
+        sub="h-alice",
+        act="triage-agent",
+        tool="gitea.create_issue_comment",
+        resource="repo-acme-api",
+        action_kind=ActionKind.write,
+        scopes=["gitea:read"],
+        groups=["owners"],
+    )
+
+    without = loaded.decide(_request(**common))
+    with_claim = loaded.decide(_request(**common, incident_id="INC-42"))
+
+    assert without.verdict is Verdict.deny
+    assert "escalate-incident" not in without.policy_ids
+    assert with_claim.verdict is Verdict.escalate
+    assert "scope-collapse" in with_claim.policy_ids
+    assert "escalate-incident" in with_claim.policy_ids
+
+
+def test_a_decision_records_the_chain_source(graph_db: Graph, decision_log: DecisionLog) -> None:
+    """The `no-exchange` header chain is named on the line that records it."""
+    loaded = CedarEngine(policies_dir=POLICIES, graph=graph_db, decision_log=decision_log)
+    request = _request(
+        sub="h-alice",
+        act="triage-agent",
+        tool="gitea.get_issue",
+        resource="repo-acme-api",
+        action_kind=ActionKind.read,
+    )
+    request.chain.source = "header"
+
+    decision = loaded.decide(request)
+
+    assert decision.chain_source == "header"

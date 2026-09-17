@@ -35,6 +35,15 @@ services:
       # which most published snippets still show, are ignored from 26.0 on.
       KC_BOOTSTRAP_ADMIN_USERNAME: "admin"
       KC_BOOTSTRAP_ADMIN_PASSWORD: "${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD is not set: add it to .env}"
+      # The realm's public issuer. A host login reaches Keycloak at
+      # `localhost:8080`, and this pins `iss` to that name whichever host the
+      # request arrived at, so the gateway and the resource servers validate
+      # the same value. `BACKCHANNEL_DYNAMIC` keeps the token, JWKS, and
+      # userinfo endpoints on the request's host, so a container reaches them
+      # at the compose service name without a redirect to the host name it
+      # cannot resolve.
+      KC_HOSTNAME: "http://localhost:8080"
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
       # The realm import resolves `${WARRANT_USER_PASSWORD}` and
       # `${WARRANT_AGENT_CLIENT_SECRET}` in the JSON below from the
       # container's environment, so the committed realm file holds a
@@ -130,13 +139,13 @@ services:
   # compose network `gitea-mcp:9101` answers, and from the host nothing does.
   # Only the gateway publishes a port, so `localhost:9100` is the single way in.
   #
-  # The issuer is the one deployment wart here. Keycloak mints `iss` from the
-  # URL the token endpoint was reached at, `http://localhost:8080/...` for a
-  # host-side login, and inside a container `localhost` is the container. A
-  # deployment therefore needs an issuer hostname both the host and the compose
-  # network resolve (or the host-side login to use that name too). That is
-  # recorded in docs/decisions/004-gateway-hop.md; the host smoke run in the
-  # ticket uses a host-run gateway and a host-run upstream.
+  # The issuer is pinned on the Keycloak service above. `KC_HOSTNAME` makes
+  # `iss` always `http://localhost:8080/...`, whichever name the request
+  # arrived under, and `KC_HOSTNAME_BACKCHANNEL_DYNAMIC` keeps the token and
+  # JWKS endpoints on that same request name. Each service here therefore
+  # expects the host issuer and fetches the realm's keys at `keycloak:8080`
+  # through `WARRANT_OIDC_DISCOVERY_ISSUER`. W15's runner relies on this, and
+  # `docs/decisions/w15-eval-runner.md` records it.
   gitea-mcp:
     build:
       context: .
@@ -147,7 +156,8 @@ services:
       GITEA_URL: "http://gitea:3000"
       GITEA_MCP_HOST: "0.0.0.0"
       GITEA_MCP_PORT: "9101"
-      WARRANT_OIDC_ISSUER: "http://keycloak:8080/realms/warrant"
+      WARRANT_OIDC_ISSUER: "http://localhost:8080/realms/warrant"
+      WARRANT_OIDC_DISCOVERY_ISSUER: "http://keycloak:8080/realms/warrant"
     expose:
       - "9101"
     depends_on:
@@ -170,7 +180,8 @@ services:
       POSTGRES_HOST: "postgres"
       POSTGRES_MCP_HOST: "0.0.0.0"
       POSTGRES_MCP_PORT: "9102"
-      WARRANT_OIDC_ISSUER: "http://keycloak:8080/realms/warrant"
+      WARRANT_OIDC_ISSUER: "http://localhost:8080/realms/warrant"
+      WARRANT_OIDC_DISCOVERY_ISSUER: "http://keycloak:8080/realms/warrant"
     expose:
       - "9102"
     depends_on:
@@ -222,7 +233,8 @@ services:
       MAIL_URL: "http://mailpit:8025"
       MAIL_MCP_HOST: "0.0.0.0"
       MAIL_MCP_PORT: "9103"
-      WARRANT_OIDC_ISSUER: "http://keycloak:8080/realms/warrant"
+      WARRANT_OIDC_ISSUER: "http://localhost:8080/realms/warrant"
+      WARRANT_OIDC_DISCOVERY_ISSUER: "http://keycloak:8080/realms/warrant"
     expose:
       - "9103"
     depends_on:
@@ -238,7 +250,8 @@ services:
     environment:
       WARRANT_GATEWAY_HOST: "0.0.0.0"
       WARRANT_GATEWAY_PORT: "9100"
-      WARRANT_OIDC_ISSUER: "http://keycloak:8080/realms/warrant"
+      WARRANT_OIDC_ISSUER: "http://localhost:8080/realms/warrant"
+      WARRANT_OIDC_DISCOVERY_ISSUER: "http://keycloak:8080/realms/warrant"
       GITEA_URL: "http://gitea:3000"
       # The run record lives in the checkout, not in the container's writable
       # layer, so a record outlives the container and an agent run started here

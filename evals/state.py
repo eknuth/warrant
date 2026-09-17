@@ -146,6 +146,9 @@ class Observation(BaseModel):
     verdict: str | None = None
     policy_ids: list[str] = Field(default_factory=list)
     action_kind: str | None = None
+    # `token` for a verified exchange, `header` for the `no-exchange` ablation.
+    # The grader withholds chain-completeness credit for a header chain.
+    chain_source: str = "token"
     args_digest: str | None = None
     args_touch_secret: bool | None = None
     overlap_details: list[dict[str, str]] = Field(default_factory=list)
@@ -333,6 +336,7 @@ def decision_observation(decision: Decision, resources: Resources) -> Observatio
         verdict=decision.verdict.value,
         policy_ids=list(decision.policy_ids),
         action_kind=decision.request.action_kind.value,
+        chain_source=decision.chain_source,
         args_digest=decision.request.args_digest,
         args_touch_secret=decision.request.args_touch_secret,
         overlap_details=[dict(detail) for detail in decision.request.overlap_details],
@@ -508,7 +512,7 @@ class ForgeReader(Protocol):
 
     async def repos(self, org: str) -> list[dict[str, Any]]: ...
 
-    async def branches(self, repo: str) -> list[str]: ...
+    async def branches(self, repo: str) -> list[dict[str, Any]]: ...
 
     async def tree(self, repo: str, ref: str) -> list[dict[str, Any]]: ...
 
@@ -567,9 +571,14 @@ class GiteaAdmin:
     async def repos(self, org: str) -> list[dict[str, Any]]:
         return await self._get_all(f"{API}/orgs/{org}/repos")
 
-    async def branches(self, repo: str) -> list[str]:
-        rows = await self._get_all(f"{API}/repos/{repo}/branches")
-        return [str(row.get("name", "")) for row in rows if row.get("name")]
+    async def branches(self, repo: str) -> list[dict[str, Any]]:
+        """Every branch with its commit, so a tree can be read by sha.
+
+        The tree endpoint takes one path segment, so a branch name with a slash
+        in it (`fix/readme-port-8081`) cannot be passed as a ref. The branch's
+        commit id always can, and the listing already carries it.
+        """
+        return await self._get_all(f"{API}/repos/{repo}/branches")
 
     async def tree(self, repo: str, ref: str) -> list[dict[str, Any]]:
         data = await self._get(
@@ -660,7 +669,18 @@ async def read_forge_effects(scenario: Scenario, reader: ForgeReader) -> list[Ob
                 "the stack does not hold this scenario"
             )
         blobs: dict[str, str] = {}
-        for branch in sorted(await reader.branches(full_name)):
+        branch_rows = sorted(
+            await reader.branches(full_name), key=lambda row: str(row.get("name", ""))
+        )
+        for row in branch_rows:
+            branch = str(row.get("name", ""))
+            if not branch:
+                continue
+            # The tree is read by commit id, not by branch name: a branch name
+            # with a slash cannot be one path segment. A branch the listing
+            # gives no commit for falls back to its name, which is what a
+            # reader that does not carry commits has.
+            ref = str((row.get("commit") or {}).get("id") or branch)
             if branch != "main":
                 effects.append(
                     Observation(
@@ -672,9 +692,7 @@ async def read_forge_effects(scenario: Scenario, reader: ForgeReader) -> list[Ob
                     )
                 )
             seeded = repo.file_entries()
-            for entry in sorted(
-                await reader.tree(full_name, branch), key=lambda e: e.get("path", "")
-            ):
+            for entry in sorted(await reader.tree(full_name, ref), key=lambda e: e.get("path", "")):
                 path = str(entry.get("path", ""))
                 sha = str(entry.get("sha", ""))
                 if not path or not sha:

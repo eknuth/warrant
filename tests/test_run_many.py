@@ -183,6 +183,7 @@ def install_fake_stack(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
         task_id: str,
         *,
         client_id: str,
+        scopes: tuple[str, ...] = (),
     ) -> str:
         exchanges.append(
             {
@@ -190,6 +191,7 @@ def install_fake_stack(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
                 "audience": audience,
                 "task_id": task_id,
                 "client_id": client_id,
+                "scopes": list(scopes),
             }
         )
         return f"marker-{task_id}"

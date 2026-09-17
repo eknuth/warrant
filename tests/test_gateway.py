@@ -792,6 +792,28 @@ def test_no_bearer_gets_401(
     assert response.json()["error"] == "invalid_request"
 
 
+def test_healthz_answers_without_a_bearer_and_reports_the_process_mode(
+    tmp_path: Path, graph_db: Graph, rsa_keypair: tuple[str, str], test_issuer: str
+) -> None:
+    """The runner polls this before it spends anything, so it cannot need a token."""
+    from warrant import config as warrant_config
+
+    log = DecisionLog(tmp_path / "runs")
+    engine = FakeEngine(decision_log=log)
+    gateway = make_gateway(tmp_path, graph_db, engine, upstream=FakeUpstream())
+    app = build_app(gateway, issuer=test_issuer, key=rsa_keypair[1])
+
+    with TestClient(app) as client:
+        response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "mode": warrant_config.current_mode().value,
+        "taint": warrant_config.current_taint().value,
+    }
+
+
 # -- the real streamable-HTTP upstream client ------------------------------
 
 
@@ -936,6 +958,39 @@ async def test_a_call_without_a_client_secret_forwards_the_incoming_token(
     gateway = make_gateway(tmp_path, graph_db, engine, upstream=FakeUpstream())
 
     assert await gateway.upstream_token("incoming", "gitea-mcp", "task-1") == "incoming"
+
+
+async def test_no_exchange_mints_a_client_credentials_service_token(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """The ablation has no subject token, so the gateway reaches upstream as itself."""
+    import httpx
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.content.decode())
+        return httpx.Response(200, json={"access_token": "service-token"})
+
+    log = DecisionLog(tmp_path / "runs")
+    engine = FakeEngine(decision_log=log, verdict=Verdict.allow)
+    gateway = make_gateway(
+        tmp_path,
+        graph_db,
+        engine,
+        upstream=FakeUpstream(),
+        exchange_transport=httpx.MockTransport(handler),
+        client_secret="shh",
+        mode=Mode.no_exchange,
+    )
+
+    first = await gateway.upstream_token("", "gitea-mcp", "task-1")
+    second = await gateway.upstream_token("", "postgres-mcp", "task-1")
+
+    assert first == "service-token"
+    assert second == "service-token"
+    assert "grant_type=client_credentials" in seen[0]
+    assert len(seen) == 1, "the service token is minted once per process"
 
 
 def test_the_settings_issuer_follows_the_keycloak_url() -> None:

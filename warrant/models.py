@@ -83,6 +83,15 @@ class Chain(BaseModel):
     scopes: list[str] = Field(default_factory=list)
     groups: list[str] = Field(default_factory=list)
     token_exp: AwareDatetime
+    # The realm mints the incident as a claim and does not put a bare
+    # `incident_id` in `scope`; the escalation policy reads this field. Empty
+    # means the task names no incident, which is the ordinary case.
+    incident_id: str | None = None
+    # Where the chain came from. `token` is the verified exchange; `header` is
+    # the `no-exchange` ablation, where the agent names itself. The decision log
+    # carries it so the grader withholds chain-completeness credit for a chain
+    # nothing verified.
+    source: str = "token"
 
     @model_validator(mode="after")
     def _task_id_can_name_a_run(self) -> Chain:
@@ -234,6 +243,10 @@ class Decision(BaseModel):
     under `no-provenance` and an allow under `full` where the agent read nothing
     serialize the same, and the grader cannot attribute a line to an ablation
     from the record alone.
+
+    `chain_source` is `token` for a verified exchange and `header` for the
+    `no-exchange` ablation. It is copied from the request's chain so a reader of
+    the line alone can tell a chain Warrant proved from one the agent asserted.
     """
 
     verdict: Verdict
@@ -241,3 +254,4 @@ class Decision(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     request: AuthzRequest
     mode: str = ""
+    chain_source: str = "token"

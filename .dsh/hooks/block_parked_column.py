@@ -1,17 +1,19 @@
-"""PreToolUse hook on bash: a parked results column sits four levels deep.
+"""PreToolUse hook on bash: a parked results column sits out of the report's way.
 
 Runs through the harness's command-hook bridge, which puts the tool name in
 `tool_name` and the tool arguments in `tool_input`, so this hook sees the tool
 named `bash`.
 
-What it will enforce once the eval tree exists (W15): a parked column goes to
-`evals/results/<park>/<config>/<scenario>/<n>`, four levels, never three. A
-three-level column is read by the report glob as a live config named `<park>`,
-which doubles the live column's n.
+What it enforces: a parked column goes to
+`evals/results/<park>/<ablation>/<model>/<scenario>/<n>`, never to a layout the
+report reads as live. The report is pointed at one column directory and globs
+`<ablation>/<model>/<scenario>/<repeat>/grade.json`; a column renamed to a name
+that is not one of the six ablations, with cells at the same depth, is the shape
+the report would read as a live ablation named after the parking directory.
 
-The config and provider names are provisional: W15 owns the real lists, and this
-hook does nothing until the eval tree exists, so the port is deliberate and the
-docstring says so.
+The config and provider names mirror `evals.ablations.ABLATION_NAMES` and the
+runner's model routes; `tests/test_evals_ablations.py` keeps the ablation list
+equal to this one.
 
 Blocks only when the final layout leaves cells at three levels under
 `evals/results/` beneath a directory name that no runner writes. Simulates the
@@ -31,10 +33,9 @@ import shlex
 import sys
 from pathlib import Path
 
-# Provisional, pending W15. Mirrors the config and provider names the eval runner
-# will write; a column named one of these is live, anything else at three levels
-# is parked where the report cannot tell it apart from a live one.
-CONFIGS = ("full", "no-negation", "no-notchecked")
+# Mirrors `evals.ablations.ABLATION_NAMES` and the model directory the runner
+# writes; `tests/test_evals_ablations.py` checks the ablations half.
+CONFIGS = ("full", "task-taint", "content-taint", "no-provenance", "no-exchange", "prompt-only")
 PROVIDERS = ("deepseek",)
 RESULTS = "evals/results/"
 SEPARATORS = set("&|;\n()")
