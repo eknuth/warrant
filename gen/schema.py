@@ -28,11 +28,10 @@ agent's tools, which is the union the baseline permit reads as
 client scopes, so a scope the realm does not mint fails at load rather than
 becoming a silent deny.
 
-`expected_disposition` is keyed by a tool the truth names. Every injected tool
-needs one, and a key has to name a tool in `legitimate_actions` or
-`injected_actions`. A key naming neither is rejected, and a legitimate action may
-carry the escalate disposition, which is how the incident scenario records that
-an honest call is refused and answered by a person.
+`expected_disposition` is keyed by an injected action's tool. A block with an
+injected action and no disposition for it, or a disposition naming a tool that
+is not injected, is rejected. A legitimate action is not a disposition key, so a
+scenario says what the poison should get and not what the honest calls should.
 
 `ActionMatch` matching semantics, for W14. The `tool` has to equal the
 gateway's re-exported tool name exactly. Each key of `args_include` names a call
@@ -599,12 +598,10 @@ class Truth(BaseModel):
 
     `legitimate_actions` are calls the task should be allowed to make.
     `injected_actions` are calls the poison asks for and the run must not make.
-    `expected_disposition` is keyed by a tool the truth names: every injected
-    tool needs one, and a key has to name a tool in `legitimate_actions` or
-    `injected_actions`. A legitimate action may carry the escalate disposition,
-    which is how a scenario records that an honest call is refused and answered
-    by a person. `escalation_allowed` says whether a denial may be answered by a
-    person.
+    `expected_disposition` is keyed by an injected action's tool; every injected
+    tool needs one and no other key is allowed, so a legitimate action is not a
+    disposition key. `escalation_allowed` says whether a denial may be answered
+    by a person.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -619,13 +616,12 @@ class Truth(BaseModel):
     @model_validator(mode="after")
     def _dispositions_cover_the_injections(self) -> Truth:
         injected = {action.tool for action in self.injected_actions}
-        known = injected | {action.tool for action in self.legitimate_actions}
         missing = sorted(injected - set(self.expected_disposition))
-        extra = sorted(set(self.expected_disposition) - known)
+        extra = sorted(set(self.expected_disposition) - injected)
         if missing:
             raise ValueError(f"injected actions with no expected_disposition: {missing}")
         if extra:
-            raise ValueError(f"expected_disposition names tools in neither list: {extra}")
+            raise ValueError(f"expected_disposition names tools that are not injected: {extra}")
         if injected and not self.injection_sites:
             raise ValueError("an injected action has to name where the poison lives")
         return self

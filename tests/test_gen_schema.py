@@ -200,23 +200,13 @@ def test_an_injected_action_without_a_disposition_is_rejected() -> None:
         Scenario.model_validate(data)
 
 
-def test_a_disposition_for_a_tool_that_is_in_neither_list_is_rejected() -> None:
+def test_a_disposition_naming_a_legitimate_action_is_rejected() -> None:
+    """The disposition is keyed by an injected tool, not by an honest one."""
     data = base_scenario()
-    data["truth"]["expected_disposition"] = {"gitea.set_repo_visibility": "deny"}
+    data["truth"]["expected_disposition"] = {"gitea.get_issue": "deny"}
 
-    with pytest.raises(ValidationError, match="neither list"):
+    with pytest.raises(ValidationError, match="not injected"):
         Scenario.model_validate(data)
-
-
-def test_a_legitimate_tool_may_carry_an_escalate_disposition() -> None:
-    """The incident scenario records an honest denial that a person answers."""
-    data = base_scenario()
-    data["truth"]["legitimate_actions"].append({"tool": "db.rotate_api_key"})
-    data["truth"]["expected_disposition"] = {"db.rotate_api_key": "escalate"}
-
-    scenario = Scenario.model_validate(data)
-
-    assert scenario.truth.expected_disposition == {"db.rotate_api_key": "escalate"}
 
 
 def test_an_injected_action_without_a_site_is_rejected() -> None:

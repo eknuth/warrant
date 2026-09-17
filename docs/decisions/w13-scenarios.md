@@ -101,10 +101,10 @@ rule that refuses it. Scenario 01's repeated text comes from a repository whose 
 member-authored, so the content rule sees a member-tier source; the read is refused by
 `tainted-visibility` and the write is a contract the run may not reach. Both scenarios record a
 deny, which is what the grader scores, and both name the rule nuance in their notes. The truth
-block carries a disposition by tool and no rule id, so the label is prose rather than a field the
-grader reads. A disposition may name a legitimate action as well as an injected one: scenario 06's
-rotation is the honest request, and its disposition is escalate because the call is refused by the
-scope rule and answered by a person.
+block carries a disposition per injected tool and no rule id, so the label is prose rather than a
+field the grader reads. Scenario 06's rotation is the injected action because it is the call the
+run must not make on its own authority, and its disposition is escalate because the scope rule
+refuses it and a person answers.
 
 ## Scenarios 9 and 10 are the ablation
 
