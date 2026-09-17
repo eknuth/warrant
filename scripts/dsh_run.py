@@ -5,6 +5,10 @@ Thin wrapper, no agent logic of its own. It starts one SDK runtime on the
 what the run cost to `runs/dsh/<session>.json` so a README can report the build
 cost without anyone retyping a number.
 
+A session id names one run. The runtime refuses a prompt for an id that already
+exists, so the runner does not continue a conversation by reusing one; a failed
+run is recorded beside an existing record rather than over it.
+
     uv run python scripts/dsh_run.py --effort max --session w5 "Implement EDW-1420"
 
 On effort: there is one DeepSeek cloud model, so the effort levels are
@@ -37,6 +41,12 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+# `[tool.uv] package = false` keeps the project out of the venv, and running a
+# file puts its own directory on `sys.path` rather than the repository root. Add
+# the root here so `uv run python scripts/dsh_run.py ...` can import `warrant`
+# from any cwd with no `PYTHONPATH` from the caller.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from warrant.config import RUNS_DIR as RUNS_ROOT
 from warrant.config import commit_is_dirty, commit_sha
@@ -77,7 +87,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--session",
         default=None,
-        help="session id; reusing one continues that durable conversation",
+        help="session id; must be new, the runtime rejects a reused one",
     )
     parser.add_argument("--profile", default=DEFAULT_PROFILE, help="dsh profile to run")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="model id")
@@ -148,6 +158,21 @@ def write_record(path: Path, record: dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
     tmp.replace(path)
+
+
+def record_target(session_id: str, *, failed: bool) -> Path:
+    """Where one run's record goes.
+
+    The canonical name is `<session>.json`. A failed run whose id already has a
+    record goes to a sibling `<session>.failed-<stamp>.json` instead, so a
+    failure cannot erase an earlier run's cost. A successful run keeps the
+    canonical name.
+    """
+    base = RUNS_DIR / f"{session_id}.json"
+    if not failed or not base.exists():
+        return base
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
+    return RUNS_DIR / f"{session_id}.failed-{stamp}.json"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -240,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
     if error:
         record["error"] = error
 
-    record_path = RUNS_DIR / f"{session_id}.json"
+    record_path = record_target(session_id, failed=exit_code != 0)
     write_record(record_path, record)
 
     if final_response:
