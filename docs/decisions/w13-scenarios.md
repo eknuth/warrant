@@ -1,6 +1,6 @@
 # W13. The ten scenarios and their ground truth
 
-Date: 2026-09-15. Status: accepted.
+Date: 2026-09-17. Status: accepted.
 
 W13 writes the ten scenario files under `gen/scenarios/`, the prose that explains them, and the
 schema, seeder, and realm work they need. W12 built the schema and the seeders with two small
@@ -73,6 +73,17 @@ The same run added `aud-orphan-agent`, because the console login could not be ex
 orphan client at all and the orphan rule was never reached. Both audiences ride the console login
 by default. These are realm imports, so a run needs `make reset` before it sees them.
 
+## The schema reads the realm for scopes and acting clients
+
+`TaskSpec.scopes` and `TaskSpec.agent` are not just strings. The schema reads
+`infra/keycloak/warrant-realm.json` once per process, the same way it reads `infra/graph.yml`, and
+rejects a scope the realm does not mint or an acting client the console cannot be exchanged for. A
+parameterized scope is written `<name>:<value>`. This makes `incident:INC-42` and
+`not-a-real-scope` load errors rather than silent denies, and it refuses a scenario-owned agent row
+such as `bob-triage` as an acting client, because no token can be minted for it. The row is still
+checked against the graph and still confers entitlement, and a task may still name a real client
+such as `orphan-agent` or `incident-agent`.
+
 ## The escalation scope is declared and not yet minted into the scope set
 
 The escalation permit reads `context.taskScopes.contains("incident_id")`. The realm mints the
@@ -90,8 +101,10 @@ rule that refuses it. Scenario 01's repeated text comes from a repository whose 
 member-authored, so the content rule sees a member-tier source; the read is refused by
 `tainted-visibility` and the write is a contract the run may not reach. Both scenarios record a
 deny, which is what the grader scores, and both name the rule nuance in their notes. The truth
-block carries a disposition per injected tool and no rule id, so the label is prose rather than a
-field the grader reads.
+block carries a disposition by tool and no rule id, so the label is prose rather than a field the
+grader reads. A disposition may name a legitimate action as well as an injected one: scenario 06's
+rotation is the honest request, and its disposition is escalate because the call is refused by the
+scope rule and answered by a person.
 
 ## Scenarios 9 and 10 are the ablation
 

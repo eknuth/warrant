@@ -2,8 +2,8 @@
 
 A scenario file is deterministic YAML. It names what to seed in the org, the
 database, the inbox, and the access graph, which tasks to run, and what the
-grader should see. W13 writes the remaining six files; the two fixtures here
-are minimal and honest, and W13 may rewrite them.
+grader should see. W13 wrote the other eight files and rewrote the two fixtures
+that W12 left here.
 
 The models validate more than shape. A task's `subject` has to agree with its
 `params`, a ticket has to name a customer this file seeds, an issue author has
@@ -17,16 +17,22 @@ is the authority for the shipped ids, and the gateway upserts it at startup, so
 a scenario override would be reverted by the next restart. Scenario-owned
 agents use new ids and sit beside the shipped ones.
 
-A task's `user` is checked two ways. It has to be one of the shipped humans, and
-it has to be entitled to the tools the task's kind implies: the role code
-exchanges as one fixed client per kind, so the human named has to own an agent
-that holds those tools, which is the union the baseline permit reads as
-`onBehalfOf.entitledTools`.
+A task's `user` and `agent` are checked against both the graph and the realm. A
+task names an agent, defaulting to the shipped client for its kind; the agent has
+to be a client the console can exchange for, which is the set the realm's
+console audiences name, and it has to have a graph row for the allowlist and the
+justification. A scenario-owned agent row is entitlement only and can never be
+the acting client. The human named has to own a live agent that holds the acting
+agent's tools, which is the union the baseline permit reads as
+`onBehalfOf.entitledTools`. A task's `scopes` are checked against the realm's
+client scopes, so a scope the realm does not mint fails at load rather than
+becoming a silent deny.
 
-`expected_disposition` is keyed by the injected action's tool. A block with an
-injected action and no disposition for it, or a disposition naming a tool that
-is not injected, is rejected: those are the two ways a truth block can look
-complete while saying nothing about what should happen.
+`expected_disposition` is keyed by a tool the truth names. Every injected tool
+needs one, and a key has to name a tool in `legitimate_actions` or
+`injected_actions`. A key naming neither is rejected, and a legitimate action may
+carry the escalate disposition, which is how the incident scenario records that
+an honest call is refused and answered by a person.
 
 `ActionMatch` matching semantics, for W14. The `tool` has to equal the
 gateway's re-exported tool name exactly. Each key of `args_include` names a call
@@ -43,6 +49,7 @@ Field-by-field documentation lives in `docs/decisions/w12-scenario-seeders.md`.
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -57,6 +64,7 @@ from warrant.graph import Agent, live_justification
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCENARIO_DIR = Path(__file__).resolve().parent / "scenarios"
 GRAPH_SEED = REPO_ROOT / "infra" / "graph.yml"
+REALM_SEED = REPO_ROOT / "infra" / "keycloak" / "warrant-realm.json"
 
 Disposition = Literal["allow", "deny", "escalate"]
 Visibility = Literal["public", "private"]
@@ -114,6 +122,75 @@ def shipped_agent_rows() -> dict[str, dict[str, Any]]:
 def shipped_human_ids() -> dict[str, str]:
     """The shipped human ids, keyed by login."""
     return {str(row["login"]): str(row["id"]) for row in graph_seed_data().get("humans", [])}
+
+
+@lru_cache(maxsize=1)
+def realm_seed_data() -> dict[str, Any]:
+    """`infra/keycloak/warrant-realm.json` as a mapping, read once per process.
+
+    The realm is the authority for the scopes a run can request and the clients
+    it can exchange as, the same way `infra/graph.yml` is the authority for the
+    tools. Reading it here makes a scope or an acting client the realm does not
+    mint a load error rather than a silent deny at run time.
+    """
+    data = json.loads(REALM_SEED.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise SchemaError(f"{REALM_SEED} did not parse to a mapping")
+    return data
+
+
+def realm_client_scope_names() -> frozenset[str]:
+    """Every client-scope name the realm defines."""
+    return frozenset(str(scope["name"]) for scope in realm_seed_data().get("clientScopes", []))
+
+
+def realm_parameterized_scope_names() -> frozenset[str]:
+    """The client scopes the realm mints a `<name>:<value>` value for."""
+    return frozenset(
+        str(scope["name"])
+        for scope in realm_seed_data().get("clientScopes", [])
+        if str(scope.get("attributes", {}).get("is.parameterized.scope", "")).lower() == "true"
+    )
+
+
+def realm_acting_agents() -> frozenset[str]:
+    """The clients a console login can be exchanged for.
+
+    The console's own scopes carry the `aud-<agent>` audience mappers, so the
+    clients those mappers name are the ones the console token can be exchanged
+    for. Each also has to allow token exchange. This is the set a task may name
+    as its acting client; a scenario-owned agent row is entitlement only.
+    """
+    data = realm_seed_data()
+    clients = {str(row["clientId"]): row for row in data.get("clients", [])}
+    console = clients.get("console")
+    if console is None:
+        return frozenset()
+    scopes = {str(scope["name"]): scope for scope in data.get("clientScopes", [])}
+    assigned = list(console.get("defaultClientScopes", [])) + list(
+        console.get("optionalClientScopes", [])
+    )
+    named: set[str] = set()
+    for name in assigned:
+        scope = scopes.get(str(name))
+        if scope is None:
+            continue
+        for mapper in scope.get("protocolMappers", []):
+            if mapper.get("protocolMapper") != "oidc-audience-mapper":
+                continue
+            audience = mapper.get("config", {}).get("included.client.audience")
+            if audience:
+                named.add(str(audience))
+    return frozenset(
+        client_id
+        for client_id in named
+        if str(
+            clients.get(client_id, {})
+            .get("attributes", {})
+            .get("standard.token.exchange.enabled", "")
+        ).lower()
+        == "true"
+    )
 
 
 def _parse_iso(value: str | None) -> datetime | None:
@@ -522,9 +599,12 @@ class Truth(BaseModel):
 
     `legitimate_actions` are calls the task should be allowed to make.
     `injected_actions` are calls the poison asks for and the run must not make.
-    `expected_disposition` is keyed by an injected action's tool; every injected
-    tool needs one and no other key is allowed. `escalation_allowed` says
-    whether a denial may be answered by a person.
+    `expected_disposition` is keyed by a tool the truth names: every injected
+    tool needs one, and a key has to name a tool in `legitimate_actions` or
+    `injected_actions`. A legitimate action may carry the escalate disposition,
+    which is how a scenario records that an honest call is refused and answered
+    by a person. `escalation_allowed` says whether a denial may be answered by a
+    person.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -539,12 +619,13 @@ class Truth(BaseModel):
     @model_validator(mode="after")
     def _dispositions_cover_the_injections(self) -> Truth:
         injected = {action.tool for action in self.injected_actions}
+        known = injected | {action.tool for action in self.legitimate_actions}
         missing = sorted(injected - set(self.expected_disposition))
-        extra = sorted(set(self.expected_disposition) - injected)
+        extra = sorted(set(self.expected_disposition) - known)
         if missing:
             raise ValueError(f"injected actions with no expected_disposition: {missing}")
         if extra:
-            raise ValueError(f"expected_disposition names tools that are not injected: {extra}")
+            raise ValueError(f"expected_disposition names tools in neither list: {extra}")
         if injected and not self.injection_sites:
             raise ValueError("an injected action has to name where the poison lives")
         return self
@@ -569,6 +650,7 @@ class Scenario(BaseModel):
         self._check_agents_are_scenario_owned()
         self._check_owners()
         self._check_task_users()
+        self._check_task_scopes()
         self._check_gitea()
         self._check_repos_have_graph_rows()
         return self
@@ -625,9 +707,15 @@ class Scenario(BaseModel):
     def _check_task_users(self) -> None:
         """The task's user has to reach the tools its acting agent holds.
 
-        The role code exchanges as one client per kind unless the task names
-        another, so the run only works when the human named owns a live agent
-        entitled to that client's tools. That union is
+        The acting agent is the client the run exchanges as. It defaults to the
+        shipped client for the task's kind and a task may name another, but it
+        has to be a client the console can be exchanged for: a scenario-owned
+        agent row is entitlement only and no token can be minted for it. The
+        row also has to exist in the graph, because the allowlist and the
+        justification come from there.
+
+        The run then only works when the human named owns a live agent entitled
+        to the acting agent's tools. That union is
         `onBehalfOf.entitledTools`, which the baseline permit requires. An agent
         whose justification is empty or expired confers nothing, through the
         engine's own `live_justification`, so a scenario cannot rely on an agent
@@ -644,6 +732,7 @@ class Scenario(BaseModel):
         by_login = shipped_human_ids()
         now = datetime.now(UTC)
         agents = _agent_rows(self, by_login)
+        acting_clients = realm_acting_agents()
         for task in self.tasks:
             if task.user not in humans:
                 raise ValueError(
@@ -656,6 +745,11 @@ class Scenario(BaseModel):
                 raise ValueError(
                     f"task {task.subject!r} names agent {acting_id!r}, "
                     "which the access graph does not hold"
+                )
+            if acting_id not in acting_clients:
+                raise ValueError(
+                    f"task {task.subject!r} names agent {acting_id!r}, which is not a client "
+                    f"the console can exchange for; the realm has {sorted(acting_clients)}"
                 )
             if not live_justification(acting, now):
                 continue
@@ -670,6 +764,28 @@ class Scenario(BaseModel):
                 raise ValueError(
                     f"task {task.subject!r} runs as {task.user!r}, whose live agents do not hold "
                     f"{missing}; the baseline permit needs the user entitled to them"
+                )
+
+    def _check_task_scopes(self) -> None:
+        """Every declared scope has to be one the realm mints.
+
+        A scope the realm does not define is accepted by a run and then never
+        appears in the token, so a policy that reads it denies forever. The
+        realm's client-scope names are the authority, and a parameterized scope
+        is written `<name>:<value>`.
+        """
+        names = realm_client_scope_names()
+        parameterized = realm_parameterized_scope_names()
+        for task in self.tasks:
+            for scope in task.scopes:
+                if scope in names:
+                    continue
+                name, separator, _ = scope.partition(":")
+                if separator and name in parameterized:
+                    continue
+                raise ValueError(
+                    f"task {task.subject!r} declares scope {scope!r}, which the realm does not "
+                    f"mint; known scopes include {sorted(names)}"
                 )
 
     def _check_gitea(self) -> None:

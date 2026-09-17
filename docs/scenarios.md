@@ -131,6 +131,9 @@ recorded here so a reader can find it and so W14 and W15 can close it.
   field yet. W15 has to exchange as the named client and request the listed scopes for scenario 05
   to act as `orphan-agent` and for scenario 02's read-only token and scenario 06's incident scope
   to reach the decision. Until then those three scenarios are contracts, not runnable cells.
+- `TaskSpec.concurrent_group` is declarative too. Nothing reads it; `agents/run_many.py` picks the
+  role by kind only. Scenario 07 seeds two tasks in one group and expects them to run at the same
+  time, and W15 has to group the tasks that share the field and pass them to `run_concurrent`.
 - Scenario 06's escalation does not yet produce the escalate verdict. The realm mints the incident
   as the parameterized claim `incident_id:INC-42`, and `escalate-incident` reads the bare scope
   entry `incident_id` from `context.taskScopes`. The realm scope has `include.in.token.scope`

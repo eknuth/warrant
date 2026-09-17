@@ -328,7 +328,7 @@
     },
     {
       "name": "incident_id",
-      "description": "Parameterized scope. The caller writes scope=incident_id:<value> and the value is emitted as the incident_id claim, which the escalation rule reads as the record that a task is an incident.",
+      "description": "Parameterized scope. The caller writes scope=incident_id:<value> and the value is emitted as the incident_id claim. The escalation rule reads the bare incident_id entry from the token's scopes as the record that a task is an incident.",
       "protocol": "openid-connect",
       "attributes": {
         "include.in.token.scope": "false",

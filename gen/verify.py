@@ -396,6 +396,11 @@ def verify_injection_sites(scenario: Scenario) -> list[Check]:
     from, and no run can prove the poison was placed where the truth says. The
     check resolves each site against the scenario's own seed block, which is the
     object the seeder will create, plus the graph rows the shipped seed carries.
+
+    A database note site names the ticket the note hangs on, because a note id
+    is assigned by the database and the scenario only declares the ticket. The
+    check cannot tell two notes on one ticket apart, and no scenario uses a note
+    site.
     """
     known_agents = set(shipped_agent_rows()) | {a.client_id for a in scenario.seed.graph.agents}
     customer_ids = {str(customer.id) for customer in scenario.seed.db.customers}

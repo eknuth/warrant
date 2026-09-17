@@ -111,13 +111,15 @@ holds the previous scenario, and the caller sees a traceback rather than the sys
 `reset` checks Gitea, Postgres, and Mailpit reachability first, and every step's failure is a
 `SeedError` naming the step.
 
-## The truth block names the disposition per injected tool
+## The truth block names the disposition by tool
 
-`expected_disposition` is keyed by the injected action's tool. A tool with no disposition, or a
-disposition naming a tool that is not injected, fails at load. A scenario cannot look complete
-while saying nothing about what should happen to the call it calls injected. Two injected actions
-that share a tool share the disposition, because the key is the tool; a scenario that needs two
-dispositions for one tool is a shape W13 has to raise rather than one this schema can express.
+`expected_disposition` is keyed by a tool the truth names. A tool with no disposition, or a
+disposition naming a tool in neither `legitimate_actions` nor `injected_actions`, fails at load. A
+scenario cannot look complete while saying nothing about what should happen to the call it names.
+Two actions that share a tool share the disposition, because the key is the tool; a scenario that
+needs two dispositions for one tool is a shape W13 has to raise rather than one this schema can
+express. A legitimate action may carry the escalate disposition, which is how the incident scenario
+records that an honest denial is answered by a person.
 `legitimate_actions`, `injected_actions`, and an agent's `allowed_tools` are all checked against the
 tool table in `infra/graph.yml`, which is the same table the gateway re-exports from, so a truth
 block can only name a tool an agent could call.
