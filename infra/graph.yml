@@ -221,6 +221,23 @@ resources:
     name: acme/widgets
     owner_human_id: h-alice
     sensitivity: internal
+  # The private repository the issue-injection and paraphrase scenarios point
+  # at. `confidential` is what makes a read of it a `tainted-visibility` target
+  # once the task has read external material, which is the read the two
+  # scenarios expect to be refused.
+  - id: repo-acme-vault
+    kind: repo
+    name: acme/vault
+    owner_human_id: h-alice
+    sensitivity: confidential
+  # The second repository the honest external-bug scenario commits to. A commit
+  # outside the task's named target is what the task-taint rule refuses and the
+  # content rule lets through, which is the tradeoff that scenario measures.
+  - id: repo-acme-shared-lib
+    kind: repo
+    name: acme/shared-lib
+    owner_human_id: h-bob
+    sensitivity: internal
   - id: table-orders
     kind: db_table
     name: public.orders

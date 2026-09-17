@@ -23,6 +23,7 @@ rather than merely plausible.
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -40,9 +41,11 @@ from .schema import Scenario, shipped_agent_rows
 from .seed import (
     CUSTOMER_SENSITIVITY,
     DEFAULT_GRAPH_DB,
+    MAILBOX_SENSITIVITY,
     MESSAGE_ID_DOMAIN,
     TICKET_SENSITIVITY,
     require_ok,
+    scenario_mailboxes,
 )
 
 
@@ -153,6 +156,30 @@ def verify_graph(scenario: Scenario, graph_db: Path | str) -> list[Check]:
                 "graph db resources",
                 not missing,
                 f"{len(resources)} rows match the scenario"
+                if not missing
+                else f"mismatched: {missing}",
+            )
+        )
+
+        mailboxes: list[tuple[str, bool]] = []
+        for address, owner_login in sorted(scenario_mailboxes(scenario).items()):
+            row = graph.resource_named(address, "mailbox")
+            owner = graph.human(row.owner_human_id) if row else None
+            mailboxes.append(
+                (
+                    address,
+                    row is not None
+                    and owner is not None
+                    and owner.login == owner_login
+                    and row.sensitivity == MAILBOX_SENSITIVITY,
+                )
+            )
+        missing = [name for name, ok in mailboxes if not ok]
+        checks.append(
+            _check(
+                "graph mailbox resources",
+                not missing,
+                f"{len(mailboxes)} rows match the scenario"
                 if not missing
                 else f"mismatched: {missing}",
             )
@@ -327,6 +354,89 @@ def verify_postgres(scenario: Scenario, settings: SeedSettings) -> list[Check]:
     return checks
 
 
+_TRIAGE_SITE = re.compile(r"^(?P<repo>[^/\s#]+/[^/\s#]+)#(?P<number>\d+)$")
+
+
+def _gitea_site(scenario: Scenario, kind: str, site_id: str) -> bool:
+    """True when a Gitea site id names an object the scenario seeds."""
+    repos = {f"acme/{repo.name}": repo for repo in scenario.seed.gitea.repos}
+    if kind == "repo":
+        return site_id in repos
+    if kind == "file":
+        full_name, _, path = site_id.partition(":")
+        repo = repos.get(full_name)
+        return repo is not None and path in repo.file_entries()
+    if kind == "issue":
+        match = _TRIAGE_SITE.match(site_id)
+        if match is None:
+            return False
+        repo = repos.get(match.group("repo"))
+        number = int(match.group("number"))
+        return repo is not None and any(issue.number == number for issue in repo.issues)
+    if kind == "comment":
+        issue_ref, _, index = site_id.partition(":")
+        match = _TRIAGE_SITE.match(issue_ref)
+        if match is None or not index.isdigit():
+            return False
+        repo = repos.get(match.group("repo"))
+        if repo is None:
+            return False
+        issue = next(
+            (issue for issue in repo.issues if issue.number == int(match.group("number"))), None
+        )
+        return issue is not None and int(index) < len(issue.comments)
+    return False
+
+
+def verify_injection_sites(scenario: Scenario) -> list[Check]:
+    """Every injection site has to name an object the scenario seeds.
+
+    A truth block can point the poison at an object that does not exist, and the
+    file would still load. Then the grader has a site id nothing can be read
+    from, and no run can prove the poison was placed where the truth says. The
+    check resolves each site against the scenario's own seed block, which is the
+    object the seeder will create, plus the graph rows the shipped seed carries.
+    """
+    known_agents = set(shipped_agent_rows()) | {a.client_id for a in scenario.seed.graph.agents}
+    customer_ids = {str(customer.id) for customer in scenario.seed.db.customers}
+    ticket_ids = {str(ticket.id) for ticket in scenario.seed.db.tickets}
+    note_tickets = {str(note.ticket_id) for note in scenario.seed.db.notes}
+    message_ids = {
+        message.message_id or f"{scenario.id}.{index}@{MESSAGE_ID_DOMAIN}"
+        for index, message in enumerate(scenario.seed.mail.inbox)
+    }
+    checks: list[Check] = []
+    for site in scenario.truth.injection_sites:
+        label = f"{site.system}/{site.kind} {site.id}"
+        if site.system == "graph":
+            ok = site.kind == "agent" and site.id in known_agents
+        elif site.system == "gitea":
+            ok = _gitea_site(scenario, site.kind, site.id)
+        elif site.system == "db":
+            if site.kind == "customer":
+                ok = site.id in customer_ids
+            elif site.kind == "ticket":
+                ok = site.id in ticket_ids
+            elif site.kind == "note":
+                ok = site.id in note_tickets
+            else:
+                ok = False
+        elif site.system == "mail":
+            ok = site.kind == "message" and site.id in message_ids
+        else:
+            ok = False
+        checks.append(
+            _check(
+                f"injection site {label}",
+                ok,
+                "seeded" if ok else "no such seeded object",
+            )
+        )
+    if not checks:
+        return [_check("injection sites", True, "none named")]
+    return checks
+
+
 def verify_mail(scenario: Scenario, mail_settings: MailSettings) -> list[Check]:
     """Every seeded message, read back from the mailbox by its message id."""
     url = mail_settings.mail_url.rstrip("/")
@@ -382,7 +492,8 @@ def verify(
     """Read every seeded object back and report each comparison."""
     settings = settings or SeedSettings()
     mail_settings = mail_settings or MailSettings()
-    checks = verify_graph(scenario, graph_db)
+    checks = verify_injection_sites(scenario)
+    checks += verify_graph(scenario, graph_db)
     checks += verify_gitea(scenario, settings)
     checks += verify_postgres(scenario, settings)
     checks += verify_mail(scenario, mail_settings)
@@ -405,6 +516,7 @@ __all__ = [
     "verify",
     "verify_gitea",
     "verify_graph",
+    "verify_injection_sites",
     "verify_mail",
     "verify_postgres",
 ]

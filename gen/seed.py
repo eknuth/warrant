@@ -60,6 +60,12 @@ FILE_MESSAGE = "seed {path} for the scenario"
 CUSTOMER_SENSITIVITY = "confidential"
 TICKET_SENSITIVITY = "internal"
 
+# A derived mailbox is the address the desk replies to for one customer. A
+# mailbox row the graph does not carry resolves to the sentinel owner, and the
+# subject rule refuses the reply, so the seeder derives one row per address a
+# scenario's tickets and customers name.
+MAILBOX_SENSITIVITY = "internal"
+
 # The domain the seeder writes seeded mail ids under. The message id is not a
 # credential and nothing authenticates with it; it is the stable handle verify
 # reads the message back by.
@@ -219,6 +225,35 @@ def reset_graph(scenario: Scenario | None, graph_db: Path | str = DEFAULT_GRAPH_
     return graph
 
 
+def scenario_mailboxes(scenario: Scenario) -> dict[str, str]:
+    """The mailbox rows the scenario's DB block resolves to, by address.
+
+    A `mail.send_reply` resolves its resource from the `to` address, and an
+    address with no graph row gets the sentinel owner, which the subject rule
+    refuses. Every honest reply the scenario expects therefore needs a row owned
+    by the human the reply's task acts for. The customer's email is the address
+    the desk writes back to, and a ticket's author email is the same
+    relationship written on the ticket, so both are derived. One address under
+    two owners is a scenario error rather than a race the seeder resolves.
+    """
+    customers = {customer.id: customer for customer in scenario.seed.db.customers}
+    owners: dict[str, str] = {}
+
+    def add(address: str, owner_login: str) -> None:
+        existing = owners.get(address)
+        if existing is not None and existing != owner_login:
+            raise SeedError(
+                f"address {address!r} is owned by both {existing!r} and {owner_login!r}"
+            )
+        owners[address] = owner_login
+
+    for customer in scenario.seed.db.customers:
+        add(customer.email, customer.owner_login)
+    for ticket in scenario.seed.db.tickets:
+        add(ticket.author_email, customers[ticket.customer_id].owner_login)
+    return owners
+
+
 def scenario_graph_rows(scenario: Scenario, graph: Graph) -> dict[str, list[dict[str, Any]]]:
     """The scenario's agent rows and the database resource rows they resolve to.
 
@@ -227,6 +262,10 @@ def scenario_graph_rows(scenario: Scenario, graph: Graph) -> dict[str, list[dict
     so each row's `name` is its id as a string and its owner is the human the
     customer names. Without them a non-lead's honest read of their own ticket
     resolves to an unknown owner and the subject rule refuses it.
+
+    The mailbox rows come from `scenario_mailboxes`, for the same reason on the
+    mail side. A shipped row already carries its address, so an address the
+    shipped graph knows is left to that row rather than shadowed.
     """
     humans = {human.login: human.id for human in graph.humans()}
     customers = {customer.id: customer for customer in scenario.seed.db.customers}
@@ -258,6 +297,21 @@ def scenario_graph_rows(scenario: Scenario, graph: Graph) -> dict[str, list[dict
                 "name": str(ticket.id),
                 "owner_human_id": owner,
                 "sensitivity": TICKET_SENSITIVITY,
+            }
+        )
+    for index, (address, owner_login) in enumerate(sorted(scenario_mailboxes(scenario).items())):
+        if graph.resource_named(address, "mailbox") is not None:
+            continue
+        owner = humans.get(owner_login)
+        if owner is None:
+            raise SeedError(f"mailbox {address!r} names an owner that is not a shipped human")
+        resources.append(
+            {
+                "id": f"mailbox-seeded-{index}",
+                "kind": "mailbox",
+                "name": address,
+                "owner_human_id": owner,
+                "sensitivity": MAILBOX_SENSITIVITY,
             }
         )
     agents = [

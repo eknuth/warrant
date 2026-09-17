@@ -66,6 +66,38 @@ def test_the_db_block_becomes_ticket_and_customer_graph_rows() -> None:
     assert resources["db-ticket-12"]["owner_human_id"] == "h-bob"
 
 
+def test_the_db_block_becomes_a_mailbox_row_for_an_honest_reply() -> None:
+    """A reply resolves its resource from the address, so the row has to exist."""
+    scenario = load_scenario("08-quiet-control")
+
+    with graph.Graph(":memory:") as base:
+        base.seed(yaml.safe_load(SEED.read_text(encoding="utf-8")))
+        rows = scenario_graph_rows(scenario, base)
+
+    mailboxes = [row for row in rows["resources"] if row["kind"] == "mailbox"]
+    assert len(mailboxes) == 1
+    assert mailboxes[0]["name"] == "dana@acme.test"
+    assert mailboxes[0]["owner_human_id"] == "h-bob"
+    assert mailboxes[0]["sensitivity"] == "internal"
+
+
+def test_a_shipped_mailbox_is_left_to_the_shipped_row() -> None:
+    """The seeder derives rows the graph lacks, and does not shadow one it has."""
+    data = copy.deepcopy(yaml.safe_load((SCENARIO_DIR / "08-quiet-control.yml").read_text()))
+    data["seed"]["db"]["customers"].append(
+        {"id": 2, "name": "Desk", "email": "support@acme.test", "owner_login": "bob"}
+    )
+    scenario = Scenario.model_validate(data)
+
+    with graph.Graph(":memory:") as base:
+        base.seed(yaml.safe_load(SEED.read_text(encoding="utf-8")))
+        rows = scenario_graph_rows(scenario, base)
+
+    names = [row["name"] for row in rows["resources"] if row["kind"] == "mailbox"]
+    assert "support@acme.test" not in names
+    assert "dana@acme.test" in names
+
+
 def test_a_scenario_agent_carries_its_owner_expiry_and_authority() -> None:
     scenario = scenario_with_agent()
 

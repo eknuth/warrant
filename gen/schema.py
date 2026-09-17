@@ -206,12 +206,29 @@ class ActionMatch(BaseModel):
 
 
 class SourceRef(BaseModel):
-    """Where the poison lives: one record in one seeded system."""
+    """Where the poison lives: one record in one seeded system.
+
+    The first three systems hold the seeded objects. `graph` names the access
+    graph's own rows, which is the one seed block that lives in this file rather
+    than in a system the reset rebuilds from the database, the org, or the
+    inbox. The orphan scenario's poison is the agent row itself, so it is the
+    first site that has to reach the graph.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    system: Literal["gitea", "db", "mail"]
-    kind: Literal["repo", "file", "issue", "comment", "customer", "ticket", "note", "message"]
+    system: Literal["gitea", "db", "mail", "graph"]
+    kind: Literal[
+        "repo",
+        "file",
+        "issue",
+        "comment",
+        "customer",
+        "ticket",
+        "note",
+        "message",
+        "agent",
+    ]
     id: str
     note: str = ""
 
@@ -455,6 +472,16 @@ class TaskSpec(BaseModel):
     task. Tasks that share a non-empty `concurrent_group` run together through
     W10's `run_concurrent`; that runner is W15's to call, and this field is the
     grouping it reads.
+
+    `agent` names the client the run exchanges as. It defaults to the shipped
+    client the task's kind uses, which is what the two fixtures rely on, and a
+    task may name another agent the graph holds. The orphan scenario names
+    `orphan-agent`, whose justification is empty: the task is the orphan case,
+    every call through it is refused, and the entitlement check is skipped
+    because no entitlement can make a call pass. `scopes` is the scope set the
+    run has to request, as the realm spells it (`gitea:read`, or the
+    parameterized `incident_id:INC-42`). An empty list means the agent client's
+    own defaults.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -463,6 +490,8 @@ class TaskSpec(BaseModel):
     user: str
     subject: str
     params: dict[str, Any] = Field(default_factory=dict)
+    agent: str | None = None
+    scopes: list[str] = Field(default_factory=list)
     concurrent_group: str | None = None
 
     @model_validator(mode="after")
@@ -594,14 +623,22 @@ class Scenario(BaseModel):
                 )
 
     def _check_task_users(self) -> None:
-        """The task's user has to reach the tools its kind's agent holds.
+        """The task's user has to reach the tools its acting agent holds.
 
-        The role code exchanges as one fixed client per kind, so the run only
-        works when the human named owns a live agent entitled to that client's
-        tools. That union is `onBehalfOf.entitledTools`, which the baseline
-        permit requires. An agent whose justification is empty or expired
-        confers nothing, through the engine's own `live_justification`, so a
-        scenario cannot rely on an agent the baseline would refuse.
+        The role code exchanges as one client per kind unless the task names
+        another, so the run only works when the human named owns a live agent
+        entitled to that client's tools. That union is
+        `onBehalfOf.entitledTools`, which the baseline permit requires. An agent
+        whose justification is empty or expired confers nothing, through the
+        engine's own `live_justification`, so a scenario cannot rely on an agent
+        the baseline would refuse.
+
+        When the acting agent itself has no live justification the task is the
+        orphan case: `10-orphan.cedar` refuses every call, no entitlement can
+        change that, and the check is skipped rather than asking a user to be
+        entitled to a client that may not act. The task's user is still checked
+        against the shipped humans, so the file cannot name a caller the realm
+        has never heard of.
         """
         humans = graph_human_logins()
         by_login = shipped_human_ids()
@@ -613,17 +650,21 @@ class Scenario(BaseModel):
                     f"task {task.subject!r} names user {task.user!r}, "
                     f"who is not one of the shipped humans {sorted(humans)}"
                 )
-            kind_agent = agents.get(KIND_AGENT[task.kind])
-            if kind_agent is None:
+            acting_id = task.agent or KIND_AGENT[task.kind]
+            acting = agents.get(acting_id)
+            if acting is None:
                 raise ValueError(
-                    f"the graph has no {KIND_AGENT[task.kind]!r} row for a {task.kind} task"
+                    f"task {task.subject!r} names agent {acting_id!r}, "
+                    "which the access graph does not hold"
                 )
+            if not live_justification(acting, now):
+                continue
             user_id = by_login[task.user]
             entitled: set[str] = set()
             for row in agents.values():
                 if row.owner_human_id == user_id and live_justification(row, now):
                     entitled.update(row.allowed_tools)
-            needed = set(kind_agent.allowed_tools)
+            needed = set(acting.allowed_tools)
             missing = sorted(needed - entitled)
             if missing:
                 raise ValueError(

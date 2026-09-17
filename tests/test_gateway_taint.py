@@ -789,7 +789,7 @@ async def test_a_visibility_change_off_the_named_target_is_outside_the_task(
     # graph rows being compared.
     await gateway.call_tool(
         "gitea.set_repo_visibility",
-        {"repo": "acme/vault", "visibility": "public"},
+        {"repo": "acme/ghost", "visibility": "public"},
         claims=claims_for(),
         token="",
     )
@@ -809,9 +809,9 @@ async def test_a_visibility_change_off_the_named_target_is_outside_the_task(
     visibility = [
         request for request in engine.requests if request.tool == "gitea.set_repo_visibility"
     ]
-    vault, api = visibility
-    assert vault.resource == "acme/vault"
-    assert vault.target_outside_task is True
+    ghost, api = visibility
+    assert ghost.resource == "acme/ghost"
+    assert ghost.target_outside_task is True
     assert api.resource == "repo-acme-api", "the second target is a seeded graph row"
     assert api.target_outside_task is True
     comment = request_for(engine, "gitea.create_issue_comment")
