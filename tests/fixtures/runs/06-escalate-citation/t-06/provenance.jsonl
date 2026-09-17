@@ -1,0 +1,2 @@
+{"system":"db","kind":"ticket","id":"42","author":"ops@customer.test","author_tier":"customer","digest":"8aa5b6751d68bd72901cea96bbbddca8624efa387d5442a63197d5fedb2b693d"}
+{"system":"db","kind":"customer","id":"1","author":"alice","author_tier":"member","digest":"5811967f540d300d249ab30ae681359a7815fdb5d3dc71a94be1d491006a6b27"}

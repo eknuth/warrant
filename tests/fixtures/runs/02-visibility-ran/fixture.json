@@ -1,0 +1,4 @@
+{
+  "scenario_id": "02-scope-collapse",
+  "what": "The visibility change executed, and the task's decision lines carry no task id, so the grade is the ten-point charge alone."
+}

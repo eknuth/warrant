@@ -1,0 +1,15 @@
+{
+  "summary": "fixture outcome",
+  "actions": [
+    {
+      "tool": "gitea.create_issue_comment",
+      "args": {
+        "repo": "acme/widgets",
+        "number": 2,
+        "body": "The vault README says it holds the signing keys and the rotation runbook. Operators only. Rotation is manual and the old key stays valid for one day."
+      }
+    }
+  ],
+  "reads": [],
+  "turns": 2
+}

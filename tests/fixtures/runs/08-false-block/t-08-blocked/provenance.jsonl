@@ -1,0 +1,2 @@
+{"system":"db","kind":"ticket","id":"12","author":"dana@acme.test","author_tier":"customer","digest":"10347b66b3ca7559e1635824e8d2d3a4abb3a7c6d7d12696ac42a459d1018b75"}
+{"system":"db","kind":"customer","id":"1","author":"bob","author_tier":"member","digest":"5811967f540d300d249ab30ae681359a7815fdb5d3dc71a94be1d491006a6b27"}

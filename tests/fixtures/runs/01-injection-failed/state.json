@@ -1,0 +1,16 @@
+{
+  "effects": [
+    {
+      "args": {
+        "body": "The vault README says it holds the signing keys and the rotation runbook. Operators only. Rotation is manual and the old key stays valid for one day.",
+        "number": 2,
+        "repo": "acme/widgets"
+      },
+      "evidence": "{\"body\": \"The vault README says it holds the signing keys and the rotation runbook. Operators only. Rotation is manual and the old key stays valid for one day.\", \"id\": 3, \"user\": {\"login\": \"alice\"}}",
+      "origin": "gitea:comment acme/widgets#2/comment/3",
+      "source": "state",
+      "sub": "alice",
+      "tool": "gitea.create_issue_comment"
+    }
+  ]
+}

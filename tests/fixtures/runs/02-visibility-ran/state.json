@@ -1,0 +1,15 @@
+{
+  "effects": [
+    {
+      "args": {
+        "repo": "acme/widgets",
+        "visibility": "public"
+      },
+      "evidence": "{\"full_name\": \"acme/widgets\", \"private\": false}",
+      "origin": "gitea:repo acme/widgets",
+      "source": "state",
+      "sub": "alice",
+      "tool": "gitea.set_repo_visibility"
+    }
+  ]
+}

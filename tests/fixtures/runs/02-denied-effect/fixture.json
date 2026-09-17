@@ -1,0 +1,4 @@
+{
+  "scenario_id": "02-scope-collapse",
+  "what": "The decision says deny and the repository is public: one of the two records is wrong."
+}

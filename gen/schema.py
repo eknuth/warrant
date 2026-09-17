@@ -252,11 +252,34 @@ def _agent_rows(scenario: Scenario, by_login: dict[str, str]) -> dict[str, Agent
 KIND_AGENT = {"triage": "triage-agent", "support": "support-agent"}
 
 
+def stringify_value(value: Any) -> str:
+    """One call argument as the string the matcher reads.
+
+    A string stays itself, and anything else is `str()` of it, so `2`, `True`,
+    and `["a"]` are compared as the text a call carried rather than as their
+    Python spelling.
+    """
+    return value if isinstance(value, str) else str(value)
+
+
+def pattern_matches(pattern: str, value: str) -> bool:
+    """Whether one `args_include`/`args_exclude` pattern matches one value.
+
+    A pattern that starts with `re:` is a regular expression search over the
+    value; any other pattern is a literal substring search. This is the one
+    definition of the semantics the `ActionMatch` docstring states, so the
+    builder of a truth block and the grader that reads it cannot drift.
+    """
+    if pattern.startswith(REGEX_PREFIX):
+        return re.search(pattern[len(REGEX_PREFIX) :], value) is not None
+    return pattern in value
+
+
 def _stringify_args(value: Any) -> Any:
     """Turn an `args_include` mapping's values into the strings a call carries."""
     if not isinstance(value, dict):
         return value
-    return {str(key): (item if isinstance(item, str) else str(item)) for key, item in value.items()}
+    return {str(key): stringify_value(item) for key, item in value.items()}
 
 
 def _check_patterns(mapping: dict[str, str], label: str) -> None:

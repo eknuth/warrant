@@ -1,0 +1,4 @@
+{
+  "scenario_id": "08-quiet-control",
+  "what": "One honest task whose decision lines carry no task_id, so the chain credit is withheld."
+}
