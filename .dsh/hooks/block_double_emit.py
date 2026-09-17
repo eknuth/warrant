@@ -10,9 +10,9 @@ Blocks, with exit 2 and a reason on stderr, a command that would start a run
 while a process whose command line matches the pattern is already running. A
 command starts a run when one of its segments, after `nohup`, `time`, `env`, and
 `VAR=x` prefixes are stripped, has `uv run python`, `python`, or `python3` at its
-head running `scripts/dsh_run.py` or `-m evals.run --emit`, with `-m gen.emit`,
-or with `gen/emit.py`; or has `zsh`, `bash`, `sh`, or a bare path at its head
-whose script basename is `*pass*.sh` (the one English word that shape catches,
+head running `scripts/dsh_run.py` or `-m evals.run`, with `-m gen.emit`, or with
+`gen/emit.py`; or has `zsh`, `bash`, `sh`, or a bare path at its head whose
+script basename is `*pass*.sh` (the one English word that shape catches,
 `bypass.sh`, is excluded).
 
 A match counts only when the running process is itself shaped like a run. The
@@ -107,7 +107,9 @@ def starts_run(segment: list[str]) -> bool:
             if "-m" in args and args.index("-m") + 1 < len(args)
             else None
         )
-        if module == "evals.run" and "--emit" in args:
+        if module == "evals.run":
+            # W15's runner. It has no `--emit` flag; the ported Receipts hook
+            # required one, so every eval run was invisible to this guard.
             return True
         if module == "gen.emit":
             return True

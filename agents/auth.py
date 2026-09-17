@@ -28,6 +28,7 @@ the repository reads them, so nothing here needs an exported shell variable.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
@@ -101,8 +102,16 @@ def exchange_for_obo(
     task_id: str,
     *,
     client_id: str = TRIAGE_AGENT,
+    scopes: Sequence[str] = (),
 ) -> str:
-    """The agent's on-behalf-of token for one audience, keyed to one task."""
+    """The agent's on-behalf-of token for one audience, keyed to one task.
+
+    `scopes` are the scenario's declared scopes, requested beside the task id.
+    The realm refuses a scope the acting client is not assigned, so the request
+    is the caller's word and the assignment is the realm's. An empty list leaves
+    the token at the client's own defaults.
+    """
+    requested = [f"task-id:{task_id}", *scopes]
     response = client.post(
         settings.token_endpoint,
         auth=(client_id, settings.warrant_agent_client_secret),
@@ -112,7 +121,7 @@ def exchange_for_obo(
             "subject_token_type": ACCESS_TOKEN_TYPE,
             "requested_token_type": ACCESS_TOKEN_TYPE,
             "audience": audience,
-            "scope": f"task-id:{task_id}",
+            "scope": " ".join(requested),
         },
     )
     if response.status_code != 200:

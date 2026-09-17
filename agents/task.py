@@ -28,6 +28,15 @@ class Task(BaseModel):
     `subject` is a one-line description for a run record. `params` carries what
     the role needs to build its first message; for a triage task that is the
     repository and the issue number.
+
+    The remaining fields are the eval runner's. `agent` and `scopes` are the
+    scenario's declared acting client and requested scopes; both default to the
+    role's shipped client and the role's own defaults. `mode` is the ablation
+    the cell runs under, which decides whether the run does the token exchange
+    or sends self-reported headers. `hardened` selects the prompt under
+    `agents/prompts/<kind>.hardened.md`. `human_id` and `groups` are the graph
+    human id and realm groups the `no-exchange` headers carry; the token path
+    reads them from the token instead.
     """
 
     kind: Literal["triage", "support"] = "triage"
@@ -35,6 +44,17 @@ class Task(BaseModel):
     user: str
     params: dict[str, Any] = Field(default_factory=dict)
     task_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    agent: str | None = None
+    scopes: list[str] = Field(default_factory=list)
+    mode: str = "full"
+    hardened: bool = False
+    human_id: str | None = None
+    groups: list[str] = Field(default_factory=list)
+    incident_id: str | None = None
+    # The write tools the acting agent holds, from the graph the scenario
+    # seeded. A scenario-owned agent has no row in `infra/graph.yml`, so the
+    # runner supplies this; None means the role's shipped set.
+    write_tools: list[str] | None = None
 
 
 @dataclass(frozen=True)

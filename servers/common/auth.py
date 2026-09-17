@@ -81,14 +81,23 @@ def verify_authorization(
     audience: str,
     issuer: str | None = None,
     key: object | None = None,
+    discovery_issuer: str | None = None,
 ) -> Claims:
     """Verify an `Authorization` header value for `audience` and return claims.
 
-    `issuer` and `key` default to the running stack; a test passes its own so
-    no server is needed. Every refusal is an `OidcError` subclass, and a dead
-    issuer is an `httpx.HTTPError`, exactly as `warrant.oidc.verify` raises.
+    `issuer` and `key` default to the running stack; `discovery_issuer` is the
+    URL base the signing keys come from when it differs from the issuer the
+    token must name. A test passes its own so no server is needed. Every refusal
+    is an `OidcError` subclass, and a dead issuer is an `httpx.HTTPError`,
+    exactly as `warrant.oidc.verify` raises.
     """
-    return verify(parse_bearer(authorization), audience, key=key, issuer=issuer)
+    return verify(
+        parse_bearer(authorization),
+        audience,
+        key=key,
+        issuer=issuer,
+        discovery_issuer=discovery_issuer,
+    )
 
 
 def _first_value(headers: Any, name: str) -> str | None:
@@ -123,14 +132,25 @@ class BearerAuthMiddleware:
         audience: str,
         issuer: str | None = None,
         key: object | None = None,
+        discovery_issuer: str | None = None,
+        open_paths: set[str] | None = None,
     ) -> None:
         self.app = app
         self.audience = audience
         self.issuer = issuer
         self.key = key
+        self.discovery_issuer = discovery_issuer
+        # Paths that answer without a bearer. A health check is the one caller:
+        # a runner that had to mint a token to ask whether a process is up would
+        # be testing the token, not the process. Empty by default, so nothing
+        # becomes open by accident.
+        self.open_paths = frozenset(open_paths or ())
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        if scope.get("path") in self.open_paths:
             await self.app(scope, receive, send)
             return
 
@@ -140,6 +160,7 @@ class BearerAuthMiddleware:
                 audience=self.audience,
                 issuer=self.issuer,
                 key=self.key,
+                discovery_issuer=self.discovery_issuer,
             )
         except MissingBearer as error:
             await self._reject(scope, receive, send, "invalid_request", str(error))

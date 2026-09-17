@@ -61,6 +61,8 @@ from mcp.server.lowlevel import Server
 from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 from servers.common.auth import BearerAuthMiddleware
 from warrant import config, oidc
@@ -84,6 +86,12 @@ from warrant.taint import TaskState
 logger = logging.getLogger(__name__)
 
 GATEWAY_LOG_NAME = "gateway.jsonl"
+
+# The one path the runner polls before it spends anything. It is open by
+# design: the mode it reports is not a secret, and a runner that needed a token
+# to ask whether the process it just restarted is ready would be checking the
+# wrong thing.
+HEALTH_PATH = "/healthz"
 
 DEFAULT_SERVERS_FILE = Path("infra/servers.yml")
 DEFAULT_POLICIES_DIR = Path("policies")
@@ -159,6 +167,11 @@ class GatewaySettings(BaseSettings):
     warrant_agent_client_secret: str = ""
     # None means `warrant.oidc`'s own default, which reads WARRANT_OIDC_ISSUER.
     warrant_oidc_issuer: str | None = None
+    # The URL base the gateway fetches the realm's signing keys from when it
+    # differs from the issuer a token must name. The compose gateway sets this
+    # to the internal `keycloak` name while the expected issuer is the host's
+    # `localhost`, so a host-minted token verifies in the container.
+    warrant_oidc_discovery_issuer: str | None = None
     warrant_audience: str = "warrant"
     warrant_servers_file: str = str(DEFAULT_SERVERS_FILE)
     warrant_graph_db: str = str(DEFAULT_DB)
@@ -176,8 +189,13 @@ class GatewaySettings(BaseSettings):
         return f"{self.keycloak_url.rstrip('/')}/realms/warrant"
 
     @property
+    def key_source(self) -> str:
+        """The URL base the signing keys are fetched from."""
+        return self.warrant_oidc_discovery_issuer or self.issuer
+
+    @property
     def token_endpoint(self) -> str:
-        return f"{self.issuer}/protocol/openid-connect/token"
+        return f"{self.key_source}/protocol/openid-connect/token"
 
 
 def args_digest(args: Mapping[str, Any]) -> str:
@@ -379,6 +397,10 @@ class Gateway:
         self.taint = Taint(taint) if taint is not None else config.current_taint()
         self._now = now or (lambda: datetime.now(UTC))
         self._tools: dict[str, list[Tool]] = {}
+        # The no-exchange ablation has no subject token, so the gateway reaches
+        # the upstreams as itself. The client-credentials token is minted once
+        # per process and reused; the process is recreated per eval cell.
+        self._service_token: str | None = None
         # One `TaskState` per task and actor. The actor is part of the key for the
         # same reason the ledger keys on it: an agent writes its own task id, so
         # keying on the id alone would let one agent fill another agent's taint.
@@ -389,7 +411,11 @@ class Gateway:
     def verify(self, token: str) -> oidc.Claims:
         """Verify an incoming token for the gateway's audience."""
         return oidc.verify(
-            token, self.settings.warrant_audience, key=self._key, issuer=self._issuer
+            token,
+            self.settings.warrant_audience,
+            key=self._key,
+            issuer=self._issuer,
+            discovery_issuer=self.settings.key_source,
         )
 
     # Tool surface ----------------------------------------------------------
@@ -477,8 +503,14 @@ class Gateway:
         token names `warrant`, so an upstream will not accept it. The exchange
         is attempted and its outcome logged; a refusal falls back to the
         incoming token, which the upstream will refuse in turn.
+
+        `no-exchange` has no subject token at all, so it takes the service
+        credential path below: the ablation is about the chain the gateway
+        decides on, not about the credential the upstreams see.
         """
-        if self.mode is Mode.no_exchange or not subject_token:
+        if self.mode is Mode.no_exchange:
+            return await self.service_token()
+        if not subject_token:
             return subject_token
         secret = self.settings.warrant_agent_client_secret
         if not secret:
@@ -516,6 +548,45 @@ class Gateway:
             )
             return subject_token
         return str(response.json()["access_token"])
+
+    async def service_token(self) -> str:
+        """A client-credentials bearer for the upstreams, for `no-exchange`.
+
+        The ablation has no subject token to exchange, so the gateway reaches
+        the upstreams as itself with the broad service credential. The warrant
+        client's service account carries `warrant-obo`, whose mappers give the
+        token the upstream audiences and an `act` equal to `azp`, which is what
+        the resource servers verify. The token is minted once per process: the
+        gateway is recreated per eval cell, and a mint per call would double
+        every upstream round trip.
+        """
+        if self._service_token is not None:
+            return self._service_token
+        secret = self.settings.warrant_agent_client_secret
+        if not secret:
+            logger.warning("no client secret for the no-exchange service token")
+            return ""
+        try:
+            async with httpx.AsyncClient(
+                timeout=20.0, transport=self._exchange_transport
+            ) as client:
+                response = await client.post(
+                    self.settings.token_endpoint,
+                    auth=(self.settings.warrant_client_id, secret),
+                    data={"grant_type": "client_credentials"},
+                )
+        except httpx.HTTPError as error:
+            logger.warning("no-exchange service token request failed: %s", error)
+            return ""
+        if response.status_code != 200:
+            logger.warning(
+                "no-exchange service token refused: HTTP %d %s",
+                response.status_code,
+                response.text[:300],
+            )
+            return ""
+        self._service_token = str(response.json()["access_token"])
+        return self._service_token
 
     # The request path ------------------------------------------------------
 
@@ -664,6 +735,7 @@ class Gateway:
                 scopes=list(claims.scope),
                 groups=list(claims.groups),
                 token_exp=datetime.fromtimestamp(claims.exp, tz=UTC),
+                incident_id=claims.incident_id,
             )
         except ValueError as error:
             # A token whose claims cannot build a chain is a malformed token, not
@@ -747,6 +819,7 @@ class Gateway:
             reasons=reasons,
             request=request,
             mode=self.mode.value,
+            chain_source=request.chain.source,
         )
         self.decision_log.append(decision)
         return self._denied(request.tool, decision)
@@ -909,6 +982,26 @@ def build_server(gateway: Gateway) -> Server:
     )
 
 
+def health_payload() -> dict[str, Any]:
+    """The mode and taint this process imported, for the runner's health check.
+
+    The values come from `warrant.config`, which reads `WARRANT_MODE` and
+    `TAINT` once at import, so the payload is what this process is actually
+    running and not what a caller asked for. The runner restarts the process,
+    polls this, and records the mode it confirmed.
+    """
+    return {
+        "status": "ok",
+        "mode": config.current_mode().value,
+        "taint": config.current_taint().value,
+    }
+
+
+async def _healthz(_request: Any) -> JSONResponse:
+    """`GET /healthz`: the process is up and running the named ablation."""
+    return JSONResponse(health_payload())
+
+
 def build_app(
     gateway: Gateway,
     *,
@@ -922,18 +1015,27 @@ def build_app(
     with `401` before a handler runs, which is the boundary an agent cannot
     skip. The handler verifies again from the same header, so the decision path
     does not depend on the middleware's context reaching its task.
+
+    `/healthz` is exempt from the bearer check in every mode, so the runner can
+    confirm a restarted process without holding a token for it.
     """
     server = build_server(gateway)
     app = server.streamable_http_app(
         streamable_http_path=gateway.settings.warrant_gateway_path,
         host=gateway.settings.warrant_gateway_host,
         transport_security=transport_security,
+        custom_starlette_routes=[Route(HEALTH_PATH, _healthz, methods=["GET"])],
     )
     if gateway.mode is not Mode.no_exchange:
+        # No bearer middleware in `no-exchange`: that ablation's whole point is
+        # that the agent sends headers instead of a token. `/healthz` is exempt
+        # so the runner can poll a restarted process in every mode.
         app.add_middleware(
             BearerAuthMiddleware,
             audience=gateway.settings.warrant_audience,
             issuer=issuer if issuer is not None else gateway._issuer,
             key=key if key is not None else gateway._key,
+            discovery_issuer=gateway.settings.key_source,
+            open_paths={HEALTH_PATH},
         )
     return app

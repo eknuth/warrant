@@ -28,7 +28,8 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -49,7 +50,19 @@ from agents.mcp_client import CallResult, MCPClient, warrant_endpoint
 from agents.providers import Provider, ToolSchema, Turn, provider_for
 from agents.providers.base import ToolResultBlock, Usage
 from agents.task import Chain, Task
-from warrant.config import REPO_ROOT, task_dir, write_run_metadata
+from warrant.config import (
+    HEADER_ACT,
+    HEADER_GROUPS,
+    HEADER_INCIDENT_ID,
+    HEADER_SCOPES,
+    HEADER_SUB,
+    HEADER_TASK_ID,
+    HEADER_TOKEN_EXP,
+    REPO_ROOT,
+    Mode,
+    task_dir,
+    write_run_metadata,
+)
 from warrant.config import RUNS_DIR as DEFAULT_RUNS_DIR
 from warrant.graph import Graph
 
@@ -373,6 +386,39 @@ def write_run_record(runs_dir: Path, task: Task, outcome: Outcome, usage: Usage)
     )
 
 
+def hardened_prompt(role: Role) -> Path:
+    """The role's hardened prompt, beside its shipped one.
+
+    `prompt-only` replaces the role prompt with this file. Both are in the same
+    directory and the base prompt is the prefix of the hardened one, which a
+    test pins so the two cannot drift.
+    """
+    return role.prompt_path.with_name(f"{role.name}.hardened.md")
+
+
+def no_exchange_headers(task: Task, agent: str) -> dict[str, str]:
+    """The self-reported chain the `no-exchange` ablation sends.
+
+    Every value is the agent's own word and nothing verifies it. The expiry is
+    five minutes out so the gateway's chain has one, and the incident claim
+    travels as its own header the same way the realm mints it as a claim.
+    """
+    expires = datetime.now(UTC) + timedelta(minutes=5)
+    headers = {
+        HEADER_SUB: task.human_id or task.user,
+        HEADER_ACT: agent,
+        HEADER_TASK_ID: task.task_id,
+        HEADER_TOKEN_EXP: str(int(expires.timestamp())),
+    }
+    if task.scopes:
+        headers[HEADER_SCOPES] = " ".join(task.scopes)
+    if task.groups:
+        headers[HEADER_GROUPS] = " ".join(task.groups)
+    if task.incident_id:
+        headers[HEADER_INCIDENT_ID] = task.incident_id
+    return headers
+
+
 async def run_role(
     task: Task,
     role: Role,
@@ -384,6 +430,11 @@ async def run_role(
 ) -> Outcome:
     """Run one task end to end as `role` and return what it did.
 
+    The task selects the acting client, the scopes, and the ablation. Under
+    `no-exchange` the login and the exchange are skipped and the run sends the
+    self-reported headers; every other mode does the verified exchange and
+    requests the scenario's scopes beside the task id.
+
     The login and the exchange happen here, inside the call, so nothing about
     the token outlives the task. The token is a local, there is no cache to
     read it back from, and the MCP session is opened for this task and closed
@@ -394,17 +445,53 @@ async def run_role(
     settings = settings or DevSettings()
     provider = provider or provider_for()
     runs_dir = Path(runs_dir) if runs_dir is not None else DEFAULT_RUNS_DIR
-    system_prompt = load_system_prompt(role.prompt_path)
+    mode = Mode(task.mode)
+    agent = task.agent or role.agent
+    if task.write_tools is not None:
+        # A scenario-owned agent has no row in `infra/graph.yml`, so the runner
+        # supplies the write set for it. `replace` keeps the rest of the role.
+        role = replace(role, agent=agent, write_tools=frozenset(task.write_tools))
+    system_prompt = load_system_prompt(hardened_prompt(role) if task.hardened else role.prompt_path)
+
+    if mode is Mode.no_exchange:
+        headers = no_exchange_headers(task, agent)
+        chain = Chain(sub=headers[HEADER_SUB], act=agent, task_id=task.task_id)
+        write_run_metadata(
+            task_dir(runs_dir, task.task_id),
+            tool=f"agents.{role.name}",
+            model=provider.model,
+            task_id=task.task_id,
+        )
+        endpoint = warrant_endpoint("", url=mcp_url, headers=headers)
+        async with MCPClient([endpoint], chain=chain, runs_dir=runs_dir) as mcp:
+            outcome, usage = await agent_loop(
+                task, role, provider, mcp, system_prompt=system_prompt
+            )
+        write_run_record(runs_dir, task, outcome, usage)
+        logger.info(
+            "no-exchange turns=%d writes=%d input_tokens=%d output_tokens=%d",
+            outcome.turns,
+            len(outcome.actions),
+            usage.input_tokens,
+            usage.output_tokens,
+        )
+        return outcome
 
     with httpx.Client(timeout=30.0) as client:
         subject_token = login_user(settings, client, task.user, settings.warrant_user_password)
         obo_token = exchange_for_obo(
-            settings, client, subject_token, role.audience, task.task_id, client_id=role.agent
+            settings,
+            client,
+            subject_token,
+            role.audience,
+            task.task_id,
+            client_id=agent,
+            scopes=task.scopes,
         )
 
     decoded = decode_claims(obo_token)
-    check_obo_claims(decoded["claims"], task, role.audience, role.agent)
-    token_path = write_token_record(runs_dir, task, decoded, role.audience, role.agent)
+    check_obo_claims(decoded["claims"], task, role.audience, agent)
+    token_path = write_token_record(runs_dir, task, decoded, role.audience, agent)
     # Which commit produced this run, beside the run. A column in the eval table
     # is only worth reading if it says which code it is a column of.
     write_run_metadata(
@@ -424,7 +511,7 @@ async def run_role(
 
     chain = Chain(
         sub=task.user,
-        act=role.agent,
+        act=agent,
         task_id=task.task_id,
         sub_id=str(decoded["claims"].get("sub") or "") or None,
     )

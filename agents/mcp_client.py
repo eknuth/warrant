@@ -53,11 +53,16 @@ class MCPError(RuntimeError):
 
 @dataclass(frozen=True)
 class Endpoint:
-    """One MCP server, its streamable-HTTP URL, and the bearer it verifies."""
+    """One MCP server, its streamable-HTTP URL, and the headers it carries.
+
+    `bearer` is the verified token in every mode but `no-exchange`, where it is
+    empty and `headers` carries the self-reported `X-Warrant-*` chain instead.
+    """
 
     url: str
     bearer: str
     name: str = "mcp"
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 class GatewaySettings(BaseSettings):
@@ -68,14 +73,26 @@ class GatewaySettings(BaseSettings):
     warrant_url: str = DEFAULT_WARRANT_URL
 
 
-def warrant_endpoint(bearer: str, *, url: str | None = None, name: str = "warrant") -> Endpoint:
+def warrant_endpoint(
+    bearer: str,
+    *,
+    url: str | None = None,
+    name: str = "warrant",
+    headers: dict[str, str] | None = None,
+) -> Endpoint:
     """The one endpoint an agent is configured to reach.
 
     An agent holds an on-behalf-of token for `warrant` and nothing else; the
     per-upstream tokens are the gateway's to mint. `url` overrides the
-    environment, which is what a test or the CLI flag uses.
+    environment, which is what a test or the CLI flag uses. `headers` is the
+    `no-exchange` ablation's self-reported chain, sent with an empty bearer.
     """
-    return Endpoint(url=url or GatewaySettings().warrant_url, bearer=bearer, name=name)
+    return Endpoint(
+        url=url or GatewaySettings().warrant_url,
+        bearer=bearer,
+        name=name,
+        headers=dict(headers or {}),
+    )
 
 
 @dataclass
@@ -229,11 +246,11 @@ class MCPClient:
     async def __aenter__(self) -> MCPClient:
         try:
             for endpoint in self._endpoints:
+                request_headers = dict(endpoint.headers)
+                if endpoint.bearer:
+                    request_headers["Authorization"] = f"Bearer {endpoint.bearer}"
                 http = await self._stack.enter_async_context(
-                    httpx.AsyncClient(
-                        headers={"Authorization": f"Bearer {endpoint.bearer}"},
-                        timeout=self._timeout,
-                    )
+                    httpx.AsyncClient(headers=request_headers, timeout=self._timeout)
                 )
                 self._http[endpoint.name] = http
                 streams = await self._stack.enter_async_context(

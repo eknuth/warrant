@@ -10,7 +10,8 @@ The action is the tool. Each gateway tool name is a Cedar action, and each one i
 kind, so a rule about a kind reads `action in Action::"write"` and a rule about one tool reads
 `action == Action::"gitea.create_issue_comment"`. The context carries what the rule needs to see: the
 human in `sub` as `onBehalfOf`, the token's scopes as `taskScopes`, the token's groups as `groups`,
-the provenance summary, the action kind, and the two target fields the argument scan computes.
+the token's `incident_id` claim as `incidentId`, the provenance summary, the action kind, and the
+two target fields the argument scan computes.
 
 ## `00-baseline.cedar`
 
@@ -95,8 +96,11 @@ it. A denial by `tainted-content` is not a judgment call, because text that firs
 external material is evidence rather than a question, so this permit does not reproduce that rule's
 conditions. Cedar cannot ask which rule denied, so the shape of the two escalatable rules is written
 out again inside the permit. On this pass the action is the escalate action, so the real action's
-kind and tool are read from the context. The task must carry an `incident_id` scope, which is the
-record that this work is an incident and not routine. Orphan never escalates, because its forbid
+kind and tool are read from the context. The token must carry an `incident_id` claim, which the
+gateway puts in the context as `context.incidentId` and which is the record that this work is an
+incident and not routine. The realm mints that claim through a parameterized scope, and W15's
+`docs/decisions/w15-eval-runner.md` records why the policy reads the claim rather than a bare scope
+entry. Orphan never escalates, because its forbid
 also matches the escalate action and a forbid beats every permit. Content and exfil never escalate,
 because the permit refuses itself when `overlapExternal` or `argsTouchSecret` is set, and neither
 shape is reproduced in the permit.
@@ -126,10 +130,11 @@ including the paraphrase the content rule cannot see. The fields still default t
 false on a request built outside the gateway, which is the permissive direction,
 so a caller that decides a hand-built request gets no taint unless it sets one.
 
-The escalation scope and the support group are seeded. `incident_id` is a
+The escalation claim and the support group are seeded. `incident_id` is a
 parameterized client scope in the realm, minted the way `task_id` is and optional
 on the four clients that could ask for it, so a task can declare itself an
-incident and `escalate-incident` can fire. `support-leads` is a realm group and a
+incident, the gateway copies the claim into `context.incidentId`, and
+`escalate-incident` can fire. `support-leads` is a realm group and a
 graph group, and carol is its seeded member: her realm user carries the group, and
 the graph gives her a live agent, `support-lead-agent`, so the exemption is
 reachable through a permit rather than being a rule that can never match. Carol

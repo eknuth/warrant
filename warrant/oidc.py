@@ -46,8 +46,12 @@ from jose.exceptions import JWTClaimsError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 # The local stack's realm. A deployment points this elsewhere with
-# WARRANT_OIDC_ISSUER.
+# WARRANT_OIDC_ISSUER. The issuer a token must name and the URL its keys come
+# from can differ: a host login reaches Keycloak at `localhost`, and a container
+# fetches the same realm's keys at the compose service name. A deployment whose
+# realm is reachable under one name sets only the issuer.
 DEFAULT_ISSUER = os.environ.get("WARRANT_OIDC_ISSUER", "http://localhost:8080/realms/warrant")
+DEFAULT_DISCOVERY_ISSUER = os.environ.get("WARRANT_OIDC_DISCOVERY_ISSUER") or DEFAULT_ISSUER
 
 # Keycloak signs with RS256. Listing one algorithm is the point: a token that
 # asks to be checked with "none" or an HMAC over the public key is refused.
@@ -114,6 +118,10 @@ class Claims(BaseModel):
     scope: list[str] = Field(default_factory=list)
     groups: list[str] = Field(default_factory=list)
     task_id: str | None = None
+    # The realm's `incident_id` parameterized scope writes a separate claim and
+    # does not put a bare `incident_id` in `scope`; see
+    # docs/decisions/w15-eval-runner.md. The escalation rule reads this claim.
+    incident_id: str | None = None
     exp: int
     iss: str | None = None
 
@@ -135,6 +143,23 @@ class Claims(BaseModel):
         if value is None:
             return []
         return [value] if isinstance(value, str) else value
+
+    @field_validator("incident_id", mode="before")
+    @classmethod
+    def _single_incident_id(cls, value: object) -> object:
+        # The same parameterized-scope mapper that writes `task_id` writes
+        # `incident_id`, so it arrives as a one-element list. More than one is
+        # refused for the same reason `task_id` refuses it: the caller chooses
+        # how many values to ask for, and keeping the first would pick an
+        # arbitrary incident.
+        if isinstance(value, list):
+            if len(value) > 1:
+                message = (
+                    f"incident_id carries {len(value)} values, at most one is expected: {value!r}"
+                )
+                raise ValueError(message)
+            return value[0] if value else None
+        return value
 
     @field_validator("task_id", mode="before")
     @classmethod
@@ -191,6 +216,7 @@ def verify(
     *,
     key: object | None = None,
     issuer: str | None = None,
+    discovery_issuer: str | None = None,
 ) -> Claims:
     """Verify `token` for `audience` and return its normalized claims.
 
@@ -200,8 +226,16 @@ def verify(
     when `act.sub` and `azp` disagree, and `InvalidToken` for a bad signature,
     a bad issuer, or a claim of the wrong shape.
 
-    `key` and `issuer` default to the running stack. A test passes its own
-    public key and issuer so it needs no server.
+    `issuer` is the value the token's `iss` claim must equal. `discovery_issuer`
+    is the URL base the signing keys are fetched from, and it defaults to
+    `issuer`. The two differ on the local stack: a host-side login reaches
+    Keycloak at `localhost:8080`, so the token carries that issuer, while the
+    gateway container reaches the same realm at `keycloak:8080` to fetch its
+    keys. Splitting the check from the fetch keeps the identity provider's
+    public issuer ordinary and lets one deployment run both. A test passes its
+    own public key and issuer so it needs no server.
+
+    `key` and `issuer` default to the running stack.
 
     The signing algorithms are not a parameter. They are pinned above so no
     caller can widen them, which matters here: the pinned python-jose has an
@@ -210,7 +244,8 @@ def verify(
     set is a `InvalidToken`.
     """
     issuer = issuer or DEFAULT_ISSUER
-    signing_key = jwks(issuer) if key is None else key
+    key_source = discovery_issuer or DEFAULT_DISCOVERY_ISSUER or issuer
+    signing_key = jwks(key_source) if key is None else key
 
     try:
         payload: dict[str, Any] = jwt.decode(

@@ -108,6 +108,9 @@ HEADER_TASK_ID = "X-Warrant-Task-Id"
 HEADER_SCOPES = "X-Warrant-Scopes"
 HEADER_GROUPS = "X-Warrant-Groups"
 HEADER_TOKEN_EXP = "X-Warrant-Token-Exp"
+# Optional, like the scopes and groups headers: the no-exchange ablation cannot
+# verify it, and a task with no incident omits it.
+HEADER_INCIDENT_ID = "X-Warrant-Incident-Id"
 
 REQUIRED_HEADERS = (HEADER_SUB, HEADER_ACT, HEADER_TASK_ID, HEADER_TOKEN_EXP)
 
@@ -376,4 +379,6 @@ def chain_from_headers(headers: Mapping[str, str], *, mode: Mode | None = None) 
         scopes=_split_list(lookup.get(HEADER_SCOPES.lower())),
         groups=_split_list(lookup.get(HEADER_GROUPS.lower())),
         token_exp=_parse_exp(lookup[HEADER_TOKEN_EXP.lower()]),
+        incident_id=lookup.get(HEADER_INCIDENT_ID.lower()) or None,
+        source="header",
     )

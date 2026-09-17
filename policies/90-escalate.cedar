@@ -9,8 +9,9 @@
 // rules is written out again below. On this pass the action is
 // `Action::"escalate"`, so the real action's kind and tool are read from the
 // context as `context.actionKind` and `context.tool`. The task must carry an
-// `incident_id` scope, which is the record that this work is an incident and
-// not routine.
+// `incident_id`, which the realm mints as a claim and the gateway puts in the
+// context as `context.incidentId`, and that claim is the record that this work
+// is an incident and not routine.
 //
 // A forbid whose `when` clause does not test the action kind also forbids
 // `Action::"escalate"`, which is Cedar's rule that a forbid beats every
@@ -30,10 +31,14 @@
 // scope branch does not read provenance and does not ask for it: a scope
 // collapse is escalatable in a task that has read nothing.
 //
-// `incident_id` is the record that this work is an incident and not routine. No
-// client scope mints it today, so this permit cannot fire on the running stack
-// until one does. That is recorded in docs/policies.md rather than worked
-// around here.
+// `incident_id` is a parameterized client scope. Its mapper writes a separate
+// `incident_id` claim and sets `include.in.token.scope` false, so the token's
+// scope claim never carries a bare `incident_id`. The gateway puts the claim in
+// the context, and this permit reads it there. The alternative, making the
+// realm emit the bare scope entry, was rejected: a claim is where an OIDC
+// provider puts a value like this, and the identity provider stays ordinary
+// while the policy does the interesting work. docs/decisions/w15-eval-runner.md
+// records the choice.
 
 // The permit also requires the baseline's non-scope conditions: the agent holds
 // the tool and the human is entitled to it. Without them the permit answered a
@@ -60,7 +65,7 @@ when {
     context.tool == "gitea.set_repo_visibility" &&
     (context.provenance.hasExternal || context.provenance.overlapExternal)
   ) &&
-  context.taskScopes.contains("incident_id") &&
+  context.incidentId != "" &&
   (context.groups.contains("owners") || context.groups.contains("engineers")) &&
   (
     (
