@@ -18,7 +18,7 @@ REPO_ROOT := $(shell bash scripts/repo_root.sh)
 WARRANT_RUNS_HOST_DIR ?= $(REPO_ROOT)/runs
 export WARRANT_RUNS_HOST_DIR
 
-.PHONY: install lint test up down reset gitea-mcp postgres-mcp mail-mcp dsh-profile worktree worktree-clean evals smoke
+.PHONY: install lint test up down reset gitea-mcp postgres-mcp mail-mcp dsh-profile worktree worktree-clean evals smoke queue
 
 # Create or refresh .venv from pyproject.toml and uv.lock. `uv sync` is also
 # what a clean clone runs first; there is no other install step.
@@ -122,14 +122,16 @@ evals:
 smoke:
 	uv run python -m evals.run --scenarios 08,01 --ablations full --repeats 1 --column smoke
 
+# W16. The human queue: what is waiting, and the answer to one entry.
+# `make queue` lists the pending escalations; `make queue ARGS="approve <id>
+# --minutes 10"` approves one with a time box and mints its grant.
+queue:
+	uv run python -m warrant queue $(or $(ARGS),list)
+
 # --- later issues, commented until the issue that needs them ----------------
 # Each block names the target that issue will add, so its purpose is visible
 # before the target exists. A commented target is not a target: `make` does not
 # see it, and the scaffold test checks `make` rather than this text.
-#
-# W16, the adjudicator and its human queue.
-# adjudicate:
-# 	uv run python -m warrant.adjudicator
 #
 # W22, the matrix run across model families and effort variants.
 # matrix:

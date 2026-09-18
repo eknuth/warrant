@@ -4,6 +4,9 @@
 gateway seeds the access graph from `infra/graph.yml` (idempotent upsert), reads
 its policies from `policies/`, and fronts the servers in `infra/servers.yml`.
 
+`uv run python -m warrant queue list|approve <id> --minutes N|deny <id>` reads
+and answers the human escalation queue under the runs directory.
+
 Nothing here reads a secret at import time: settings are constructed only when
 `serve` runs, and the client secret comes from `.env`.
 """
@@ -12,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 
 import uvicorn
 
@@ -65,6 +69,15 @@ def serve(host: str | None = None, port: int | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # `queue` carries its own parser and its own subcommands, so it is routed
+    # before this parser sees its arguments; the subparser below exists so
+    # `warrant --help` lists the command.
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["queue"]:
+        from warrant.queue import main as queue_main
+
+        return queue_main(argv[1:])
+
     parser = argparse.ArgumentParser(
         prog="warrant", description="The Warrant authorization service."
     )
@@ -72,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     serve_parser = sub.add_parser("serve", help="run the MCP gateway")
     serve_parser.add_argument("--host", default=None, help="bind address")
     serve_parser.add_argument("--port", type=int, default=None, help="bind port")
+    sub.add_parser("queue", help="read and answer the human escalation queue")
     args = parser.parse_args(argv)
 
     if args.command == "serve":

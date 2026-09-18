@@ -68,6 +68,53 @@ class Verdict(StrEnum):
     escalate = "escalate"
 
 
+class AdjudicationDecision(StrEnum):
+    """What the adjudicator answered when a policy escalated a call.
+
+    `approve` mints a time-boxed grant, `deny` refuses the call, and `defer`
+    hands it to the human queue. The values are the ones the model's tool call
+    carries, so the decision is read from the reply without a translation
+    table.
+    """
+
+    approve = "approve"
+    deny = "deny"
+    defer = "defer"
+
+
+class AdjudicatorVerdict(BaseModel):
+    """One adjudicator answer, valid only after its citations are checked.
+
+    The name is not `Verdict`: `warrant.models.Verdict` is already the engine's
+    allow, deny, and escalate. This model is the adjudicator's structured
+    output, and it is a claim until `warrant.adjudicator` has checked that its
+    cited sources are in the task's ledger and that its cited subject is the
+    task's own.
+
+    The time box is part of the shape rather than a rule the caller has to
+    remember: an approval without one is not an approval. A reply that says
+    approve and names no box, or a box outside 1..60 minutes, fails to parse
+    and the call stays with a person.
+    """
+
+    decision: AdjudicationDecision
+    time_box_minutes: int | None = None
+    cited_sources: list[str] = Field(default_factory=list)
+    cited_subject: str = ""
+    rationale: str = ""
+
+    @model_validator(mode="after")
+    def _an_approval_carries_a_time_box(self) -> AdjudicatorVerdict:
+        if self.decision is not AdjudicationDecision.approve:
+            return self
+        if self.time_box_minutes is None or not 1 <= self.time_box_minutes <= 60:
+            raise ValueError(
+                f"an approval needs time_box_minutes between 1 and 60, "
+                f"not {self.time_box_minutes!r}"
+            )
+        return self
+
+
 class Chain(BaseModel):
     """The verified identity behind one task.
 
@@ -247,6 +294,11 @@ class Decision(BaseModel):
     `chain_source` is `token` for a verified exchange and `header` for the
     `no-exchange` ablation. It is copied from the request's chain so a reader of
     the line alone can tell a chain Warrant proved from one the agent asserted.
+
+    `adjudication` is the verdict an escalated call was answered with, or None
+    when no adjudicator answered it. It is on the line the escalation produced,
+    so a reader sees the policy that escalated the call and the evidence the
+    answer cited in one place.
     """
 
     verdict: Verdict
@@ -255,3 +307,4 @@ class Decision(BaseModel):
     request: AuthzRequest
     mode: str = ""
     chain_source: str = "token"
+    adjudication: AdjudicatorVerdict | None = None

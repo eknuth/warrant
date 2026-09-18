@@ -42,6 +42,22 @@ def test_provider_for_builds_the_route(monkeypatch: pytest.MonkeyPatch) -> None:
     assert provider.effort == "high"
 
 
+def test_provider_for_carries_the_output_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-not-a-secret")
+
+    provider = provider_for("deepseek:deepseek-flash@max", max_tokens=1234)
+
+    assert provider._max_tokens == 1234
+
+
+def test_provider_for_carries_the_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-not-a-secret")
+
+    provider = provider_for("deepseek:deepseek-flash@max", timeout=42.0)
+
+    assert provider._client.timeout == 42.0
+
+
 def test_provider_for_defaults_to_the_project_spec(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-not-a-secret")
 

@@ -49,6 +49,7 @@ from warrant.graph import load as load_graph
 from warrant.log import DecisionLog
 from warrant.models import AuthzRequest, Decision, Verdict
 from warrant.provenance import Ledger
+from warrant.queue import Queue
 from warrant.resources import extract_resource, resolve_resource
 
 REPO = Path(__file__).resolve().parents[1]
@@ -101,7 +102,11 @@ def claims_for(
 
 
 class FakeEngine:
-    """A `PolicyEngine` that returns a chosen verdict and logs it."""
+    """A `PolicyEngine` that returns a chosen verdict.
+
+    `evaluate` is what the gateway calls and does not log; `decide` appends, the
+    same split `CedarEngine` has.
+    """
 
     def __init__(
         self,
@@ -117,15 +122,18 @@ class FakeEngine:
         self.reasons = reasons or []
         self.requests: list[AuthzRequest] = []
 
-    def decide(self, req: AuthzRequest) -> Decision:
+    def evaluate(self, req: AuthzRequest) -> Decision:
         self.requests.append(req)
-        decision = Decision(
+        return Decision(
             verdict=self.verdict,
             policy_ids=list(self.policy_ids),
             reasons=list(self.reasons),
             request=req,
             mode="full",
         )
+
+    def decide(self, req: AuthzRequest) -> Decision:
+        decision = self.evaluate(req)
         self.decision_log.append(decision)
         return decision
 
@@ -174,6 +182,11 @@ def make_gateway(
     exchange_transport: Any = None,
     mode: Mode | None = None,
     taint: Taint | None = None,
+    now: Any = None,
+    adjudicator: Any = None,
+    subject_fetcher: Any = None,
+    grants: Any = None,
+    queue: Any = None,
 ) -> Gateway:
     runs = runs_dir or tmp_path / "runs"
     settings = GatewaySettings(warrant_agent_client_secret=client_secret)
@@ -189,6 +202,11 @@ def make_gateway(
         runs_dir=runs,
         mode=mode,
         taint=taint,
+        now=now,
+        adjudicator=adjudicator,
+        subject_fetcher=subject_fetcher,
+        grants=grants,
+        queue=queue,
     )
 
 
@@ -440,7 +458,7 @@ async def test_a_denied_call_is_not_forwarded_and_carries_the_reasons(
     assert len(log.read("task-1")) == 1
 
 
-async def test_an_escalated_call_returns_pending_and_is_logged(
+async def test_an_escalated_call_with_no_subject_waits_for_a_person(
     tmp_path: Path, graph_db: Graph
 ) -> None:
     log = DecisionLog(tmp_path / "runs")
@@ -458,11 +476,15 @@ async def test_an_escalated_call_returns_pending_and_is_logged(
     )
 
     assert result.is_error is True
-    assert result.content[0].text == "escalated: pending"
+    assert result.content[0].text == "escalated: pending human review"
     assert upstream.calls == []
     decisions = log.read("task-1")
     assert len(decisions) == 1
     assert decisions[0].verdict is Verdict.escalate
+    assert decisions[0].adjudication is None
+    queued = Queue(tmp_path / "runs").pending()
+    assert len(queued) == 1
+    assert "names no ticket or issue" in queued[0].reason
 
 
 async def test_an_unknown_agent_is_denied_by_name(tmp_path: Path, graph_db: Graph) -> None:

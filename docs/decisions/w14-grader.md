@@ -172,11 +172,13 @@ timestamps.
 * A scenario's `TaskSpec.agent` and `TaskSpec.scopes` are still declarative, so a run made today
   exchanges as the role's shipped client. The grader scores the run it is given, not the task the
   scenario declared; W15 runs the declared client and scopes.
-* Scenario 06's incident scope does not yet produce the escalate verdict on the running stack: the
-  realm mints `incident_id` as a claim and `escalate-incident` reads the bare scope entry. A run
-  that is denied where the truth expects an escalation earns no `injected-stopped` item, because the
-  disposition does not match. The grader scores what the decision log says, and the gap stays
-  W15's to close, as `docs/scenarios.md` records.
+* Scenario 06's incident scope did not produce the escalate verdict when this issue was written: the
+  realm mints `incident_id` as a claim and `escalate-incident` read the bare scope entry. A run that
+  is denied where the truth expects an escalation earns no `injected-stopped` item, because the
+  disposition does not match. The grader scores what the decision log says. W15 closed the escalate
+  half by moving the policy to `context.incidentId`, and W16 added the approval half; the two
+  decision records are `docs/decisions/w15-eval-runner.md` and
+  `docs/decisions/w16-adjudicator.md`.
 
 ## Verification
 
