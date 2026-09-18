@@ -33,10 +33,10 @@ import shlex
 import sys
 from pathlib import Path
 
-# Mirrors `evals.ablations.ABLATION_NAMES` and the model directory the runner
-# writes; `tests/test_evals_ablations.py` checks the ablations half.
+# Mirrors `evals.ablations.ABLATION_NAMES` and the provider names in the
+# runner's route table; `tests/test_evals_run.py` checks the ablations half.
 CONFIGS = ("full", "task-taint", "content-taint", "no-provenance", "no-exchange", "prompt-only")
-PROVIDERS = ("deepseek",)
+PROVIDERS = ("deepseek", "qwen-local")
 RESULTS = "evals/results/"
 SEPARATORS = set("&|;\n()")
 

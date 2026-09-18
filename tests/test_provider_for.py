@@ -21,6 +21,11 @@ def test_parse_spec_defaults_the_effort_to_off() -> None:
     assert parse_spec("deepseek:deepseek-flash") == ("deepseek", "deepseek-flash", "off")
 
 
+def test_parse_spec_reads_a_model_id_that_contains_a_colon() -> None:
+    """The local model id has a colon, and the route splits on the first only."""
+    assert parse_spec("qwen-local:qwen3.8:27b@off") == ("qwen-local", "qwen3.8:27b", "off")
+
+
 @pytest.mark.parametrize(
     "spec",
     ["deepseek-flash", "deepseek:", ":deepseek-flash@off", "deepseek:deepseek-flash@medium"],
@@ -28,6 +33,19 @@ def test_parse_spec_defaults_the_effort_to_off() -> None:
 def test_parse_spec_refuses_a_bad_spec(spec: str) -> None:
     with pytest.raises(ValueError):
         parse_spec(spec)
+
+
+def test_provider_for_builds_the_keyless_local_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The local route is a row in the same table and needs no key in `.env`."""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    provider = provider_for("qwen-local:qwen3.8:27b@off")
+
+    assert isinstance(provider, OpenAICompatProvider)
+    assert provider.name == "qwen-local"
+    assert provider.base_url == "http://localhost:11434/v1"
+    assert provider.model == "qwen3.8:27b"
+    assert provider.effort == "off"
 
 
 def test_provider_for_builds_the_route(monkeypatch: pytest.MonkeyPatch) -> None:

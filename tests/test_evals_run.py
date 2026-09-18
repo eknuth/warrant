@@ -21,7 +21,7 @@ from agents.loop import no_exchange_headers
 from agents.task import Task
 from evals import run as run_module
 from evals.ablations import ABLATION_NAMES, parse_ablations
-from evals.grade import Grade
+from evals.grade import Grade, write_grade
 from evals.run import (
     Cell,
     ComposeSwitcher,
@@ -101,14 +101,24 @@ def test_parse_ablations_keeps_the_report_order() -> None:
     assert names == ["full", "prompt-only"]
 
 
-def test_ablations_match_the_parked_column_hook() -> None:
-    """The hook's live names mirror the runner's, or it blocks the wrong moves."""
+def parked_hook() -> Any:
     spec = importlib.util.spec_from_file_location("parked", PARKED_HOOK)
     assert spec and spec.loader
     hook = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(hook)
+    return hook
 
-    assert tuple(hook.CONFIGS) == ABLATION_NAMES
+
+def test_ablations_match_the_parked_column_hook() -> None:
+    """The hook's live names mirror the runner's, or it blocks the wrong moves."""
+    assert tuple(parked_hook().CONFIGS) == ABLATION_NAMES
+
+
+def test_providers_match_the_parked_column_hook() -> None:
+    """The hook's provider names mirror the route table, so a column is live."""
+    from agents.providers import ROUTES
+
+    assert tuple(parked_hook().PROVIDERS) == tuple(sorted(ROUTES))
 
 
 def test_each_ablation_names_its_mode_and_taint() -> None:
@@ -398,6 +408,54 @@ def test_the_matrix_continues_after_an_error_cell(tmp_path: Path, monkeypatch: A
     assert switcher.closed is True
 
 
+def test_a_graded_cell_is_skipped_unless_forced(tmp_path: Path, monkeypatch: Any) -> None:
+    """The column resumes by default: a grade.json is the marker, force reruns."""
+    calls: list[str] = []
+
+    def fake_run_cell(cell: Cell, scenario: Any, **kwargs: Any) -> Any:
+        calls.append(cell.scenario_id)
+        return run_module.CellResult(cell=cell, status="ok")
+
+    monkeypatch.setattr(run_module, "run_cell", fake_run_cell)
+    cell = Cell(
+        column="smoke",
+        ablation=parse_ablations("full")[0],
+        model="qwen-local:qwen3.8:27b@off",
+        scenario_id="08-quiet-control",
+        repeat=1,
+    )
+    write_grade(
+        Grade(
+            scenario_id=cell.scenario_id,
+            ablation="full",
+            model=cell.model,
+            repeat=1,
+            score=2,
+            held=True,
+        ),
+        cell.root(tmp_path) / "grade.json",
+    )
+
+    def run(*, force: bool) -> list[Any]:
+        return run_matrix(
+            scenarios=["08-quiet-control"],
+            ablations=parse_ablations("full"),
+            models=[cell.model],
+            repeats=1,
+            column="smoke",
+            results_dir=tmp_path,
+            switcher=FakeSwitcher(),
+            provider_factory=lambda spec: object(),  # type: ignore[arg-type,return-value]
+            force=force,
+            build=False,
+        )
+
+    assert run(force=False) == []
+    assert calls == []
+    assert len(run(force=True)) == 1
+    assert calls == ["08-quiet-control"]
+
+
 def test_meta_json_records_the_confirmed_mode(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setattr(run_module, "seed", lambda scenario: None)
     monkeypatch.setattr(run_module, "run_tasks_sync", lambda *a, **k: [])
@@ -405,8 +463,8 @@ def test_meta_json_records_the_confirmed_mode(tmp_path: Path, monkeypatch: Any) 
     monkeypatch.setattr(
         run_module,
         "grade",
-        lambda scenario, run_dir, state=None: Grade(
-            scenario_id=scenario.id, score=2, held=True, repeat=1
+        lambda scenario, run_dir, state=None, wall_s=None: Grade(
+            scenario_id=scenario.id, score=2, held=True, repeat=1, wall_s=wall_s
         ),
     )
     scenario = load_scenario("08-quiet-control")
@@ -433,3 +491,7 @@ def test_meta_json_records_the_confirmed_mode(tmp_path: Path, monkeypatch: Any) 
     assert meta["confirmed_mode"] == "no-exchange"
     assert meta["confirmed_taint"] == "both"
     assert meta["status"] == "ok"
+    assert meta["elapsed_s"] >= 0
+    grade = json.loads((cell.root(tmp_path) / "grade.json").read_text(encoding="utf-8"))
+    assert grade["wall_s"] is not None
+    assert grade["wall_s"] >= 0

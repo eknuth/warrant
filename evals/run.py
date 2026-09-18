@@ -4,6 +4,8 @@
         --models deepseek:deepseek-flash@off --column <name>
     uv run python -m evals.run --dry-run --scenarios 08 --ablations full --repeats 1
     uv run python -m evals.run --scenarios 08,01 --ablations full --repeats 1 --column smoke
+    uv run python -m evals.run --scenarios 01,08,09,10 --ablations full --repeats 1 \
+        --models qwen-local:qwen3.8:27b@off --column smoke
 
 One cell is one ablation, one model, one scenario, and one repeat. For each cell
 the runner seeds the scenario with W12 (which resets the org, the database, the
@@ -19,8 +21,12 @@ Results live under
 
 holding `run/` (the per-task records the gateway and the agent wrote), the
 `state.json` the grade was scored against, the `grade.json`, and a `meta.json`
-with the commit, the confirmed mode, the timestamps, and the token counts. The
-report is rendered from the column at the end.
+with the commit, the confirmed mode, the timestamps, the token counts, and the
+cell's wall time. The report is rendered from the column at the end.
+
+The column is resumable. A cell that already holds a `grade.json` is skipped, so
+an interrupted run continues with the same command, and `--force` reruns every
+cell instead. An error cell holds no `grade.json` and is retried on the next run.
 
 Failure handling. A task run that raises is retried once from a fresh seed; a
 second failure records the cell as an `error` with the traceback and the matrix
@@ -77,7 +83,9 @@ logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
-# The model the issue and `.env.example` name. W22 adds a second family.
+# The model the issue and `.env.example` name. W22 adds `qwen-local` as a
+# second family through the same route table; the default stays the cloud model
+# so a bare `--column` run is unchanged.
 DEFAULT_MODEL = "deepseek:deepseek-flash@off"
 
 # The gateway's published health endpoint. The runner polls it after a restart
@@ -589,9 +597,10 @@ def dry_cell(cell: Cell, scenario: Scenario, *, results_dir: Path) -> CellResult
     state = State()
     (root / STATE_NAME).write_text(state.model_dump_json(indent=2) + "\n", encoding="utf-8")
     write_run_metadata(run_dir, cell, scenario)
-    result = grade(scenario, run_dir, state=state)
+    finished = datetime.now(UTC)
+    result = grade(scenario, run_dir, state=state, wall_s=(finished - started).total_seconds())
     write_grade(result, root / GRADE_NAME)
-    meta = _cell_meta(cell, started, status="ok", grade=result)
+    meta = _cell_meta(cell, started, status="ok", grade=result, finished=finished)
     write_cell_meta(root, meta)
     return CellResult(cell=cell, status="ok", grade=result, meta=meta)
 
@@ -606,8 +615,9 @@ def _cell_meta(
     confirmed: Mapping[str, str] | None = None,
     run_dir: Path | None = None,
     seed_s: float | None = None,
+    finished: datetime | None = None,
 ) -> dict[str, Any]:
-    finished = datetime.now(UTC)
+    finished = finished or datetime.now(UTC)
     meta: dict[str, Any] = {
         "column": cell.column,
         "ablation": cell.ablation.name,
@@ -727,8 +737,13 @@ def run_cell(
             traceback.format_exc(),
         )
     (root / STATE_NAME).write_text(state.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    # The measured wall time is taken here, after the last model call and the
+    # state read, and written into the grade so the report carries it without
+    # reading a second file. `_cell_meta` records the same instant.
+    finished = datetime.now(UTC)
+    elapsed_s = (finished - started).total_seconds()
     try:
-        result = grade(scenario, run_dir, state=state)
+        result = grade(scenario, run_dir, state=state, wall_s=elapsed_s)
     except GraderInconsistency:
         raise
     except Exception as error:  # noqa: BLE001
@@ -748,6 +763,7 @@ def run_cell(
         confirmed=confirmed,
         run_dir=run_dir,
         seed_s=seed_s,
+        finished=finished,
     )
     write_cell_meta(root, meta)
     return CellResult(cell=cell, status="ok", grade=result, meta=meta)
@@ -791,7 +807,7 @@ def run_matrix(
     settings: DevSettings | None = None,
     mcp_url: str | None = None,
     dry_run: bool = False,
-    resume: bool = False,
+    force: bool = False,
     build: bool = True,
 ) -> list[CellResult]:
     """Run every cell in order and return the results.
@@ -799,6 +815,10 @@ def run_matrix(
     The scenario seed resets the graph, so the runner seeds before the
     ablation switch. The switch recreates the gateway and waits for `/healthz`;
     the mode and taint it reports are recorded in the cell's `meta.json`.
+
+    A cell that already holds a `grade.json` is skipped, so the same command
+    continues an interrupted column. `force=True` reruns every cell instead.
+    An error cell has no `grade.json`, so it is retried on the next run.
     """
     settings = settings or DevSettings()
     loaded = {scenario_id: load_scenario(scenario_id) for scenario_id in scenarios}
@@ -823,7 +843,7 @@ def run_matrix(
                         repeat=repeat,
                     )
                     root = cell.root(results_dir)
-                    if resume and (root / GRADE_NAME).exists():
+                    if not force and (root / GRADE_NAME).exists():
                         logger.info("skip %s: already graded", root)
                         continue
                     if dry_run:
@@ -907,7 +927,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="seed and grade a synthetic no-op run with no model",
     )
     parser.add_argument(
-        "--resume", action="store_true", help="skip a cell that already holds a grade.json"
+        "--force", action="store_true", help="rerun a cell that already holds a grade.json"
     )
     parser.add_argument(
         "--no-build", action="store_true", help="do not rebuild the image before the matrix"
@@ -956,7 +976,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             repeats=args.repeats,
             column=column,
             dry_run=args.dry_run,
-            resume=args.resume,
+            force=args.force,
             build=not args.no_build,
         )
     except (RunnerError, HealthError, GraderInconsistency) as error:
