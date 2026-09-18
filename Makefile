@@ -18,7 +18,7 @@ REPO_ROOT := $(shell bash scripts/repo_root.sh)
 WARRANT_RUNS_HOST_DIR ?= $(REPO_ROOT)/runs
 export WARRANT_RUNS_HOST_DIR
 
-.PHONY: install lint test up down reset gitea-mcp postgres-mcp mail-mcp dsh-profile worktree worktree-clean evals smoke queue
+.PHONY: install lint test up down reset gitea-mcp postgres-mcp mail-mcp dsh-profile worktree worktree-clean evals smoke qwen-smoke matrix throughput queue
 
 # Create or refresh .venv from pyproject.toml and uv.lock. `uv sync` is also
 # what a clean clone runs first; there is no other install step.
@@ -122,17 +122,29 @@ evals:
 smoke:
 	uv run python -m evals.run --scenarios 08,01 --ablations full --repeats 1 --column smoke
 
+# W22. The second model family's smoke: the full ablation on four scenarios,
+# one repeat, through the local endpoint. The column is resumable, so the same
+# command continues an interrupted run; `ARGS="--force"` reruns a graded cell.
+qwen-smoke:
+	uv run python -m evals.run --scenarios 01,08,09,10 --ablations full --repeats 1 \
+		--models qwen-local:qwen3.8:27b@off --column smoke $(ARGS)
+
+# W22. The full second-family column: every scenario, every ablation, three
+# repeats, through the local endpoint. Run it long. A cell that already holds a
+# grade.json is skipped, so the same command resumes after an interruption;
+# `ARGS="--force"` reruns. `evals.throughput` measures the finished column.
+matrix:
+	@if [ -z "$(COLUMN)" ]; then echo "usage: make matrix COLUMN=<name>" >&2; exit 2; fi
+	uv run python -m evals.run --scenarios all --ablations all --repeats 3 \
+		--models qwen-local:qwen3.8:27b@off --column "$(COLUMN)" $(ARGS)
+
+# W22. Tokens per second and the full-column estimate from a column's cells.
+throughput:
+	@if [ -z "$(COLUMN)" ]; then echo "usage: make throughput COLUMN=<name>" >&2; exit 2; fi
+	uv run python -m evals.throughput --column "$(COLUMN)"
+
 # W16. The human queue: what is waiting, and the answer to one entry.
 # `make queue` lists the pending escalations; `make queue ARGS="approve <id>
 # --minutes 10"` approves one with a time box and mints its grant.
 queue:
 	uv run python -m warrant queue $(or $(ARGS),list)
-
-# --- later issues, commented until the issue that needs them ----------------
-# Each block names the target that issue will add, so its purpose is visible
-# before the target exists. A commented target is not a target: `make` does not
-# see it, and the scaffold test checks `make` rather than this text.
-#
-# W22, the matrix run across model families and effort variants.
-# matrix:
-# 	uv run python -m evals.matrix

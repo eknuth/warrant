@@ -18,9 +18,12 @@ Nothing here reads a credential or starts a server at import time.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
+import time
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -45,6 +48,11 @@ DEFAULT_TIMEOUT = 60.0
 
 # The gateway every agent reaches. `WARRANT_URL` in `.env` overrides it.
 DEFAULT_WARRANT_URL = "http://localhost:9100/mcp"
+
+# How close to a token's expiry a call refreshes it. The check runs at call
+# time, so a token that expired during a long model turn is caught too; the
+# leeway only decides how early a still-valid token is replaced.
+REFRESH_LEEWAY_S = 60.0
 
 
 class MCPError(RuntimeError):
@@ -268,6 +276,19 @@ class MCPClient:
     async def __aexit__(self, *exc_info: Any) -> None:
         await self._stack.aclose()
 
+    def set_bearer(self, bearer: str, *, name: str | None = None) -> None:
+        """Replace the bearer the named endpoint sends on its later requests.
+
+        The HTTP client is the one the streamable session was opened with, and
+        the session makes every request through it, so a new value here is what
+        the next call carries. `name=None` updates every endpoint.
+        """
+        names = [name] if name is not None else list(self._http)
+        for key in names:
+            http = self._http.get(key)
+            if http is not None:
+                http.headers["Authorization"] = f"Bearer {bearer}"
+
     async def list_tools(self) -> list[ToolSchema]:
         """Every tool on every endpoint, in endpoint order.
 
@@ -375,3 +396,56 @@ class MCPClient:
             is_error=bool(getattr(result, "is_error", False)),
             sources=extract_sources(payload),
         )
+
+
+# The refresh callback returns a fresh bearer and the epoch second it expires.
+RefreshBearer = Callable[[], tuple[str, float]]
+
+
+class RefreshingToolSource:
+    """A `ToolSource` that re-mints the bearer when the token nears expiry.
+
+    The agent loop mints one on-behalf-of token per task and holds it for the
+    life of the MCP session. A slow model can spend longer on its turns than the
+    token's five-minute lifetime, and the gateway then refuses the next call
+    with a 401 that the MCP client reports as a transport error. This wrapper
+    checks the token's expiry before each call and, when it is close, re-mints
+    through the callback it was given and updates the session's bearer. The
+    fresh token names the same task and carries the same scopes, so the gateway
+    decides the call on the same chain the task started with.
+
+    The check runs at call time, after the model's turn, so it catches a token
+    that expired while the model was generating as well as one about to.
+    """
+
+    def __init__(
+        self,
+        source: Any,
+        *,
+        refresh: RefreshBearer,
+        expires_at: float,
+        endpoint: str = "warrant",
+        leeway_s: float = REFRESH_LEEWAY_S,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self._source = source
+        self._refresh = refresh
+        self._expires_at = expires_at
+        self._endpoint = endpoint
+        self._leeway_s = leeway_s
+        self._clock = clock
+
+    async def list_tools(self) -> list[ToolSchema]:
+        return await self._source.list_tools()
+
+    async def call(self, name: str, args: dict[str, Any]) -> CallResult:
+        if self._clock() >= self._expires_at - self._leeway_s:
+            logger.info(
+                "the token for this task nears expiry; minting a fresh one "
+                "before the next call to %s",
+                name,
+            )
+            bearer, expires_at = await asyncio.to_thread(self._refresh)
+            self._source.set_bearer(bearer, name=self._endpoint)
+            self._expires_at = expires_at
+        return await self._source.call(name, args)

@@ -20,6 +20,7 @@ from agents.mcp_client import (
     Endpoint,
     MCPClient,
     MCPError,
+    RefreshingToolSource,
     append_jsonl,
     call_record,
     digest,
@@ -243,3 +244,82 @@ async def test_an_unknown_tool_that_raises_still_writes_a_line(tmp_path: Path) -
     record = json.loads(lines[0])
     assert record["raised"] is True
     assert record["tool"] == "get_issu"
+
+
+# -- the bearer refresh ------------------------------------------------------
+
+
+def test_set_bearer_replaces_the_header_the_session_sends() -> None:
+    client = MCPClient(
+        Endpoint(url="http://127.0.0.1:9101/mcp", bearer="old", name="gitea-mcp"),
+        chain=CHAIN,
+    )
+    http = SimpleNamespace(headers={"Authorization": "Bearer old"})
+    client._http["gitea-mcp"] = http
+
+    client.set_bearer("fresh", name="gitea-mcp")
+
+    assert http.headers["Authorization"] == "Bearer fresh"
+
+
+class FakeSource:
+    """The `ToolSource` half a refresh wraps, with no session behind it."""
+
+    def __init__(self) -> None:
+        self.bearers: list[str] = []
+        self.calls: list[str] = []
+
+    async def list_tools(self) -> list[Any]:
+        return []
+
+    async def call(self, name: str, args: dict[str, Any]) -> Any:
+        self.calls.append(name)
+        return SimpleNamespace(is_error=False)
+
+    def set_bearer(self, bearer: str, *, name: str | None = None) -> None:
+        self.bearers.append(bearer)
+
+
+async def test_refreshing_source_mints_a_new_bearer_at_the_expiry() -> None:
+    """A call after the token's lifetime runs on a fresh token, same task."""
+    source = FakeSource()
+    now = [900.0]
+    refreshed: list[str] = []
+
+    def refresh() -> tuple[str, float]:
+        refreshed.append("called")
+        return "fresh", 1300.0
+
+    wrapper = RefreshingToolSource(
+        source, refresh=refresh, expires_at=1050.0, leeway_s=60.0, clock=lambda: now[0]
+    )
+
+    await wrapper.call("gitea.get_issue", {})
+    assert refreshed == [], "a token with more than the leeway left is not replaced"
+    assert source.bearers == []
+
+    now[0] = 1000.0  # 50 s left, inside the 60 s leeway
+    await wrapper.call("gitea.get_issue", {})
+    assert refreshed == ["called"]
+    assert source.bearers == ["fresh"]
+    assert source.calls == ["gitea.get_issue", "gitea.get_issue"]
+
+    # The fresh token's expiry replaced the old one, so the next call reuses it.
+    await wrapper.call("gitea.get_issue", {})
+    assert refreshed == ["called"]
+
+
+async def test_refreshing_source_catches_a_token_that_expired_during_a_turn() -> None:
+    """The check runs at call time, so a token already gone is replaced too."""
+    source = FakeSource()
+    wrapper = RefreshingToolSource(
+        source,
+        refresh=lambda: ("fresh", 2000.0),
+        expires_at=1000.0,
+        leeway_s=60.0,
+        clock=lambda: 1100.0,
+    )
+
+    await wrapper.call("gitea.get_issue", {})
+
+    assert source.bearers == ["fresh"]

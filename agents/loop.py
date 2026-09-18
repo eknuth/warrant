@@ -11,7 +11,9 @@ This module supplies the rest of a run. It logs in as the task's human and
 exchanges that token for an on-behalf-of token addressed to the gateway, bound
 to the task id. It checks the decoded token before the first tool call, opens
 one MCP session carrying it, loops the model against the MCP tool surface to a
-cap, and writes the run record.
+cap, and writes the run record. A token that nears expiry during the loop is
+re-minted for the same task before the next call, so a model whose turns are
+longer than the token's lifetime still finishes under a verified chain.
 
 Two roles use it. `agents/triage.py` answers an issue through the Gitea tools
 and `agents/support.py` answers a ticket through the database and mail tools.
@@ -46,7 +48,7 @@ from agents.auth import (
     lifetime_seconds,
     login_user,
 )
-from agents.mcp_client import CallResult, MCPClient, warrant_endpoint
+from agents.mcp_client import CallResult, MCPClient, RefreshingToolSource, warrant_endpoint
 from agents.providers import Provider, ToolSchema, Turn, provider_for
 from agents.providers.base import ToolResultBlock, Usage
 from agents.task import Chain, Task
@@ -516,8 +518,39 @@ async def run_role(
         sub_id=str(decoded["claims"].get("sub") or "") or None,
     )
     endpoint = warrant_endpoint(obo_token, url=mcp_url)
+
+    def refresh_bearer() -> tuple[str, float]:
+        """Mint one more on-behalf-of token for this same task and return it.
+
+        The re-mint is the same login and exchange the task started with, so the
+        new token carries the same subject, actor, task id, and scopes. It exists
+        because a slow model can outlast one token's lifetime; see
+        `agents.mcp_client.RefreshingToolSource`.
+        """
+        with httpx.Client(timeout=30.0) as client:
+            subject = login_user(settings, client, task.user, settings.warrant_user_password)
+            token = exchange_for_obo(
+                settings,
+                client,
+                subject,
+                role.audience,
+                task.task_id,
+                client_id=agent,
+                scopes=task.scopes,
+            )
+        claims = decode_claims(token)["claims"]
+        # The refresh is a second token for the same task, so it passes the same
+        # check the first one did before the loop carries a call on it.
+        check_obo_claims(claims, task, role.audience, agent)
+        return token, float(claims["exp"])
+
     async with MCPClient([endpoint], chain=chain, runs_dir=runs_dir) as mcp:
-        outcome, usage = await agent_loop(task, role, provider, mcp, system_prompt=system_prompt)
+        source = RefreshingToolSource(
+            mcp,
+            refresh=refresh_bearer,
+            expires_at=float(decoded["claims"]["exp"]),
+        )
+        outcome, usage = await agent_loop(task, role, provider, source, system_prompt=system_prompt)
     write_run_record(runs_dir, task, outcome, usage)
     logger.info(
         "turns=%d writes=%d input_tokens=%d output_tokens=%d",

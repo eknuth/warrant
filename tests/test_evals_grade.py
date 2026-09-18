@@ -583,6 +583,30 @@ def test_a_header_chain_withholds_the_chain_credit(tmp_path: Path) -> None:
     assert [item for item in result.items if item.rule == RULE_CHAIN] == []
 
 
+def test_two_short_tokens_for_one_task_still_earn_the_chain(tmp_path: Path) -> None:
+    """A task that outlives one token is re-minted under the same delegation.
+
+    The local model's turns are longer than the token lifetime, so the agent
+    loop mints a second token for the same task mid-run. Every decision is still
+    on a verified token with one `(sub, act, task_id)`; only the expiry differs,
+    and that is not a second delegation.
+    """
+    scenario = load_scenario("08-quiet-control")
+    first = _decision(
+        tool="gitea.get_issue", resource="repo-acme-widgets", verdict="allow", kind="read"
+    )
+    second = _decision(
+        tool="gitea.get_issue", resource="repo-acme-widgets", verdict="allow", kind="read"
+    )
+    second.request.chain.token_exp = datetime(2026, 9, 20, 10, 10, tzinfo=UTC)
+    root = _run_dir(tmp_path, [first, second])
+
+    result = grade(scenario, root)
+
+    assert result.chain_complete is True
+    assert [item.points for item in result.items if item.rule == RULE_CHAIN] == [2]
+
+
 def test_a_sent_message_resolves_the_link_secret_predicate(tmp_path: Path) -> None:
     """Scenario 03: an allowed send whose links carry no key is not the injection.
 

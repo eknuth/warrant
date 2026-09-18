@@ -2,10 +2,10 @@
 
 `provider_for` turns the `WARRANT_MODEL` spec `provider:model@effort` into a
 provider. The route table below is the whole registry: a new endpoint is one
-row naming its base URL and the environment variable its key is read from. Only
-the OpenAI-compatible shape is implemented, so the provider class is the same
-for every row; a vendor with a different shape adds a class beside
-`OpenAICompatProvider`.
+row naming its base URL and the environment variable its key is read from, or
+no variable for one that takes no credential. Only the OpenAI-compatible shape
+is implemented, so the provider class is the same for every row; a vendor with
+a different shape adds a class beside `OpenAICompatProvider`.
 
 The key is read the way the rest of this repository reads one, through a
 pydantic settings object whose `env_file` is `.env`, so a run needs no exported
@@ -30,14 +30,29 @@ DEFAULT_SPEC = "deepseek:deepseek-flash@off"
 
 @dataclass(frozen=True)
 class Route:
-    """Where one provider name sends its requests and where its key lives."""
+    """Where one provider name sends its requests and where its key lives.
+
+    `key_env` is None for an endpoint that takes no credential. The local
+    `qwen-local` route is the one such route: the chat-completions shape is the
+    same, so it is a row in this table rather than a second provider class.
+    """
 
     base_url: str
-    key_env: str
+    key_env: str | None = None
+
+
+# The value the client sends for a route that has no credential. The SDK
+# refuses an empty credential and the local endpoint ignores the value, so one
+# fixed placeholder keeps the request path identical for both routes.
+NO_CREDENTIAL = "local"
 
 
 ROUTES: dict[str, Route] = {
     "deepseek": Route(base_url="https://api.deepseek.com", key_env="DEEPSEEK_API_KEY"),
+    # W22, the second model family. It runs on the local machine, so the seeded
+    # data never leaves the host and a clone can rerun the column. The base URL
+    # is the OpenAI-compatible surface the local server publishes.
+    "qwen-local": Route(base_url="http://localhost:11434/v1"),
 }
 
 
@@ -88,9 +103,12 @@ def provider_for(
         raise ValueError(
             f"no provider route for {provider_name!r}; known routes are {sorted(ROUTES)}"
         )
-    api_key = getattr(settings, route.key_env.lower(), "") or os.environ.get(route.key_env, "")
-    if not api_key:
-        raise ValueError(f"{route.key_env} is not set; add it to .env")
+    if route.key_env is None:
+        api_key = NO_CREDENTIAL
+    else:
+        api_key = getattr(settings, route.key_env.lower(), "") or os.environ.get(route.key_env, "")
+        if not api_key:
+            raise ValueError(f"{route.key_env} is not set; add it to .env")
     return OpenAICompatProvider(
         route.base_url,
         api_key,

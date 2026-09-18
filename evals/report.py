@@ -11,10 +11,12 @@ directory, with no timestamps and one rounding function, so rendering the same
 results twice gives the same bytes.
 
 Three tables. One per ablation, with a row per scenario and a column per repeat,
-carrying each cell's score and whether the run held. A summary with a row per
-ablation. And, when more than one model ran, one table per model, because a
-score is a property of a model and an ablation together and a single mean over
-both would hide which moved.
+carrying each cell's score, whether the run held, and the cell's wall time when
+the grade recorded one. A `model` column appears when more than one model ran,
+so a cell is never silently read as another model's. Then, when one model ran, a
+summary with a row per ablation; when more than one ran, one summary table per
+model instead, because a score is a property of a model and an ablation together
+and a combined mean would hide which moved.
 """
 
 from __future__ import annotations
@@ -72,17 +74,35 @@ def read_grades(results_dir: Path = RESULTS_DIR) -> tuple[list[Grade], list[str]
     return grades, unreadable
 
 
-def _cell(grades: Sequence[Grade], ablation: str, scenario: str, repeat: int) -> Grade | None:
+def _cell(
+    grades: Sequence[Grade],
+    ablation: str,
+    scenario: str,
+    repeat: int,
+    model: str | None = None,
+) -> Grade | None:
+    """The one cell for a key, or None.
+
+    `model` narrows the lookup when an ablation's table carries a model column.
+    Without it the first matching cell in the sorted list wins, which is the
+    single-model shape.
+    """
     for item in grades:
-        if item.ablation == ablation and item.scenario_id == scenario and item.repeat == repeat:
-            return item
+        if item.ablation != ablation or item.scenario_id != scenario or item.repeat != repeat:
+            continue
+        if model is not None and item.model != model:
+            continue
+        return item
     return None
 
 
 def _cell_text(item: Grade | None) -> str:
     if item is None:
         return ""
-    return f"{item.score:+d} {'held' if item.held else 'ran'}"
+    text = f"{item.score:+d} {'held' if item.held else 'ran'}"
+    if item.wall_s is not None:
+        text += f" {item.wall_s:,.1f}s"
+    return text
 
 
 def _mean(values: Sequence[float], places: int = 2) -> str:
@@ -94,30 +114,44 @@ def _rate(values: Sequence[bool]) -> str:
 
 
 def _ablation_table(grades: Sequence[Grade], ablation: str) -> list[str]:
-    """One ablation's table: scenarios down, repeats across."""
+    """One ablation's table: scenarios down, repeats across.
+
+    A second model turns the row label into `scenario, model`, so two models'
+    cells for the same scenario and repeat sit on their own rows instead of one
+    of them overwriting the other. One model keeps the single-model shape.
+    """
     rows = [item for item in grades if item.ablation == ablation]
     if not rows:
         return []
     repeats = sorted({item.repeat for item in rows})
     scenarios = sorted({item.scenario_id for item in rows})
-    header = ["scenario", *(f"repeat {repeat}" for repeat in repeats), "mean score", "held"]
+    models = sorted({item.model for item in rows})
+    multi = len(models) > 1
+    header = ["scenario"]
+    if multi:
+        header.append("model")
+    header += [*(f"repeat {repeat}" for repeat in repeats), "mean score", "held"]
     lines = [f"## `{ablation}`", ""]
     lines.append(_row(header))
     lines.append(_row(["---"] * len(header)))
     for scenario in scenarios:
-        cells = [_cell(rows, ablation, scenario, repeat) for repeat in repeats]
-        scores = [item.score for item in cells if item is not None]
-        held = [item.held for item in cells if item is not None]
-        lines.append(
-            _row(
-                [
-                    scenario,
-                    *(_cell_text(item) for item in cells),
-                    _mean(scores),
-                    _rate(held),
-                ]
+        for model in models if multi else [None]:
+            cells = [_cell(rows, ablation, scenario, repeat, model) for repeat in repeats]
+            if all(item is None for item in cells):
+                continue
+            scores = [item.score for item in cells if item is not None]
+            held = [item.held for item in cells if item is not None]
+            label = [scenario, model] if multi else [scenario]
+            lines.append(
+                _row(
+                    [
+                        *label,
+                        *(_cell_text(item) for item in cells),
+                        _mean(scores),
+                        _rate(held),
+                    ]
+                )
             )
-        )
     lines.append("")
     return lines
 
@@ -191,7 +225,9 @@ def render(grades: Sequence[Grade], unreadable: Sequence[str] = ()) -> str:
         "`score held` when no unauthorized action ran and `score ran` when one did, which is "
         "the one boolean the grader reports. `mean score` and `held` are over the cells in "
         "that row. `false blocks` counts legitimate actions a run denied or escalated, and "
-        "`escalations` counts escalated decisions.",
+        "`escalations` counts escalated decisions. A cell shows its wall time in seconds when "
+        "the runner recorded one, and a `model` column appears once a column holds more than "
+        "one model.",
         "",
     ]
     if not grades:
@@ -202,10 +238,12 @@ def render(grades: Sequence[Grade], unreadable: Sequence[str] = ()) -> str:
     ablations = sorted({item.ablation for item in grades}, key=config_order)
     for ablation in ablations:
         lines += _ablation_table(grades, ablation)
-    lines += _summary_table(grades, ablations)
 
     models = sorted({item.model for item in grades})
     if len(models) > 1:
+        # The summary is per model when more than one ran, and the combined
+        # summary is left out: a mean over two models would hide which moved,
+        # which is the comparison the second family is here to show.
         lines += [
             "## By model",
             "",
@@ -215,6 +253,8 @@ def render(grades: Sequence[Grade], unreadable: Sequence[str] = ()) -> str:
         ]
         for model in models:
             lines += _model_table(model, grades, ablations)
+    else:
+        lines += _summary_table(grades, ablations)
 
     lines += _unreadable_section(unreadable)
     return "\n".join(lines)

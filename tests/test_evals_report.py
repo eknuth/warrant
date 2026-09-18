@@ -1,8 +1,10 @@
 """The report is a pure function of the results directory.
 
-W15 writes `grade.json` into `evals/results/<ablation>/<scenario>/<repeat>/`;
-these tests build the same layout by hand and check the tables, the summary, and
-that rendering the same directory twice gives the same bytes.
+W15 writes `grade.json` into
+`evals/results/<ablation>/<model>/<scenario>/<repeat>/`; these tests build that
+layout by hand, and one test builds the older three-level cell to check the
+back-compat read. The tables, the summary, the per-cell wall time, and that
+rendering the same directory twice gives the same bytes are checked here.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from pathlib import Path
 
 from evals.grade import Finding, Grade, GradeItem, write_grade
 from evals.report import read_grades, render, report
+from evals.run import safe_model_dir
 
 
 def make_grade(
@@ -24,6 +27,7 @@ def make_grade(
     held: bool = True,
     blocked: int = 0,
     escalations: int = 0,
+    wall_s: float | None = None,
 ) -> Grade:
     return Grade(
         scenario_id=scenario_id,
@@ -42,12 +46,19 @@ def make_grade(
         ],
         chain_complete=True,
         escalations=escalations,
+        wall_s=wall_s,
     )
 
 
 def write_cell(root: Path, grade: Grade) -> Path:
     return write_grade(
-        grade, root / grade.ablation / grade.scenario_id / str(grade.repeat) / "grade.json"
+        grade,
+        root
+        / grade.ablation
+        / safe_model_dir(grade.model)
+        / grade.scenario_id
+        / str(grade.repeat)
+        / "grade.json",
     )
 
 
@@ -111,6 +122,65 @@ def test_render_adds_per_model_tables_only_for_more_than_one_model(tmp_path: Pat
     assert "## By model" in text
     assert "### `deepseek-flash`" in text
     assert "### `other-model`" in text
+    assert "## Summary" not in text, "a combined mean would hide which model moved"
+
+
+def test_a_cell_shows_its_wall_time_next_to_the_score(tmp_path: Path) -> None:
+    write_cell(
+        tmp_path,
+        make_grade(scenario_id="08-quiet-control", ablation="full", repeat=1, wall_s=12.5),
+    )
+    write_cell(
+        tmp_path,
+        make_grade(scenario_id="08-quiet-control", ablation="full", repeat=2, wall_s=200.0),
+    )
+
+    text = render(read_grades(tmp_path)[0])
+
+    assert "| 08-quiet-control | +6 held 12.5s | +6 held 200.0s |" in text
+
+
+def test_two_models_for_one_scenario_get_their_own_rows(tmp_path: Path) -> None:
+    """A model column is what stops one model's cell standing in for another."""
+    write_cell(
+        tmp_path,
+        make_grade(
+            scenario_id="08-quiet-control",
+            ablation="full",
+            repeat=1,
+            model="deepseek:deepseek-flash@off",
+            score=6,
+        ),
+    )
+    write_cell(
+        tmp_path,
+        make_grade(
+            scenario_id="08-quiet-control",
+            ablation="full",
+            repeat=1,
+            model="qwen-local:qwen3.8:27b@off",
+            score=4,
+            held=False,
+        ),
+    )
+
+    text = render(read_grades(tmp_path)[0])
+
+    assert "| scenario | model | repeat 1 | mean score | held |" in text
+    assert "| 08-quiet-control | deepseek:deepseek-flash@off | +6 held |" in text
+    assert "| 08-quiet-control | qwen-local:qwen3.8:27b@off | +4 ran |" in text
+
+
+def test_read_grades_reads_the_older_three_level_cell(tmp_path: Path) -> None:
+    write_grade(
+        make_grade(scenario_id="08-quiet-control", ablation="full", repeat=1),
+        tmp_path / "full" / "08-quiet-control" / "1" / "grade.json",
+    )
+
+    grades, unreadable = read_grades(tmp_path)
+
+    assert [item.scenario_id for item in grades] == ["08-quiet-control"]
+    assert unreadable == []
 
 
 def test_rendering_the_same_directory_twice_is_byte_identical(tmp_path: Path) -> None:
