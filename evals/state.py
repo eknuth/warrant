@@ -51,7 +51,7 @@ from typing import Any, Literal, Protocol
 
 import httpx
 import psycopg
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
+from pydantic import AliasChoices, AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
 
 from agents.mcp_client import digest as args_digest
 from gen.schema import (
@@ -66,6 +66,7 @@ from scripts.seed_smoke import ORG, SeedSettings
 from servers.mail_mcp.inspect import MailError, sent_messages
 from servers.mail_mcp.mail import MailSettings
 from servers.mail_mcp.models import SentMessage
+from warrant.grants import GRANTS_NAME, Grant
 from warrant.graph import Graph
 from warrant.models import Decision
 from warrant.resources import (
@@ -125,12 +126,46 @@ class StateError(RuntimeError):
     """The post-run state could not be read, or disagrees with itself."""
 
 
+class Adjudication(BaseModel):
+    """One adjudicator output, in the shape W16 writes.
+
+    W16 records the accepted verdict as the adjudicator returned it, so the
+    fields are the verdict's: `cited_subject` is the ticket or issue the verdict
+    cites, and `rationale` is kept for the reader. `cited_ticket` is accepted as
+    the name W14's stub and its fixtures use for the same field, so an older
+    record still reads.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    decision: str
+    time_box_minutes: int | None = None
+    cited_sources: list[str] = Field(default_factory=list)
+    cited_subject: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("cited_subject", "cited_ticket"),
+    )
+    rationale: str = ""
+
+    @property
+    def cited_ticket(self) -> str | None:
+        """The cited subject under the name W14's stub and fixtures use."""
+        return self.cited_subject
+
+
 class Observation(BaseModel):
     """One action-shaped record from a decision, a run, or the state.
 
     `args` holds the argument values the record supports. It is not the whole
     call: a decision has the resolved resource and the taint, a state effect has
     the arguments its shape implies, and a run record has what the agent sent.
+
+    The last three fields are the grant path's. `resource` and `ts` are the
+    decision's resolved resource and the time the call was proposed, which are
+    what a grant's exact match and its expiry are checked against.
+    `adjudication` is the accepted verdict the escalate line carries, so the
+    grader can tie a later grant allow to the approval that named its time box
+    without a model and without trusting the grant's word.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -161,6 +196,12 @@ class Observation(BaseModel):
     # this exists for: the cross read and the owner's read name the same ticket,
     # and only the task says which is which.
     on_task_subject: bool | None = None
+    # A decision line's resolved resource and call time, and the accepted verdict
+    # an escalate line carries. A state effect and a run record leave these at
+    # their defaults.
+    resource: str | None = None
+    ts: AwareDatetime | None = None
+    adjudication: Adjudication | None = None
 
     note: str = ""
 
@@ -324,6 +365,15 @@ def decision_observation(decision: Decision, resources: Resources) -> Observatio
     if name is not None:
         for key in resources.arg_keys(tool):
             args[key] = name
+    adjudication = None
+    if decision.adjudication is not None:
+        adjudication = Adjudication(
+            decision=decision.adjudication.decision.value,
+            time_box_minutes=decision.adjudication.time_box_minutes,
+            cited_sources=list(decision.adjudication.cited_sources),
+            cited_subject=decision.adjudication.cited_subject,
+            rationale=decision.adjudication.rationale,
+        )
     return Observation(
         source="decision",
         tool=tool,
@@ -340,6 +390,9 @@ def decision_observation(decision: Decision, resources: Resources) -> Observatio
         args_digest=decision.request.args_digest,
         args_touch_secret=decision.request.args_touch_secret,
         overlap_details=[dict(detail) for detail in decision.request.overlap_details],
+        resource=decision.request.resource,
+        ts=decision.request.ts,
+        adjudication=adjudication,
     )
 
 
@@ -447,33 +500,6 @@ def read_provenance_sources(task_dir: Path) -> list[dict[str, Any]]:
     return sources
 
 
-class Adjudication(BaseModel):
-    """One adjudicator output, in the shape W16 writes.
-
-    W16 records the accepted verdict as the adjudicator returned it, so the
-    fields are the verdict's: `cited_subject` is the ticket or issue the verdict
-    cites, and `rationale` is kept for the reader. `cited_ticket` is accepted as
-    the name W14's stub and its fixtures use for the same field, so an older
-    record still reads.
-    """
-
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
-
-    decision: str
-    time_box_minutes: int | None = None
-    cited_sources: list[str] = Field(default_factory=list)
-    cited_subject: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("cited_subject", "cited_ticket"),
-    )
-    rationale: str = ""
-
-    @property
-    def cited_ticket(self) -> str | None:
-        """The cited subject under the name W14's stub and fixtures use."""
-        return self.cited_subject
-
-
 def read_adjudications(task_dir: Path) -> list[Adjudication]:
     """Every adjudication line under a task directory, or none."""
     path = Path(task_dir) / ADJUDICATIONS_NAME
@@ -487,6 +513,30 @@ def read_adjudications(task_dir: Path) -> list[Adjudication]:
             found.append(Adjudication.model_validate_json(line))
         except ValidationError as error:
             raise StateError(f"{path}:{number} is not an adjudication object: {error}") from error
+    return found
+
+
+def read_grants(root: Path) -> list[Grant]:
+    """Every grant in one run's `grants.jsonl`, or none.
+
+    The grant file is at the run root rather than in a task directory, because
+    one gateway process serves every task in a cell and the queue CLI, a
+    separate process, has to mint a grant the running gateway then honors. A
+    line the grader cannot parse is a `StateError`: a grant is the record that
+    decides whether a call was sanctioned, and a grader that skipped one would
+    score through a record it cannot read.
+    """
+    path = Path(root) / GRANTS_NAME
+    if not path.exists():
+        return []
+    found: list[Grant] = []
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            found.append(Grant.model_validate_json(line))
+        except ValidationError as error:
+            raise StateError(f"{path}:{number} is not a grant object: {error}") from error
     return found
 
 
