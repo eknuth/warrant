@@ -16,9 +16,15 @@ token for `warrant`, connects to this server, and calls the re-exported tools
    sends in the call body reaches the request. W11 then fills the taint and
    target fields from the task's `TaskState`: the sources its reads recorded,
    the secrets they carried, and the target the first call named.
-4. Calls `engine.decide()`. An allow forwards the call upstream with a bearer
+4. Calls `engine.evaluate()`. An allow forwards the call upstream with a bearer
    Warrant exchanges for that upstream's audience, a deny returns the policy
-   reasons as a tool error, and an escalate returns `escalated: pending`.
+   reasons as a tool error, and an escalate goes to the adjudicator. An approved
+   escalation mints a time-boxed grant, logs the call as allowed by that grant,
+   and forwards it. A refused escalation returns the adjudicator's reason. A
+   deferred or discarded verdict returns `escalated: pending human review` and
+   records the call in `runs/queue.jsonl` for a person. A grant minted earlier,
+   by the adjudicator or by the queue CLI, is checked before the engine and
+   turns the call into an allow on its own.
 5. On an allowed read, records each provenance block the upstream returned in
    the ledger and in the task state, so the next call in the task is decided
    with it. The ledger is the evidence on disk; the task state is the text the
@@ -66,12 +72,22 @@ from starlette.routing import Route
 
 from servers.common.auth import BearerAuthMiddleware
 from warrant import config, oidc
+from warrant.adjudicator import (
+    Adjudication,
+    AdjudicatorClient,
+    AdjudicatorSettings,
+    EscalationAdjudicator,
+    record_verdict,
+)
 from warrant.config import RUNS_DIR, Mode, Taint, bad_task_id, task_dir
 from warrant.engine import PolicyEngine
+from warrant.grants import SOURCE_ADJUDICATOR, Grant, GrantStore, grant_policy_id
 from warrant.graph import Graph
 from warrant.log import DecisionLog
 from warrant.models import (
     ActionKind,
+    AdjudicationDecision,
+    AdjudicatorVerdict,
     AuthzRequest,
     Chain,
     Decision,
@@ -80,7 +96,9 @@ from warrant.models import (
     Verdict,
 )
 from warrant.provenance import Ledger, classify
+from warrant.queue import Queue
 from warrant.resources import extract_resource, resolve_resource
+from warrant.subjects import SubjectFetcher, fetch_subject, subject_ref
 from warrant.taint import TaskState
 
 logger = logging.getLogger(__name__)
@@ -108,6 +126,11 @@ SOURCE_KEYS = frozenset({"system", "kind", "id", "author", "author_tier"})
 
 TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
 ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
+
+# What a call whose escalation no verdict answered returns. The eval runner
+# reads it as a block rather than a failure: the call did not run, and a person
+# still has to answer it.
+PENDING_TEXT = "escalated: pending human review"
 
 
 class GatewayError(RuntimeError):
@@ -375,6 +398,11 @@ class Gateway:
         mode: Mode | None = None,
         taint: Taint | None = None,
         now: Callable[[], datetime] | None = None,
+        adjudicator: AdjudicatorClient | None = None,
+        adjudicator_settings: AdjudicatorSettings | None = None,
+        subject_fetcher: SubjectFetcher | None = None,
+        queue: Queue | None = None,
+        grants: GrantStore | None = None,
     ) -> None:
         self.settings = settings or GatewaySettings()
         self.graph = graph
@@ -396,6 +424,13 @@ class Gateway:
         # against `is` and quietly run the wrong taint set.
         self.taint = Taint(taint) if taint is not None else config.current_taint()
         self._now = now or (lambda: datetime.now(UTC))
+        self.adjudicator_settings = adjudicator_settings or AdjudicatorSettings()
+        # The default adjudicator builds its provider on the first escalation,
+        # so a process that never escalates needs no adjudicator credential.
+        self.adjudicator = adjudicator or EscalationAdjudicator(settings=self.adjudicator_settings)
+        self.subject_fetcher = subject_fetcher or fetch_subject
+        self.queue = queue or Queue(self.runs_dir)
+        self.grants = grants or GrantStore(self.runs_dir)
         self._tools: dict[str, list[Tool]] = {}
         # The no-exchange ablation has no subject token, so the gateway reaches
         # the upstreams as itself. The client-credentials token is minted once
@@ -665,15 +700,59 @@ class Gateway:
         if self.graph.agent(chain.act) is None:
             return self._log_and_refuse(request, ["unknown agent"])
 
-        decision = self.engine.decide(request)
+        # A grant is checked before the engine. An approval answered this exact
+        # tool and resource for this task, so the policy set is not consulted and
+        # the line names the grant that allowed it.
+        grant = self.grants.find(
+            task_id=chain.task_id, tool=name, resource=request.resource, now=self._now()
+        )
+        if grant is not None:
+            decision = self._granted(request, grant)
+            self._append_decision(decision)
+        else:
+            decision = self.engine.evaluate(request)
+            if decision.verdict is Verdict.escalate:
+                adjudication = await self._review(request, decision)
+                decision.adjudication = adjudication.verdict
+                self._append_decision(decision)
+                if adjudication.verdict is None or (
+                    adjudication.verdict.decision is AdjudicationDecision.defer
+                ):
+                    return self._deferred(name, request, decision, adjudication)
+                if adjudication.verdict.decision is AdjudicationDecision.deny:
+                    return self._adjudicated_deny(name, request, decision, adjudication)
+                box = adjudication.verdict.time_box_minutes
+                if box is None:
+                    # `AdjudicatorVerdict` refuses an approval without a box, so
+                    # this guards a verdict built outside the model.
+                    return self._deferred(
+                        name,
+                        request,
+                        decision,
+                        Adjudication(reason="the approval carried no time box"),
+                    )
+                self._record_adjudication(request, adjudication.verdict)
+                grant = self.grants.mint(
+                    task_id=chain.task_id,
+                    tool=name,
+                    resource=request.resource,
+                    minutes=box,
+                    source=SOURCE_ADJUDICATOR,
+                    now=self._now(),
+                )
+                decision = self._granted(request, grant)
+                self._append_decision(decision)
+                logger.info(
+                    "adjudicator approved %s for task %s: grant %s for %d minutes",
+                    name,
+                    chain.task_id,
+                    grant.id,
+                    box,
+                )
+            else:
+                self._append_decision(decision)
         if decision.verdict is Verdict.deny:
             return self._denied(name, decision)
-        if decision.verdict is Verdict.escalate:
-            self._write_log(
-                name, decision, provenance_count=len(provenance.sources), upstream_ms=0.0
-            )
-            logger.info("escalated: pending tool=%s act=%s", name, chain.act)
-            return tool_result_error("escalated: pending")
 
         server = self._by_prefix.get(row.server)
         if server is None:
@@ -823,6 +902,125 @@ class Gateway:
         )
         self.decision_log.append(decision)
         return self._denied(request.tool, decision)
+
+    # Escalation: the adjudicator, the queue, and grants ---------------------
+
+    async def _review(self, request: AuthzRequest, decision: Decision) -> Adjudication:
+        """Fetch the subject and ask the adjudicator, deferring on any failure.
+
+        The subject comes from the ledger, and the fetch uses Warrant's own
+        credential. Nothing here raises: a call that cannot be adjudicated is a
+        call for a person, not a failed call.
+        """
+        ref = subject_ref(request.provenance)
+        if ref is None:
+            return Adjudication(
+                reason=(
+                    f"the ledger for task {request.chain.task_id} names no ticket or issue "
+                    "to cite as the subject"
+                )
+            )
+        try:
+            subject = await self.subject_fetcher(ref)
+        except Exception as error:  # noqa: BLE001 - a failed fetch defers the call
+            return Adjudication(reason=f"the subject fetch failed: {describe_failure(error)}")
+        if subject is None:
+            return Adjudication(reason=f"the subject {ref.id} could not be fetched")
+        try:
+            return await self.adjudicator.review(
+                request, request.provenance, subject, reasons=decision.reasons
+            )
+        except Exception as error:  # noqa: BLE001 - a failed adjudicator defers the call
+            return Adjudication(reason=f"the adjudicator failed: {describe_failure(error)}")
+
+    def _granted(self, request: AuthzRequest, grant: Grant) -> Decision:
+        """The allow a grant produces, with the grant named as its policy."""
+        return Decision(
+            verdict=Verdict.allow,
+            policy_ids=[grant_policy_id(grant)],
+            reasons=[
+                f"grant {grant.id} allows {grant.tool} on {grant.resource} "
+                f"until {grant.expires_at.isoformat()}"
+            ],
+            request=request,
+            mode=self.mode.value,
+            chain_source=request.chain.source,
+        )
+
+    def _deferred(
+        self,
+        name: str,
+        request: AuthzRequest,
+        decision: Decision,
+        adjudication: Adjudication,
+    ) -> CallToolResult:
+        """Queue a call no verdict answered and tell the agent it is pending."""
+        reason = adjudication.reason
+        if not reason and adjudication.verdict is not None:
+            # A deferral with a rationale has said why it could not decide; the
+            # person reading the queue should see that rather than a generic
+            # sentence.
+            reason = adjudication.verdict.rationale
+        item = self.queue.add(
+            request,
+            reason=reason or "the adjudicator deferred the call",
+            verdict=adjudication.verdict,
+            raw=adjudication.raw,
+            now=self._now(),
+        )
+        self._write_log(
+            name,
+            decision,
+            provenance_count=len(request.provenance.sources),
+            upstream_ms=0.0,
+            error=PENDING_TEXT,
+        )
+        logger.info("escalation queued as %s: %s", item.id, adjudication.reason)
+        return tool_result_error(PENDING_TEXT)
+
+    def _adjudicated_deny(
+        self,
+        name: str,
+        request: AuthzRequest,
+        decision: Decision,
+        adjudication: Adjudication,
+    ) -> CallToolResult:
+        """Record a refusal the adjudicator gave and return its reason."""
+        verdict = adjudication.verdict
+        if verdict is None:
+            return self._deferred(name, request, decision, adjudication)
+        self._record_adjudication(request, verdict)
+        refusal = Decision(
+            verdict=Verdict.deny,
+            policy_ids=[],
+            reasons=[verdict.rationale or "the adjudicator refused the call"],
+            request=request,
+            mode=self.mode.value,
+            chain_source=request.chain.source,
+        )
+        self._append_decision(refusal)
+        self._write_log(
+            name,
+            refusal,
+            provenance_count=len(request.provenance.sources),
+            upstream_ms=0.0,
+        )
+        text = verdict.rationale or "the adjudicator refused the call"
+        logger.info("adjudicator refused %s: %s", name, text)
+        return tool_result_error(text)
+
+    def _record_adjudication(self, request: AuthzRequest, verdict: AdjudicatorVerdict) -> None:
+        """Append one accepted verdict to the task's `adjudications.jsonl`."""
+        record_verdict(self.runs_dir, request.chain.task_id, verdict)
+
+    def _append_decision(self, decision: Decision) -> None:
+        """Write one decision line. The engine evaluates; the gateway appends.
+
+        The gateway appends because an escalated call's line has to carry the
+        verdict the adjudicator answered with, and that answer is only known
+        after the evaluation.
+        """
+        self.decision_log.append(decision)
 
     def _denied(self, tool: str, decision: Decision) -> CallToolResult:
         self._write_log(

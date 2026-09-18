@@ -51,7 +51,7 @@ from typing import Any, Literal, Protocol
 
 import httpx
 import psycopg
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
 from agents.mcp_client import digest as args_digest
 from gen.schema import (
@@ -448,18 +448,30 @@ def read_provenance_sources(task_dir: Path) -> list[dict[str, Any]]:
 
 
 class Adjudication(BaseModel):
-    """One adjudicator output, in the shape W16 owns.
+    """One adjudicator output, in the shape W16 writes.
 
-    W14 stubs the citation check against this shape and nothing more; the
-    adjudicator itself is W16's.
+    W16 records the accepted verdict as the adjudicator returned it, so the
+    fields are the verdict's: `cited_subject` is the ticket or issue the verdict
+    cites, and `rationale` is kept for the reader. `cited_ticket` is accepted as
+    the name W14's stub and its fixtures use for the same field, so an older
+    record still reads.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     decision: str
     time_box_minutes: int | None = None
     cited_sources: list[str] = Field(default_factory=list)
-    cited_ticket: str | None = None
+    cited_subject: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("cited_subject", "cited_ticket"),
+    )
+    rationale: str = ""
+
+    @property
+    def cited_ticket(self) -> str | None:
+        """The cited subject under the name W14's stub and fixtures use."""
+        return self.cited_subject
 
 
 def read_adjudications(task_dir: Path) -> list[Adjudication]:

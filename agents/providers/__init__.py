@@ -69,9 +69,18 @@ def parse_spec(spec: str) -> tuple[str, str, str]:
 
 
 def provider_for(
-    spec: str | None = None, *, settings: ProviderSettings | None = None
+    spec: str | None = None,
+    *,
+    settings: ProviderSettings | None = None,
+    max_tokens: int | None = None,
+    timeout: float | None = None,
 ) -> OpenAICompatProvider:
-    """Build the provider a spec names, or the one `WARRANT_MODEL` names."""
+    """Build the provider a spec names, or the one `WARRANT_MODEL` names.
+
+    `max_tokens` is the per-request output cap and `timeout` the client's own
+    read timeout. The adjudicator sets both; the agent loop leaves them unset
+    and the endpoint's defaults apply.
+    """
     settings = settings or ProviderSettings()
     provider_name, model, effort = parse_spec(spec or settings.warrant_model)
     route = ROUTES.get(provider_name)
@@ -82,7 +91,15 @@ def provider_for(
     api_key = getattr(settings, route.key_env.lower(), "") or os.environ.get(route.key_env, "")
     if not api_key:
         raise ValueError(f"{route.key_env} is not set; add it to .env")
-    return OpenAICompatProvider(route.base_url, api_key, model, effort, name=provider_name)
+    return OpenAICompatProvider(
+        route.base_url,
+        api_key,
+        model,
+        effort,
+        name=provider_name,
+        max_tokens=max_tokens,
+        **({"timeout": timeout} if timeout is not None else {}),
+    )
 
 
 __all__ = [

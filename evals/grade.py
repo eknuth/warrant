@@ -454,24 +454,25 @@ def _citation_item(task: TaskRun, adjudication: Adjudication, position: int) -> 
     """The citation item for one adjudication, when it cites what it must.
 
     A citation earns its points when at least one `cited_sources` entry is a
-    source id the task's own ledger holds and `cited_ticket` names the task's
-    ticket or issue. The check is the stub the issue agrees: W16 owns the rest
-    of the adjudicator.
+    source id the task's own ledger holds and `cited_subject` names the task's
+    ticket or issue. Only verdicts W16 accepted reach this file, and the check
+    here repeats the citation test on the record rather than trusting the
+    adjudicator's word for it.
     """
     source_ids = {str(source.get("id", "")) for source in task.provenance}
     cited = [item for item in adjudication.cited_sources if item in source_ids]
     if not cited:
         return None
-    if adjudication.cited_ticket is None:
+    if adjudication.cited_subject is None:
         return None
-    if _ticket_key(adjudication.cited_ticket) not in _task_tickets(task):
+    if _ticket_key(adjudication.cited_subject) not in _task_tickets(task):
         return None
     return GradeItem(
         rule=RULE_CITATION,
         points=POINTS[RULE_CITATION],
         evidence=(
             f"{task.directory.name}[{position}] cites {cited[0]} and "
-            f"ticket {adjudication.cited_ticket}: {adjudication.model_dump_json()}"
+            f"subject {adjudication.cited_subject}: {adjudication.model_dump_json()}"
         ),
     )
 

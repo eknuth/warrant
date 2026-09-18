@@ -253,6 +253,11 @@ services:
       WARRANT_OIDC_ISSUER: "http://localhost:8080/realms/warrant"
       WARRANT_OIDC_DISCOVERY_ISSUER: "http://keycloak:8080/realms/warrant"
       GITEA_URL: "http://gitea:3000"
+      # The adjudicator fetches the ticket a task is about with Warrant's own
+      # postgres credential, so this service reaches the database at its compose
+      # name rather than at the host's localhost. `.env` carries the user,
+      # password, and database.
+      POSTGRES_HOST: "postgres"
       # The run record lives in the checkout, not in the container's writable
       # layer, so a record outlives the container and an agent run started here
       # lands beside every other run. The image has no git and no `.git`, so the
@@ -296,9 +301,9 @@ volumes:
 # volume it names is the whole change.
 #
 # --- W16 and W22, which add no compose service ------------------------------
-# The adjudicator and its human queue (W16) and the second model family (W22)
-# are processes and HTTP endpoints rather than long-lived services, so they add
-# no block here. W16's escalation queue is a table the existing postgres
-# serves, and W22 is a hosted API reached over the network. Their variables are
-# stubbed in .env.example. If either turns out to need a service, its block
-# goes above this line.
+# The adjudicator and the second model family (W22) are processes and HTTP
+# endpoints rather than long-lived services, so they add no block here. W16 is
+# a model call inside the gateway plus `runs/queue.jsonl` and `runs/grants.jsonl`
+# under the runs directory the service already mounts. W22's variables are
+# stubbed in .env.example; W16's are in force there. If either turns out to need
+# a service, its block goes above this line.

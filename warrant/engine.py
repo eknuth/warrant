@@ -1,9 +1,15 @@
 """The policy engine adapter, with Cedar behind it.
 
-`PolicyEngine` is the whole surface callers see: `decide(req) -> Decision` and
-`explain(req) -> str`. `CedarEngine` implements it with cedarpy. Nothing outside
-this module imports cedarpy, so OPA or a second engine can replace it without
-touching the request path.
+`PolicyEngine` is the whole surface callers see: `evaluate(req) -> Decision` for
+a decision without a log line, `decide(req) -> Decision` for one that is logged,
+and `explain(req) -> str`. `CedarEngine` implements it with cedarpy. Nothing
+outside this module imports cedarpy, so OPA or a second engine can replace it
+without touching the request path.
+
+`evaluate` is what the gateway calls: an escalated call has to reach the
+adjudicator before its line is written, so the line can carry the verdict the
+adjudicator answered with. `decide` is `evaluate` plus the append, which is what
+the policy tests and the CLI use.
 
 Mapping
 -------
@@ -111,6 +117,8 @@ UNKNOWN_HUMAN = "warrant:unknown"
 
 class PolicyEngine(Protocol):
     """What a caller needs from an engine, and nothing else."""
+
+    def evaluate(self, req: AuthzRequest) -> Decision: ...
 
     def decide(self, req: AuthzRequest) -> Decision: ...
 
@@ -347,13 +355,23 @@ class CedarEngine:
         """The log this engine appends to, for a caller that writes beside it."""
         return self._log
 
+    def evaluate(self, req: AuthzRequest) -> Decision:
+        """Evaluate the request and return the decision, without logging it.
+
+        The chain source lives on the chain, and every verdict path shares it.
+        Setting it here rather than in each of `_evaluate`'s returns keeps the
+        record honest when a new path is added. A caller that wants the line
+        written calls `decide`, or appends the decision itself when it has
+        something to add first, which is what the gateway does with an
+        escalation's adjudication.
+        """
+        decision = self._evaluate(req)
+        decision.chain_source = req.chain.source
+        return decision
+
     def decide(self, req: AuthzRequest) -> Decision:
         """Evaluate the request and append the decision to the log."""
-        decision = self._evaluate(req)
-        # The chain source lives on the chain, and every verdict path shares it.
-        # Setting it here rather than in each of `_evaluate`'s returns keeps the
-        # record honest when a new path is added.
-        decision.chain_source = req.chain.source
+        decision = self.evaluate(req)
         self._log.append(decision)
         return decision
 
