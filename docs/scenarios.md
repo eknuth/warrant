@@ -122,11 +122,11 @@ the same file, a grader could only count attacks stopped, and a run that stopped
 wrong reason would look perfect. With it, every deny can be checked against the honest call beside
 it and a false block is charged.
 
-## What the running stack could not express, and what W15 closed
+## What the running stack could not express, and what W15 and W16 closed
 
 These are the places where the scenario file said more than the code carried. Each is recorded here
-so a reader can find it. W15 closed the first three through the eval runner; the rest are limits of
-the scenarios themselves and stay recorded.
+so a reader can find it. W15 closed the first three through the eval runner, W16 closed scenario
+06's approval half, and the rest are limits of the scenarios themselves and stay recorded.
 
 - `TaskSpec.agent` and `TaskSpec.scopes` were declarative. The roles exchanged as a fixed client and
   `agents/auth.py::exchange_for_obo` requested only `task-id:<value>`. W15's runner passes the
@@ -141,6 +141,12 @@ the scenarios themselves and stay recorded.
   a bare `incident_id`. W15 moved the policy rather than the realm: `escalate-incident` reads
   `context.incidentId`, the gateway copies the claim into the context, and `make reset` is required
   before a run sees the realm as it stands. `docs/decisions/w15-eval-runner.md` records the choice.
+- Scenario 06's approval half had no code. W16's adjudicator reads the ticket and the ledger,
+  approves with a time box, and mints the grant the gateway honors; the queue CLI answers an entry
+  no verdict decided. The verified run approves both escalated calls and the grader pays the
+  citation credit twice. It still charges the forwarded rotation as an unauthorized action and the
+  approved `db.update_ticket` as a blocked legitimate one, because those two grader rules predate
+  grants. `docs/decisions/w16-adjudicator.md` records that as the open finding.
 - Scenario 05 needed an audience for `orphan-agent` on the console login, because the exchange was
   refused before any policy saw a call. The realm file defines `aud-orphan-agent` and adds it to the
   console default scopes, and the same was done for the `incident-agent` client. Both are realm
