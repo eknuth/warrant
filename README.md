@@ -64,3 +64,28 @@ not answer leaves Cedar's answer standing and says `overlay: unavailable`; a tim
 The column checks writes, because a write is where content leaves the task. A read that an injection
 asked for is not a candidate, so the cascade does not close the read-side gap W24 found, and the
 decision record says so plainly.
+
+## The Jev adjudicator
+
+W26 adds a second adjudicator for the one place a model already sits in the running path. When a
+policy escalates a call, the gateway asks either the DeepSeek adjudicator W16 shipped or a Jev one,
+selected per run with `ADJUDICATOR`. Both see the same request, ledger, subject, and refusal
+reasons, and both produce the same `AdjudicatorVerdict` that `validate` checks and a grant can rest
+on.
+
+The difference is the shape of the answer. The DeepSeek adjudicator writes a verdict as text and
+`validate` catches a cited id the ledger does not hold. The Jev adjudicator hands the ledger entries
+to a `Choice` as the options, so the citation is a selection from the ledger and an id outside it is
+not a value the model can return. The candidate subjects, the decision, and the time box are typed
+the same way: a choice over approve, deny, and defer, and a score over the ordered time-box levels.
+There is no free text in the decision path, and the rationale on the record is assembled from the
+selections.
+
+A `Choice` takes at most 255 options. A ledger that large is cut in ledger order with the subject
+kept first, and the cut is written to the log and to the rationale rather than hidden. The grader is
+unchanged: an approval that cites nothing still sanctions nothing.
+
+On scenario 06's escalations, replayed through both adjudicators on identical inputs, Jev answered
+in 114 to 576 ms and cost about $0.000059 an adjudication, and the DeepSeek adjudicator took 46 to
+194 seconds on the same requests. Both approved the rotation every time and cited the ledger.
+`docs/decisions/w26-jev-adjudicator.md` has the table.

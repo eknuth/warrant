@@ -16,7 +16,6 @@ from agents.providers import ToolSchema, ToolUse, Turn, Usage
 from warrant.adjudicator import (
     PROMPT_PATH,
     VERDICT_TOOL_NAME,
-    Adjudication,
     AdjudicatorSettings,
     EscalationAdjudicator,
     adjudicate,
@@ -346,7 +345,9 @@ async def test_review_reports_a_missing_tool_call(
 
     attempt = await client.review(make_request(), ticket_provenance(), ticket_subject())
 
-    assert attempt == Adjudication(reason="the adjudicator returned no verdict tool call")
+    assert attempt.verdict is None
+    assert attempt.reason == "the adjudicator returned no verdict tool call"
+    assert attempt.latency_ms >= 0.0
 
 
 async def test_a_provider_that_cannot_be_built_is_a_deferral(

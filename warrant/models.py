@@ -256,6 +256,13 @@ class JevCall(BaseModel):
     choice: str | None = None
     confidence: float | None = None
     probabilities: dict[str, float] = Field(default_factory=dict)
+    # W26: the answer to a `score` question. `score` is the expected level the
+    # endpoint reports and `score_probabilities` maps each level to its
+    # probability, so a reader can see the rubric the answer came from. A choice
+    # question leaves both empty, exactly as a score question leaves `choice`
+    # empty.
+    score: float | None = None
+    score_probabilities: dict[str, float] = Field(default_factory=dict)
     error: str = ""
 
 
@@ -347,6 +354,12 @@ class Decision(BaseModel):
     when no adjudicator answered it. It is on the line the escalation produced,
     so a reader sees the policy that escalated the call and the evidence the
     answer cited in one place.
+
+    `adjudicator_calls` is the Jev call that produced that verdict, with its
+    latency, tokens, and price. It sits on the escalate line rather than on the
+    request, because the grant allow line carries the same request and a call
+    recorded there would be counted twice. A DeepSeek verdict has no Jev call
+    and leaves this empty.
     """
 
     verdict: Verdict
@@ -356,3 +369,4 @@ class Decision(BaseModel):
     mode: str = ""
     chain_source: str = "token"
     adjudication: AdjudicatorVerdict | None = None
+    adjudicator_calls: list[JevCall] = Field(default_factory=list)

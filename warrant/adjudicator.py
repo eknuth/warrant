@@ -23,8 +23,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -33,10 +34,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from agents.providers import Provider, ToolSchema, Turn, provider_for
 from warrant.config import task_dir
+from warrant.jev import AdjudicationAnswer, JevClient
 from warrant.models import (
     AdjudicationDecision,
     AdjudicatorVerdict,
     AuthzRequest,
+    JevCall,
     Provenance,
 )
 from warrant.subjects import SubjectDoc
@@ -46,6 +49,12 @@ logger = logging.getLogger(__name__)
 PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "adjudicator.md"
 VERDICT_TOOL_NAME = "record_verdict"
 ADJUDICATIONS_NAME = "adjudications.jsonl"
+
+# W26. The two adjudicators behind the one interface. `deepseek` is W16's
+# generated-text path; `jev` answers the same escalation with typed selections.
+ADJUDICATOR_DEEPSEEK = "deepseek"
+ADJUDICATOR_JEV = "jev"
+ADJUDICATOR_KINDS = (ADJUDICATOR_DEEPSEEK, ADJUDICATOR_JEV)
 
 TOOL_DESCRIPTION = (
     "Record the adjudicator's verdict on one escalated tool call. Call this "
@@ -65,6 +74,10 @@ class AdjudicatorSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    # W26. Which adjudicator the gateway builds: `deepseek` is W16's generated
+    # verdict, `jev` the typed-selection one. It is read once when the gateway
+    # is constructed, so one run selects one adjudicator for every escalation.
+    adjudicator: str = ADJUDICATOR_DEEPSEEK
     adjudicator_model: str = "deepseek:deepseek-flash@max"
     # The cap has to cover the thinking a max-effort answer spends before it
     # emits the tool call: reasoning tokens count against the completion budget,
@@ -84,12 +97,27 @@ class Adjudication:
     `verdict` is the accepted verdict, or None when the model gave no verdict,
     gave one that did not parse, or gave one whose citations did not check out.
     `reason` says why there is no verdict, and `raw` keeps the rejected tool
-    arguments so the human queue carries what the model actually said.
+    arguments or selections so the human queue carries what the model actually
+    said.
+
+    The last four fields are the measurement W26 compares the two adjudicators
+    with: the wall time the call took and the tokens the provider reported.
+    `cost_usd` is the Jev side's price and is None on the DeepSeek side, where no
+    per-token price is recorded in this tree, so an unknown price is never read
+    as zero.
+
+    `jev_calls` holds the Jev call that produced the answer, so the gateway can
+    write it on the escalate line once. The DeepSeek path leaves it empty.
     """
 
     verdict: AdjudicatorVerdict | None = None
     reason: str = ""
     raw: dict[str, Any] | None = None
+    latency_ms: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float | None = None
+    jev_calls: list[JevCall] = field(default_factory=list)
 
 
 class AdjudicatorClient(Protocol):
@@ -307,24 +335,187 @@ class EscalationAdjudicator:
             Turn(role="system", text=self.prompt),
             Turn(role="user", text=render_case(req, ledger, subject, reasons)),
         ]
+        started = time.monotonic()
         try:
             async with asyncio.timeout(self.settings.escalation_timeout_s):
                 turn = await provider.run(messages, [verdict_tool()])
         except Exception as error:  # noqa: BLE001 - a failed call defers the call
             return Adjudication(
-                reason=f"the adjudicator call failed: {type(error).__name__}: {error}"
+                reason=f"the adjudicator call failed: {type(error).__name__}: {error}",
+                latency_ms=round((time.monotonic() - started) * 1000.0, 3),
             )
+        usage = turn.usage
+        measured = {
+            "latency_ms": round((time.monotonic() - started) * 1000.0, 3),
+            "input_tokens": usage.input_tokens if usage is not None else 0,
+            "output_tokens": usage.output_tokens if usage is not None else 0,
+        }
         raw = verdict_args(turn)
         if raw is None:
-            return Adjudication(reason="the adjudicator returned no verdict tool call")
+            return Adjudication(reason="the adjudicator returned no verdict tool call", **measured)
         try:
             verdict = AdjudicatorVerdict.model_validate(raw)
         except ValidationError as error:
-            return Adjudication(reason=f"the verdict did not validate: {error}", raw=raw)
+            return Adjudication(
+                reason=f"the verdict did not validate: {error}", raw=raw, **measured
+            )
         accepted, reason = validate(verdict, ledger, subject, incident_id=req.chain.incident_id)
         if accepted is None:
-            return Adjudication(reason=reason, raw=raw)
-        return Adjudication(verdict=accepted, raw=raw)
+            return Adjudication(reason=reason, raw=raw, **measured)
+        return Adjudication(verdict=accepted, raw=raw, **measured)
+
+
+def assemble_rationale(request: AuthzRequest, answer: AdjudicationAnswer) -> str:
+    """One rationale line built from the selections, never generated.
+
+    Every clause names a value the request carried or an option the model chose:
+    the decision, the call, the cited ledger id, the subject, the incident, and
+    the time box. A bounded ledger choice appends the bound with both counts, so
+    the record shows the cut even though the options did not.
+    """
+    parts = [f"{answer.decision} {request.tool} on {request.resource}"]
+    if answer.evidence:
+        parts.append(f"cites {answer.evidence}")
+    if answer.subject:
+        parts.append(f"subject {answer.subject}")
+    if answer.incident:
+        parts.append(f"incident {answer.incident}")
+    if answer.time_box is not None:
+        parts.append(f"time box {answer.time_box} minutes")
+    if answer.evidence_dropped:
+        offered = len(answer.evidence_options)
+        parts.append(f"ledger choice bounded to {offered} of {offered + answer.evidence_dropped}")
+    return "; ".join(parts)
+
+
+def _verdict_from_answer(
+    request: AuthzRequest, answer: AdjudicationAnswer
+) -> AdjudicatorVerdict | None:
+    """The typed answer as the shared verdict, or None when it does not fit."""
+    if answer.decision is None:
+        return None
+    try:
+        decision = AdjudicationDecision(answer.decision)
+    except ValueError:
+        return None
+    try:
+        return AdjudicatorVerdict(
+            decision=decision,
+            time_box_minutes=(
+                answer.time_box if decision is AdjudicationDecision.approve else None
+            ),
+            cited_sources=[answer.evidence] if answer.evidence else [],
+            cited_subject=answer.subject or "",
+            rationale=assemble_rationale(request, answer),
+        )
+    except ValidationError:
+        return None
+
+
+def _raw_from_answer(answer: AdjudicationAnswer) -> dict[str, Any]:
+    """The selections as the queue keeps a rejected answer, with the options.
+
+    `answers` is the endpoint's own reply, so a human sees the selection the
+    adjudicator made even when validation refused it.
+    """
+    return {
+        "decision": answer.decision,
+        "time_box_minutes": answer.time_box,
+        "cited_sources": [answer.evidence] if answer.evidence else [],
+        "cited_subject": answer.subject,
+        "incident": answer.incident,
+        "evidence_options": list(answer.evidence_options),
+        "evidence_dropped": answer.evidence_dropped,
+        "answers": dict(answer.answers),
+    }
+
+
+class JevAdjudicator:
+    """The escalation answer from typed selections instead of generated text.
+
+    It implements the same `review` the DeepSeek adjudicator does, so the
+    gateway selects one per run and both answer identical escalations. The
+    client sends one request whose choices are the ledger's own ids, and this
+    class reduces the selections to an `AdjudicatorVerdict` and runs it through
+    the same `validate`, so an approval that cites nothing still sanctions
+    nothing. A call that fails or answers outside the option set is a deferral.
+    """
+
+    def __init__(
+        self,
+        *,
+        settings: AdjudicatorSettings | None = None,
+        client: JevClient | None = None,
+    ) -> None:
+        self.settings = settings or AdjudicatorSettings()
+        self.client = client or JevClient()
+
+    async def review(
+        self,
+        req: AuthzRequest,
+        ledger: Provenance,
+        subject: SubjectDoc,
+        *,
+        reasons: Sequence[str] = (),
+    ) -> Adjudication:
+        """Ask Jev for the typed selections and check them, or say why not."""
+        try:
+            answer = await self.client.adjudicate(
+                request=req,
+                ledger=ledger,
+                subject=subject,
+                reasons=reasons,
+            )
+        except Exception as error:  # noqa: BLE001 - a failed adjudicator defers the call
+            return Adjudication(
+                reason=f"the Jev adjudicator failed: {type(error).__name__}: {error}"
+            )
+        measured = {
+            "latency_ms": answer.call.latency_ms,
+            "input_tokens": answer.call.input_tokens,
+            "output_tokens": answer.call.output_tokens,
+            "cost_usd": answer.call.cost_usd,
+            "jev_calls": [answer.call],
+        }
+        raw = _raw_from_answer(answer)
+        if answer.call.error:
+            return Adjudication(
+                reason=f"the Jev adjudicator call failed: {answer.call.error}",
+                raw=raw,
+                **measured,
+            )
+        verdict = _verdict_from_answer(req, answer)
+        if verdict is None:
+            return Adjudication(
+                reason="the Jev adjudicator returned no usable verdict selection",
+                raw=raw,
+                **measured,
+            )
+        accepted, reason = validate(verdict, ledger, subject, incident_id=req.chain.incident_id)
+        if accepted is None:
+            return Adjudication(reason=reason, raw=raw, **measured)
+        return Adjudication(verdict=accepted, raw=raw, **measured)
+
+
+def build_adjudicator(
+    settings: AdjudicatorSettings | None = None,
+    *,
+    jev: JevClient | None = None,
+) -> AdjudicatorClient:
+    """The adjudicator one run selected, or a refusal naming the choices.
+
+    An unknown value stops the process at construction rather than answering an
+    escalation with a default the caller did not ask for.
+    """
+    settings = settings or AdjudicatorSettings()
+    kind = settings.adjudicator.strip().lower()
+    if kind == ADJUDICATOR_JEV:
+        return JevAdjudicator(settings=settings, client=jev)
+    if kind == ADJUDICATOR_DEEPSEEK:
+        return EscalationAdjudicator(settings=settings)
+    raise ValueError(
+        f"ADJUDICATOR must be one of {ADJUDICATOR_KINDS}, not {settings.adjudicator!r}"
+    )
 
 
 async def adjudicate(

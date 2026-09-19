@@ -76,7 +76,7 @@ from warrant.adjudicator import (
     Adjudication,
     AdjudicatorClient,
     AdjudicatorSettings,
-    EscalationAdjudicator,
+    build_adjudicator,
     record_verdict,
 )
 from warrant.config import RUNS_DIR, Mode, Taint, bad_task_id, task_dir
@@ -446,16 +446,18 @@ class Gateway:
         self.taint = Taint(taint) if taint is not None else config.current_taint()
         self._now = now or (lambda: datetime.now(UTC))
         self.adjudicator_settings = adjudicator_settings or AdjudicatorSettings()
-        # The default adjudicator builds its provider on the first escalation,
-        # so a process that never escalates needs no adjudicator credential.
-        self.adjudicator = adjudicator or EscalationAdjudicator(settings=self.adjudicator_settings)
+        # Constructed before the adjudicator so the Jev adjudicator can share
+        # one client. It reads no key until a question is asked, so a process
+        # that never runs a Jev ablation never needs the credential.
+        self.jev = jev or JevClient()
+        # W26. The adjudicator is selected per run from `ADJUDICATOR`; both
+        # implement the same `review`, so an escalation is answered the same way
+        # whichever is chosen. A bad value raises here rather than defaulting.
+        self.adjudicator_kind = self.adjudicator_settings.adjudicator.strip().lower()
+        self.adjudicator = adjudicator or build_adjudicator(self.adjudicator_settings, jev=self.jev)
         self.subject_fetcher = subject_fetcher or fetch_subject
         self.queue = queue or Queue(self.runs_dir)
         self.grants = grants or GrantStore(self.runs_dir)
-        # Constructed always so a caller has one object to fake; it reads no key
-        # until a question is asked, so a process that never runs a Jev ablation
-        # never needs the credential.
-        self.jev = jev or JevClient()
         self._tools: dict[str, list[Tool]] = {}
         # The no-exchange ablation has no subject token, so the gateway reaches
         # the upstreams as itself. The client-credentials token is minted once
@@ -798,6 +800,10 @@ class Gateway:
             if decision.verdict is Verdict.escalate:
                 adjudication = await self._review(request, decision)
                 decision.adjudication = adjudication.verdict
+                # W26. The adjudicator's own call is recorded on the escalate
+                # line, not on the shared request: the grant allow line carries
+                # the same request, and a call there would be counted twice.
+                decision.adjudicator_calls = list(adjudication.jev_calls)
                 self._append_decision(decision)
                 if adjudication.verdict is None or (
                     adjudication.verdict.decision is AdjudicationDecision.defer
@@ -1325,24 +1331,23 @@ def build_server(gateway: Gateway) -> Server:
     )
 
 
-def health_payload() -> dict[str, Any]:
-    """The mode and taint this process imported, for the runner's health check.
+def health_payload(gateway: Gateway | None = None) -> dict[str, Any]:
+    """The mode, taint, and adjudicator this process imported.
 
-    The values come from `warrant.config`, which reads `WARRANT_MODE` and
-    `TAINT` once at import, so the payload is what this process is actually
-    running and not what a caller asked for. The runner restarts the process,
-    polls this, and records the mode it confirmed.
+    The ablation values come from `warrant.config`, which reads `WARRANT_MODE`
+    and `TAINT` once at import, so the payload is what this process is actually
+    running and not what a caller asked for. `adjudicator` is the W26 selection
+    the gateway built. The runner restarts the process, polls this, and records
+    what it confirmed.
     """
-    return {
+    payload: dict[str, Any] = {
         "status": "ok",
         "mode": config.current_mode().value,
         "taint": config.current_taint().value,
     }
-
-
-async def _healthz(_request: Any) -> JSONResponse:
-    """`GET /healthz`: the process is up and running the named ablation."""
-    return JSONResponse(health_payload())
+    if gateway is not None:
+        payload["adjudicator"] = gateway.adjudicator_kind
+    return payload
 
 
 def build_app(
@@ -1362,12 +1367,17 @@ def build_app(
     `/healthz` is exempt from the bearer check in every mode, so the runner can
     confirm a restarted process without holding a token for it.
     """
+
+    async def healthz(_request: Any) -> JSONResponse:
+        """`GET /healthz`: the process is up and running the named setup."""
+        return JSONResponse(health_payload(gateway))
+
     server = build_server(gateway)
     app = server.streamable_http_app(
         streamable_http_path=gateway.settings.warrant_gateway_path,
         host=gateway.settings.warrant_gateway_host,
         transport_security=transport_security,
-        custom_starlette_routes=[Route(HEALTH_PATH, _healthz, methods=["GET"])],
+        custom_starlette_routes=[Route(HEALTH_PATH, healthz, methods=["GET"])],
     )
     if gateway.mode is not Mode.no_exchange:
         # No bearer middleware in `no-exchange`: that ablation's whole point is

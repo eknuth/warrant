@@ -18,7 +18,7 @@ REPO_ROOT := $(shell bash scripts/repo_root.sh)
 WARRANT_RUNS_HOST_DIR ?= $(REPO_ROOT)/runs
 export WARRANT_RUNS_HOST_DIR
 
-.PHONY: install lint test up down reset gitea-mcp postgres-mcp mail-mcp dsh-profile worktree worktree-clean evals smoke qwen-smoke jev-smoke cascade-smoke matrix throughput queue
+.PHONY: install lint test up down reset gitea-mcp postgres-mcp mail-mcp dsh-profile worktree worktree-clean evals smoke qwen-smoke jev-smoke cascade-smoke matrix throughput queue adjudicator-compare w26-smoke
 
 # Create or refresh .venv from pyproject.toml and uv.lock. `uv sync` is also
 # what a clean clone runs first; there is no other install step.
@@ -144,6 +144,23 @@ jev-smoke:
 cascade-smoke:
 	uv run python -m evals.run --scenarios 01,08,09,10 --ablations cascade --repeats 1 \
 		--column w27-smoke $(ARGS)
+
+# W26. Scenario 06 under each adjudicator, three repeats, then the side-by-side
+# table on the escalations the Jev column recorded. The two columns differ only
+# in `--adjudicator`; the scenario set is not tuned. It needs JEV_API_KEY and
+# DEEPSEEK_API_KEY in `.env`.
+w26-smoke:
+	uv run python -m evals.run --scenarios 06 --ablations full --repeats 3 \
+		--adjudicator deepseek --column w26-deepseek $(ARGS)
+	uv run python -m evals.run --scenarios 06 --ablations full --repeats 3 \
+		--adjudicator jev --column w26-jev $(ARGS)
+	uv run python -m evals.adjudicators --run "$(CURDIR)/evals/results/w26-jev/full/deepseek_deepseek-flash_off/06-legit-escalation/1/run" \
+		--repeats 3
+
+# W26. The side-by-side table for one recorded run, without a new eval cell.
+adjudicator-compare:
+	@if [ -z "$(RUN)" ]; then echo "usage: make adjudicator-compare RUN=<recorded run dir>" >&2; exit 2; fi
+	uv run python -m evals.adjudicators --run "$(RUN)" --repeats $(or $(REPEATS),3)
 
 # W22. The full second-family column: every scenario, every ablation, three
 # repeats, through the local endpoint. Run it long. A cell that already holds a

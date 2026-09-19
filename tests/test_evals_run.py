@@ -30,6 +30,7 @@ from evals.run import (
     RunnerError,
     dry_cell,
     jev_totals,
+    parse_adjudicator,
     parse_models,
     parse_scenarios,
     regrade_column,
@@ -66,6 +67,13 @@ def test_parse_scenarios_refuses_an_unknown_name() -> None:
 def test_parse_models_defaults_and_splits() -> None:
     assert parse_models(None) == ["deepseek:deepseek-flash@off"]
     assert parse_models("a,b") == ["a", "b"]
+
+
+def test_parse_adjudicator_defaults_and_refuses_an_unknown_name() -> None:
+    assert parse_adjudicator(None) == "deepseek"
+    assert parse_adjudicator("jev") == "jev"
+    with pytest.raises(RunnerError, match="unknown adjudicator"):
+        parse_adjudicator("other")
 
 
 def test_validate_column_is_one_component() -> None:
@@ -302,16 +310,44 @@ def test_jev_totals_sum_the_calls_on_the_decision_lines(tmp_path: Path) -> None:
         ],
     )
     decision = Decision(verdict=Verdict.deny, request=request, mode="jev")
-    (run_dir / "decisions.jsonl").write_text(decision.model_dump_json() + "\n", encoding="utf-8")
+    escalation_request = AuthzRequest(
+        chain=chain,
+        tool="gitea.create_issue_comment",
+        action_kind=ActionKind.write,
+        resource="repo-acme-widgets",
+        args_digest="sha256:other",
+        provenance=Provenance(task_id="task-1"),
+        ts=datetime.now(UTC),
+    )
+    escalation = Decision(
+        verdict=Verdict.escalate,
+        request=escalation_request,
+        mode="full",
+        adjudicator_calls=[
+            JevCall(
+                rule="adjudicate",
+                model="jev-1",
+                latency_ms=20.0,
+                input_tokens=400,
+                output_tokens=4,
+                cost_usd=0.0000168,
+                choice="approve",
+            )
+        ],
+    )
+    (run_dir / "decisions.jsonl").write_text(
+        decision.model_dump_json() + "\n" + escalation.model_dump_json() + "\n",
+        encoding="utf-8",
+    )
 
     totals = jev_totals(tmp_path / "run")
 
-    assert totals["calls"] == 2
-    assert totals["rules"] == {"derived": 2}
+    assert totals["calls"] == 3
+    assert totals["rules"] == {"derived": 2, "adjudicate": 1}
     assert totals["errors"] == 1
-    assert totals["input_tokens"] == 300
-    assert totals["output_tokens"] == 10
-    assert totals["cost_usd"] == pytest.approx(0.0000126)
+    assert totals["input_tokens"] == 700
+    assert totals["output_tokens"] == 14
+    assert totals["cost_usd"] == pytest.approx(0.0000294)
     assert totals["mean_latency_ms"] == pytest.approx(20.0)
 
 
@@ -368,9 +404,43 @@ def test_the_override_carries_the_ablation_and_the_cell_run_root(tmp_path: Path)
 
     assert warrant["environment"]["WARRANT_MODE"] == "no-exchange"
     assert warrant["environment"]["TAINT"] == "both"
+    assert warrant["environment"]["ADJUDICATOR"] == "deepseek"
     assert warrant["environment"]["WARRANT_RUNS_DIR"] == "/app/evals/results/smoke/no-exchange/run"
     assert warrant["environment"]["WARRANT_OIDC_ISSUER"].startswith("http://localhost")
     assert any("/app/evals/results" in volume for volume in warrant["volumes"])
+
+
+def test_the_override_selects_the_jev_adjudicator(tmp_path: Path) -> None:
+    switcher = ComposeSwitcher(results_dir=tmp_path, adjudicator="jev")
+    text = switcher.override_text(
+        parse_ablations("full")[0],
+        container_runs_dir="/app/evals/results/w26/jev/run",
+    )
+    document = yaml.safe_load(text)
+
+    assert document["services"]["warrant"]["environment"]["ADJUDICATOR"] == "jev"
+
+
+def test_compose_switcher_waits_for_the_confirmed_adjudicator() -> None:
+    payload = {"status": "ok", "mode": "full", "taint": "both", "adjudicator": "deepseek"}
+    switcher = ComposeSwitcher(
+        health_url="http://gateway.test/healthz", timeout_s=0.1, adjudicator="jev"
+    )
+
+    class Client:
+        def __enter__(self) -> Client:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def get(self, url: str, timeout: float) -> Any:
+            return _Response(payload)
+
+    switcher.client_factory = Client  # type: ignore[assignment]
+
+    with pytest.raises(HealthError):
+        switcher.wait_for(parse_ablations("full")[0])
 
 
 def test_compose_switcher_raises_when_the_mode_never_matches() -> None:
@@ -549,6 +619,7 @@ def test_meta_json_records_the_confirmed_mode(tmp_path: Path, monkeypatch: Any) 
     meta = json.loads((cell.root(tmp_path) / "meta.json").read_text(encoding="utf-8"))
     assert meta["confirmed_mode"] == "no-exchange"
     assert meta["confirmed_taint"] == "both"
+    assert meta["adjudicator"] == "deepseek"
     assert meta["status"] == "ok"
     assert meta["elapsed_s"] >= 0
     grade = json.loads((cell.root(tmp_path) / "grade.json").read_text(encoding="utf-8"))
