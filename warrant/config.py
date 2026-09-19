@@ -4,7 +4,7 @@
 engine and the ledger accept an explicit `mode` too, so a test can exercise a
 mode without touching the environment. W15 explains the modes to a reader.
 
-The four modes:
+The five modes:
 
 * `full` is the real configuration: the chain comes from the verified token
   exchange and the ledger records what was read.
@@ -17,11 +17,17 @@ The four modes:
   pretend.
 * `prompt-only` makes every decision allow and records that it did, with
   `policy_ids == ["ablation:prompt-only"]`. It is the floor, not a policy set.
+* `jev-only` (W24) never runs Cedar. Every call is sent to the Jev classifier
+  with the whole picture, and the one choice it answers is the verdict. It is
+  the ablation that asks whether a model with full context staffing the
+  enforcement point is enough on its own.
 
 `TAINT` is read the same way, at import, into `DEFAULT_TAINT`. It selects which
-provenance taint W11 computes for a call. `task` fills `provenance.hasExternal`
-and leaves the content fields empty, `content` fills the overlap fields and
-leaves `hasExternal` false, and `both` fills both. See `docs/provenance.md`.
+provenance rule the gateway computes for a call. `task` fills
+`provenance.hasExternal` and leaves the content fields empty, `content` fills the
+overlap fields and leaves `hasExternal` false, `both` fills both, and `jev`
+(W24) leaves both deterministic signals empty and asks the Jev classifier for
+the per-write `derived` boolean instead. See `docs/provenance.md`.
 
 `task_dir` is the one place a task id becomes a path. It sanitizes, so a task
 id cannot escape the run directory.
@@ -118,12 +124,14 @@ _SAFE_TASK_ID = re.compile(r"[^A-Za-z0-9._-]")
 
 
 class Mode(StrEnum):
-    """The four ablations, named as `WARRANT_MODE` names them."""
+    """The ablations, named as `WARRANT_MODE` names them."""
 
     full = "full"
     no_provenance = "no-provenance"
     no_exchange = "no-exchange"
     prompt_only = "prompt-only"
+    # W24: Cedar never runs; one Jev choice is the verdict.
+    jev_only = "jev-only"
 
 
 class ChainSourceError(RuntimeError):
@@ -155,7 +163,7 @@ def current_mode() -> Mode:
 
 
 class Taint(StrEnum):
-    """Which provenance taint W11 computes, named as `TAINT` names it.
+    """Which provenance rule W11 computes, named as `TAINT` names it.
 
     `task` fills `provenance.hasExternal` from the ledger and leaves the content
     fields at their empty default. `content` does the reverse: it fills
@@ -163,12 +171,15 @@ class Taint(StrEnum):
     provenance summary report no external source. `both` does both and is the
     default, because the two rules catch different attacks and the shipped
     configuration runs the whole set. W15's `content-taint` ablation runs
-    `content` alone.
+    `content` alone. W24's `jev` leaves both deterministic rules off and asks the
+    Jev classifier for the `derived` boolean on each candidate write, which is
+    the ablation that measures the typed classifier by itself.
     """
 
     task = "task"
     content = "content"
     both = "both"
+    jev = "jev"
 
 
 def parse_taint(value: str | None) -> Taint:

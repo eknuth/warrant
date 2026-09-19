@@ -35,7 +35,16 @@ from pathlib import Path
 
 # Mirrors `evals.ablations.ABLATION_NAMES` and the provider names in the
 # runner's route table; `tests/test_evals_run.py` checks the ablations half.
-CONFIGS = ("full", "task-taint", "content-taint", "no-provenance", "no-exchange", "prompt-only")
+CONFIGS = (
+    "full",
+    "task-taint",
+    "content-taint",
+    "jev",
+    "no-provenance",
+    "no-exchange",
+    "prompt-only",
+    "jev-only",
+)
 PROVIDERS = ("deepseek", "qwen-local")
 RESULTS = "evals/results/"
 SEPARATORS = set("&|;\n()")

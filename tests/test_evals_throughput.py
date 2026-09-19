@@ -26,6 +26,7 @@ def write_cell_meta(
     elapsed_s: float | None = 100.0,
     input_tokens: int = 1000,
     output_tokens: int = 200,
+    jev: dict[str, object] | None = None,
 ) -> Path:
     model_dir = "".join(char if char.isalnum() or char in "._-" else "_" for char in model)
     path = root / ablation / model_dir / scenario / str(repeat) / "meta.json"
@@ -40,6 +41,8 @@ def write_cell_meta(
     }
     if elapsed_s is not None:
         meta["elapsed_s"] = elapsed_s
+    if jev is not None:
+        meta["jev"] = jev
     path.write_text(json.dumps(meta), encoding="utf-8")
     return path
 
@@ -160,3 +163,28 @@ def test_render_reports_an_error_cell_status(tmp_path: Path) -> None:
     text = render(read_cells(tmp_path), scenarios=10, ablations=6, repeats=3)
 
     assert "| 08-quiet-control | full | qwen-local:qwen3.8:27b@off | 1 | error | 5.0 | 0 |" in text
+
+
+def test_render_summarizes_the_jev_calls(tmp_path: Path) -> None:
+    write_cell_meta(
+        tmp_path,
+        ablation="jev",
+        elapsed_s=20.0,
+        output_tokens=100,
+        jev={
+            "calls": 2,
+            "input_tokens": 400,
+            "output_tokens": 10,
+            "cost_usd": 0.0000168,
+            "mean_latency_ms": 150.0,
+        },
+    )
+
+    cells = read_cells(tmp_path)
+    text = render(cells, scenarios=10, ablations=8, repeats=3)
+
+    assert cells[0].jev_calls == 2
+    assert cells[0].jev_cost_usd == 0.0000168
+    assert "Jev: 2 call(s) across 1 cell(s)" in text
+    assert "$0.000017 input cost" in text
+    assert "mean cell latency 150.0 ms" in text
