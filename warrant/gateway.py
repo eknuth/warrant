@@ -733,6 +733,11 @@ class Gateway:
         # answer is recorded on the request, so the decision line carries the
         # latency and token cost of every call. A failed call fails closed in
         # `JevClient`, so a classifier that did not answer never allows a call.
+        #
+        # W27's cascade is excluded from the `taint=jev` arm on purpose. The
+        # cascade ordering is Cedar first and Jev only on an allowed write, so
+        # even a `WARRANT_MODE=cascade TAINT=jev` combination must not ask before
+        # the engine and let a deny reach the network.
         if self.mode is Mode.jev_only:
             agent_row = self.graph.agent(chain.act)
             resource_row = self.graph.resource(request.resource)
@@ -752,9 +757,10 @@ class Gateway:
             )
             request.jev_choice = choice
             request.jev_calls.append(call)
-        elif self.taint is Taint.jev and request.action_kind in (
-            ActionKind.write,
-            ActionKind.send,
+        elif (
+            self.mode is not Mode.cascade
+            and self.taint is Taint.jev
+            and request.action_kind in (ActionKind.write, ActionKind.send)
         ):
             derived, call = await self.jev.derived(
                 state=state,
