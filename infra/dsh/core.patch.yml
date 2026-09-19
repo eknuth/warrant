@@ -68,13 +68,19 @@
 # events .dsh/hooks.json names. configPath and projectDir are absolute because a
 # relative path resolves against the directory that launched dsh, and a one-shot
 # from anywhere but this checkout would then silently run no hooks at all.
+#
+# defaultTimeoutMs is the ceiling for a hook that names no per-hook timeout. It
+# was 90 seconds, and the `guard_merge` hook's `make test` grew past that: the
+# per-hook timeout in .dsh/hooks.json and this default are raised together so
+# the merge guard can run the suite and then lint. `.dsh/hooks/guard_merge.py`
+# carries the reasoning.
 - insert:
     - id: hooks-claude-code
       name: '@deepseek-ai/dsh-hooks-claude-code'
       config:
         configPath: __REPO_ROOT__/.dsh/hooks.json
         projectDir: __REPO_ROOT__
-        defaultTimeoutMs: 90000
+        defaultTimeoutMs: 360000
 
 # Linear MCP (hosted, Streamable HTTP). Tools appear as mcp__linear__*.
 # Optional overlay: the skills read issues with the linear CLI and never need
