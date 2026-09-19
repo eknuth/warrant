@@ -72,6 +72,7 @@ def test_parse_mode_defaults_to_full_and_rejects_typos() -> None:
     assert config.parse_mode(None) is Mode.full
     assert config.parse_mode("") is Mode.full
     assert config.parse_mode("no-provenance") is Mode.no_provenance
+    assert config.parse_mode("jev-only") is Mode.jev_only
     with pytest.raises(ValueError, match="WARRANT_MODE"):
         config.parse_mode("no-provenence")
 
@@ -89,6 +90,7 @@ def test_parse_taint_defaults_to_both_and_rejects_typos() -> None:
     assert config.parse_taint("") is config.Taint.both
     assert config.parse_taint("task") is config.Taint.task
     assert config.parse_taint("content") is config.Taint.content
+    assert config.parse_taint("jev") is config.Taint.jev
     with pytest.raises(ValueError, match="TAINT"):
         config.parse_taint("contnet")
 

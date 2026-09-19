@@ -187,6 +187,7 @@ def make_gateway(
     subject_fetcher: Any = None,
     grants: Any = None,
     queue: Any = None,
+    jev: Any = None,
 ) -> Gateway:
     runs = runs_dir or tmp_path / "runs"
     settings = GatewaySettings(warrant_agent_client_secret=client_secret)
@@ -207,6 +208,7 @@ def make_gateway(
         subject_fetcher=subject_fetcher,
         grants=grants,
         queue=queue,
+        jev=jev,
     )
 
 

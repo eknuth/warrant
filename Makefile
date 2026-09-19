@@ -18,7 +18,7 @@ REPO_ROOT := $(shell bash scripts/repo_root.sh)
 WARRANT_RUNS_HOST_DIR ?= $(REPO_ROOT)/runs
 export WARRANT_RUNS_HOST_DIR
 
-.PHONY: install lint test up down reset gitea-mcp postgres-mcp mail-mcp dsh-profile worktree worktree-clean evals smoke qwen-smoke matrix throughput queue
+.PHONY: install lint test up down reset gitea-mcp postgres-mcp mail-mcp dsh-profile worktree worktree-clean evals smoke qwen-smoke jev-smoke matrix throughput queue
 
 # Create or refresh .venv from pyproject.toml and uv.lock. `uv sync` is also
 # what a clean clone runs first; there is no other install step.
@@ -128,6 +128,14 @@ smoke:
 qwen-smoke:
 	uv run python -m evals.run --scenarios 01,08,09,10 --ablations full --repeats 1 \
 		--models qwen-local:qwen3.8:27b@off --column smoke $(ARGS)
+
+# W24. The two Jev columns' smoke: the typed provenance classifier and the
+# model-staffed decision on four scenarios, one repeat. It needs JEV_API_KEY in
+# `.env`; the column is resumable, so the same command continues an interrupted
+# run and `ARGS="--force"` reruns a graded cell.
+jev-smoke:
+	uv run python -m evals.run --scenarios 01,08,09,10 --ablations jev,jev-only --repeats 1 \
+		--column w24-smoke $(ARGS)
 
 # W22. The full second-family column: every scenario, every ablation, three
 # repeats, through the local endpoint. Run it long. A cell that already holds a

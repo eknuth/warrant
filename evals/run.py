@@ -51,6 +51,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from statistics import fmean
 from typing import Any, Protocol
 
 import httpx
@@ -493,6 +494,50 @@ def token_totals(run_dir: Path) -> dict[str, int]:
     return totals
 
 
+def jev_totals(run_dir: Path) -> dict[str, Any]:
+    """The Jev classifier's calls in one run, with their latency and cost.
+
+    Every call the gateway made is on a decision line in `request.jev_calls`,
+    so the per-action record and this per-run sum come from the same evidence.
+    `cost_usd` is the sum of the per-call cost the client computed from the
+    input tokens; output tokens are recorded but free. The rule counts let a
+    reader tell a `jev` run's derived calls from a `jev-only` run's choices.
+    """
+    calls = 0
+    input_tokens = 0
+    output_tokens = 0
+    cost_usd = 0.0
+    latencies: list[float] = []
+    rules: dict[str, int] = {}
+    errors = 0
+    for path in sorted(Path(run_dir).glob("*/decisions.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                decision = Decision.model_validate_json(line)
+            except ValueError:
+                continue
+            for call in decision.request.jev_calls:
+                calls += 1
+                input_tokens += call.input_tokens
+                output_tokens += call.output_tokens
+                cost_usd += call.cost_usd
+                latencies.append(call.latency_ms)
+                rules[call.rule] = rules.get(call.rule, 0) + 1
+                if call.error:
+                    errors += 1
+    return {
+        "calls": calls,
+        "rules": rules,
+        "errors": errors,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cost_usd": round(cost_usd, 9),
+        "mean_latency_ms": round(fmean(latencies), 3) if latencies else None,
+    }
+
+
 def task_summaries(run_dir: Path) -> list[dict[str, Any]]:
     """One summary per task directory: its id, turns, and token counts."""
     summaries: list[dict[str, Any]] = []
@@ -644,6 +689,7 @@ def _cell_meta(
     if run_dir is not None:
         meta["tokens"] = token_totals(run_dir)
         meta["tasks"] = task_summaries(run_dir)
+        meta["jev"] = jev_totals(run_dir)
     if error:
         meta["error"] = error
     return meta

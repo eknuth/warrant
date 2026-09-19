@@ -53,6 +53,13 @@ class CellRecord:
     wall_s: float | None
     input_tokens: int
     output_tokens: int
+    # W24: the classifier's calls in this cell, read from `meta.json`. Zero for
+    # every cell whose ablation does not ask Jev.
+    jev_calls: int = 0
+    jev_input_tokens: int = 0
+    jev_output_tokens: int = 0
+    jev_cost_usd: float = 0.0
+    jev_mean_latency_ms: float | None = None
 
     @property
     def total_tokens(self) -> int:
@@ -133,6 +140,8 @@ def read_cells(results_dir: Path = RESULTS_DIR) -> list[CellRecord]:
         from_tasks = _run_tokens(path.parent)
         if from_tasks is not None:
             input_tokens, output_tokens = from_tasks
+        jev = data.get("jev")
+        jev = jev if isinstance(jev, dict) else {}
         cells.append(
             CellRecord(
                 ablation=str(data.get("ablation") or ""),
@@ -143,6 +152,11 @@ def read_cells(results_dir: Path = RESULTS_DIR) -> list[CellRecord]:
                 wall_s=_number(data.get("elapsed_s")),
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                jev_calls=_token_count(jev.get("calls")),
+                jev_input_tokens=_token_count(jev.get("input_tokens")),
+                jev_output_tokens=_token_count(jev.get("output_tokens")),
+                jev_cost_usd=_number(jev.get("cost_usd")) or 0.0,
+                jev_mean_latency_ms=_number(jev.get("mean_latency_ms")),
             )
         )
     cells.sort(key=lambda item: (item.ablation, item.model, item.scenario_id, item.repeat))
@@ -236,6 +250,21 @@ def render(
             f"{result.estimate_s:,.0f} s ({_hours(result.estimate_s)})."
         )
     lines.append("")
+    jev_cells = [cell for cell in cells if cell.jev_calls]
+    if jev_cells:
+        calls = sum(cell.jev_calls for cell in jev_cells)
+        latencies = [
+            cell.jev_mean_latency_ms for cell in jev_cells if cell.jev_mean_latency_ms is not None
+        ]
+        mean_latency = f"{fmean(latencies):,.1f} ms" if latencies else "n/a"
+        lines.append(
+            f"Jev: {calls:,} call(s) across {len(jev_cells)} cell(s), "
+            f"{sum(cell.jev_input_tokens for cell in jev_cells):,} input tokens and "
+            f"{sum(cell.jev_output_tokens for cell in jev_cells):,} output tokens, "
+            f"${sum(cell.jev_cost_usd for cell in jev_cells):,.6f} input cost, "
+            f"mean cell latency {mean_latency}."
+        )
+        lines.append("")
     return "\n".join(lines)
 
 

@@ -83,6 +83,7 @@ from warrant.config import RUNS_DIR, Mode, Taint, bad_task_id, task_dir
 from warrant.engine import PolicyEngine
 from warrant.grants import SOURCE_ADJUDICATOR, Grant, GrantStore, grant_policy_id
 from warrant.graph import Graph
+from warrant.jev import JevClient
 from warrant.log import DecisionLog
 from warrant.models import (
     ActionKind,
@@ -403,6 +404,7 @@ class Gateway:
         subject_fetcher: SubjectFetcher | None = None,
         queue: Queue | None = None,
         grants: GrantStore | None = None,
+        jev: JevClient | None = None,
     ) -> None:
         self.settings = settings or GatewaySettings()
         self.graph = graph
@@ -431,6 +433,10 @@ class Gateway:
         self.subject_fetcher = subject_fetcher or fetch_subject
         self.queue = queue or Queue(self.runs_dir)
         self.grants = grants or GrantStore(self.runs_dir)
+        # Constructed always so a caller has one object to fake; it reads no key
+        # until a question is asked, so a process that never runs a Jev ablation
+        # never needs the credential.
+        self.jev = jev or JevClient()
         self._tools: dict[str, list[Tool]] = {}
         # The no-exchange ablation has no subject token, so the gateway reaches
         # the upstreams as itself. The client-credentials token is minted once
@@ -652,10 +658,11 @@ class Gateway:
             return self._refuse(name, f"unknown tool {name!r}", chain)
 
         provenance = self.ledger.get(chain.task_id, chain.act)
-        if self.taint is Taint.content:
-            # `TAINT=content` runs the content rule alone. The sources stay in the
-            # request so the decision line records what was read; the flag is
-            # what keeps `provenance.hasExternal` from firing the task rule.
+        if self.taint in (Taint.content, Taint.jev):
+            # `TAINT=content` runs the content rule alone, and `TAINT=jev` runs
+            # the Jev rule alone. The sources stay in the request so the decision
+            # line records what was read; the flag is what keeps
+            # `provenance.hasExternal` from firing the task rule.
             provenance = provenance.model_copy(update={"task_taint": False})
         resource_name = extract_resource(row.resource_kind, arguments)
         # The resolved name, before redaction. The task's named target and the
@@ -697,8 +704,47 @@ class Gateway:
         request.target_outside_task = context["target_outside_task"]
         request.overlap_details = context["overlap_details"]
 
+        # An unknown agent is refused before the classifier is asked, so a call
+        # the harness would not run never spends a Jev request.
         if self.graph.agent(chain.act) is None:
             return self._log_and_refuse(request, ["unknown agent"])
+
+        # W24. The two Jev ablations ask the classifier here, after the read set
+        # and the pending call are known and before the engine decides. The
+        # answer is recorded on the request, so the decision line carries the
+        # latency and token cost of every call. A failed call fails closed in
+        # `JevClient`, so a classifier that did not answer never allows a call.
+        if self.mode is Mode.jev_only:
+            agent_row = self.graph.agent(chain.act)
+            resource_row = self.graph.resource(request.resource)
+            owner_row = (
+                self.graph.human(agent_row.owner_human_id)
+                if agent_row is not None and agent_row.owner_human_id
+                else None
+            )
+            choice, call = await self.jev.disposition(
+                state=state,
+                request=request,
+                arguments=arguments,
+                resolved_resource=resolved,
+                agent_row=agent_row,
+                owner_row=owner_row,
+                resource_row=resource_row,
+            )
+            request.jev_choice = choice
+            request.jev_calls.append(call)
+        elif self.taint is Taint.jev and request.action_kind in (
+            ActionKind.write,
+            ActionKind.send,
+        ):
+            derived, call = await self.jev.derived(
+                state=state,
+                request=request,
+                arguments=arguments,
+                resolved_resource=resolved,
+            )
+            request.derived = derived
+            request.jev_calls.append(call)
 
         # A grant is checked before the engine. An approval answered this exact
         # tool and resource for this task, so the policy set is not consulted and

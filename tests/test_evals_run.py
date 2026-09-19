@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ from evals.run import (
     HealthError,
     RunnerError,
     dry_cell,
+    jev_totals,
     parse_models,
     parse_scenarios,
     regrade_column,
@@ -39,6 +41,7 @@ from evals.run import (
 )
 from gen.schema import load_scenario
 from warrant.config import Mode, chain_from_headers
+from warrant.models import ActionKind, AuthzRequest, Chain, Decision, JevCall, Provenance, Verdict
 
 REPO = Path(__file__).resolve().parents[1]
 PARKED_HOOK = REPO / ".dsh" / "hooks" / "block_parked_column.py"
@@ -131,6 +134,8 @@ def test_each_ablation_names_its_mode_and_taint() -> None:
         "full",
         "content",
     )
+    assert (ABLATIONS["jev"].mode, ABLATIONS["jev"].taint) == ("full", "jev")
+    assert (ABLATIONS["jev-only"].mode, ABLATIONS["jev-only"].taint) == ("jev-only", "both")
     assert ABLATIONS["no-provenance"].mode == "no-provenance"
     assert ABLATIONS["no-exchange"].mode == "no-exchange"
     assert ABLATIONS["prompt-only"].mode == "prompt-only"
@@ -254,6 +259,59 @@ def test_regrade_rescores_a_stored_cell_without_a_model(tmp_path: Path, monkeypa
 
 
 # -- the switch and the retry ----------------------------------------------
+
+
+def test_jev_totals_sum_the_calls_on_the_decision_lines(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run" / "task-1"
+    run_dir.mkdir(parents=True)
+    chain = Chain(
+        sub="h-alice",
+        act="triage-agent",
+        task_id="task-1",
+        token_exp=datetime(2030, 1, 1, tzinfo=UTC),
+    )
+    request = AuthzRequest(
+        chain=chain,
+        tool="gitea.create_issue_comment",
+        action_kind=ActionKind.write,
+        resource="repo-acme-widgets",
+        args_digest="sha256:args",
+        provenance=Provenance(task_id="task-1"),
+        ts=datetime.now(UTC),
+        jev_calls=[
+            JevCall(
+                rule="derived",
+                model="jev-1",
+                latency_ms=10.0,
+                input_tokens=100,
+                output_tokens=5,
+                cost_usd=0.0000042,
+                probability=0.9,
+            ),
+            JevCall(
+                rule="derived",
+                model="jev-1",
+                latency_ms=30.0,
+                input_tokens=200,
+                output_tokens=5,
+                cost_usd=0.0000084,
+                probability=0.1,
+                error="boom",
+            ),
+        ],
+    )
+    decision = Decision(verdict=Verdict.deny, request=request, mode="jev")
+    (run_dir / "decisions.jsonl").write_text(decision.model_dump_json() + "\n", encoding="utf-8")
+
+    totals = jev_totals(tmp_path / "run")
+
+    assert totals["calls"] == 2
+    assert totals["rules"] == {"derived": 2}
+    assert totals["errors"] == 1
+    assert totals["input_tokens"] == 300
+    assert totals["output_tokens"] == 10
+    assert totals["cost_usd"] == pytest.approx(0.0000126)
+    assert totals["mean_latency_ms"] == pytest.approx(20.0)
 
 
 class FakeSwitcher:

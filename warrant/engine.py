@@ -90,7 +90,7 @@ from warrant import config
 from warrant.config import PROMPT_ONLY_POLICY_ID, Mode
 from warrant.graph import Graph, live_justification
 from warrant.log import DecisionLog
-from warrant.models import AuthzRequest, Decision, Verdict
+from warrant.models import ActionKind, AuthzRequest, Decision, Verdict
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_POLICIES_DIR = PACKAGE_ROOT / "policies"
@@ -98,6 +98,13 @@ DEFAULT_SCHEMA_PATH = DEFAULT_POLICIES_DIR / "schema.cedarschema.json"
 
 # The synthetic action the second pass evaluates. See the module docstring.
 ESCALATE_ACTION = "escalate"
+
+# W24. The engine-level rule the Jev provenance field drives, and the policy id
+# the `jev-only` engine stamps on its verdict. Neither is a Cedar policy: the
+# derived field is a classifier's answer fed to a deterministic rule, and the
+# `jev-only` engine has no policy set at all.
+DERIVED_POLICY_ID = "derived-write"
+JEV_ONLY_POLICY_PREFIX = "jev-only:"
 
 # The action kinds, which are also the membership groups the tool actions
 # belong to. A rule about a kind reads `action in Action::"write"`.
@@ -430,6 +437,23 @@ class CedarEngine:
                 mode=self._mode.value,
             )
 
+        # W24, the Jev provenance rule. `derived` is the classifier's answer to
+        # "does this write derive from untrusted read content", computed by the
+        # gateway before this call. It is a policy input, not the decision: this
+        # deterministic rule reads the boolean, and only the `jev` ablation ever
+        # sets it true. It refuses the write outright rather than escalating,
+        # because text that first appeared outside the org is evidence rather
+        # than a question, the same shape `tainted-content` has. Reads are not
+        # candidates, so a read is never refused here.
+        if req.derived and req.action_kind in (ActionKind.write, ActionKind.send):
+            return Decision(
+                verdict=Verdict.deny,
+                policy_ids=[DERIVED_POLICY_ID],
+                reasons=["the write derives from content read from an untrusted source"],
+                request=req,
+                mode=self._mode.value,
+            )
+
         # The tool is the action: a rule can name one tool outright, and a rule
         # about a kind reads `action in Action::"write"`. The kind is still in
         # `context.actionKind` for the log and for a policy that wants it.
@@ -737,6 +761,97 @@ class CedarEngine:
                     "entitledTools": tools,
                 },
             )
+
+
+class JevOnlyEngine:
+    """W24's `jev-only` adapter: the Jev choice is the verdict, Cedar never runs.
+
+    The gateway fills `request.jev_choice` with the classifier's answer before
+    it calls this engine, because the choice is an `await` and the `PolicyEngine`
+    surface is synchronous. The mapping is the whole engine: `allow`, `deny`, and
+    `escalate` become the matching verdict, and anything else is a deny, which is
+    the fail-closed answer for a classifier that could not be understood.
+
+    There is no policy set and no `graph` here on purpose. The point of the
+    column is to put a model with full context at the enforcement point and see
+    what the deterministic rules were worth, so the engine must not add a second
+    deterministic check beside the model.
+    """
+
+    def __init__(
+        self,
+        *,
+        mode: Mode | None = None,
+        decision_log: DecisionLog | None = None,
+    ) -> None:
+        self._mode = Mode(mode) if mode is not None else config.current_mode()
+        self._log = decision_log if decision_log is not None else DecisionLog()
+
+    @property
+    def decision_log(self) -> DecisionLog:
+        """The log this engine appends to, for a caller that writes beside it."""
+        return self._log
+
+    def evaluate(self, req: AuthzRequest) -> Decision:
+        """Map the classifier's choice to a verdict."""
+        choice = req.jev_choice
+        if choice == Verdict.allow.value:
+            verdict = Verdict.allow
+            reasons = ["jev-only answered allow"]
+        elif choice == Verdict.deny.value:
+            verdict = Verdict.deny
+            reasons = ["jev-only answered deny"]
+        elif choice == Verdict.escalate.value:
+            verdict = Verdict.escalate
+            reasons = ["jev-only answered escalate"]
+        else:
+            # No classifier answer reached the engine. Fail closed rather than
+            # let a call through that nothing decided.
+            verdict = Verdict.deny
+            reasons = ["jev-only returned no decision; failing closed"]
+        return Decision(
+            verdict=verdict,
+            policy_ids=[f"{JEV_ONLY_POLICY_PREFIX}{choice or 'no-answer'}"],
+            reasons=reasons,
+            request=req,
+            mode=self._mode.value,
+            chain_source=req.chain.source,
+        )
+
+    def decide(self, req: AuthzRequest) -> Decision:
+        """Evaluate the request and append the decision to the log."""
+        decision = self.evaluate(req)
+        self._log.append(decision)
+        return decision
+
+    def explain(self, req: AuthzRequest) -> str:
+        """Render the classifier's answer and the verdict it produced."""
+        decision = self.evaluate(req)
+        lines = [
+            f"mode: {self._mode.value}",
+            "engine: jev-only, no Cedar policy was evaluated",
+            (
+                f"chain: sub={req.chain.sub} act={req.chain.act} task={req.chain.task_id} "
+                f"scopes={req.chain.scopes} groups={req.chain.groups} "
+                f"token_exp={req.chain.token_exp.isoformat()}"
+            ),
+            (
+                f"call: tool={req.tool} action={req.action_kind.value} "
+                f"resource={req.resource} args_digest={req.args_digest} at={req.ts.isoformat()}"
+            ),
+            f"jev_choice: {req.jev_choice}",
+        ]
+        for call in req.jev_calls:
+            lines.append(
+                f"jev_call: rule={call.rule} model={call.model} latency_ms={call.latency_ms} "
+                f"input_tokens={call.input_tokens} output_tokens={call.output_tokens} "
+                f"choice={call.choice} confidence={call.confidence} error={call.error}"
+            )
+        lines.append(f"verdict: {decision.verdict.value}")
+        lines.append(f"policy_ids: {decision.policy_ids}")
+        lines.append("reasons:")
+        lines.extend(f"  - {reason}" for reason in decision.reasons)
+        return "\n".join(lines)
 
 
 def _matched(verb: str, outcome: _Outcome) -> list[str]:

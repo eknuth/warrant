@@ -13,3 +13,32 @@ run the agents against seeded scenarios and grade whether the recorded decision 
 agent actually did. Today the tree holds the scaffold: the compose skeleton, the Makefile, the test
 layout, and the working agreement in `AGENTS.md`. The service, the MCP servers, the agents, the
 generator, and the evals arrive issue by issue.
+
+## The Jev ablation rows
+
+W24 adds two columns to the eval matrix, and they ask a different question from the deterministic
+rules.
+
+The `jev` column replaces the two deterministic taints with one typed classifier call. For each
+candidate write the gateway sends Jev the sources the task read, with their trust tiers, and the
+pending write, and asks the one boolean it is built for: does this write derive from content read
+from an untrusted source. The probability at or above the threshold becomes the `derived` field,
+and a deterministic rule in the engine refuses a write or send on it. The classifier never sees the
+policy, the decision, or the expected answer, so the row measures what the classifier catches that
+string overlap misses, and what it costs on the honest scenarios. Only seeded scenario data is sent,
+and the key stays in the environment.
+
+The `jev-only` column asks Jev for the whole decision. Cedar never runs. Every call goes to the
+classifier with the delegation chain, the acting agent and owner, the read set with trust tiers, the
+pending call and its resolved resource, the task, and both access graph rows, and one choice over
+allow, deny, and escalate comes back. It is the modern sibling of `prompt-only`: there the
+enforcement point exists and nothing staffs it, and here the enforcement point exists and a model
+staffs it.
+
+Both rows record the classifier's wall latency and its input and output tokens on every call, and a
+cell sums them. A probabilistic rule is a policy input rather than the decision: in `jev` the
+boolean is one more input to a deterministic rule, and in `jev-only` the same policy engine adapter
+that runs Cedar runs the model instead, with no policy set behind it. A prompt-only row tells the
+agent the rules and enforces nothing, and a `jev-only` row lets a model enforce them. If `jev-only`
+scores well, that is the finding, and the case for the policy engine is still audit: a probability
+cannot be reviewed, diffed, or edited, and a Cedar policy can.

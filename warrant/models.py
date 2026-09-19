@@ -232,6 +232,33 @@ class Provenance(BaseModel):
         return any(source.author_tier is Tier.customer for source in self.sources)
 
 
+class JevCall(BaseModel):
+    """One typed call to the Jev classifier, with its latency and token cost.
+
+    W24's ablations ask Jev instead of reading the deterministic taint. The
+    answer is a probability or a choice, and this record is what the decision
+    line carries so a reader can see what the classifier cost per action: the
+    wall time the call added, the input tokens (the only billed side), and the
+    answer it gave. `cost_usd` is computed from the input tokens at the price
+    the issue records, so a run's dollar cost is read and never estimated.
+
+    The record is a claim about one call. `error` is set when the classifier
+    did not answer; the caller then fails closed, and the line says why.
+    """
+
+    rule: str
+    model: str = ""
+    latency_ms: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    probability: float | None = None
+    choice: str | None = None
+    confidence: float | None = None
+    probabilities: dict[str, float] = Field(default_factory=dict)
+    error: str = ""
+
+
 class AuthzRequest(BaseModel):
     """One proposed tool call, with everything needed to decide it.
 
@@ -269,6 +296,19 @@ class AuthzRequest(BaseModel):
     # every known secret value before it reaches the log, and a `secret` entry's
     # sample is the digest of the matched value rather than the value.
     overlap_details: list[dict[str, str]] = Field(default_factory=list)
+    # W24: the Jev provenance rule's answer for this call, beside the two
+    # deterministic taints. It is true when the classifier says the write
+    # derives from untrusted read content; the engine's derived rule refuses a
+    # write or send on it. False is the only value the other ablations see, so
+    # the deterministic policy set is unchanged by the field's presence.
+    derived: bool = False
+    # W24: the `jev-only` engine's answer, `allow`, `deny`, or `escalate`. The
+    # engine maps it to a verdict and does not consult Cedar. None means no
+    # classifier answer reached the engine, which fails closed.
+    jev_choice: str | None = None
+    # W24: one record per classifier call, with its latency and token cost. The
+    # runner sums these per cell; the raw evidence stays on the decision line.
+    jev_calls: list[JevCall] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _provenance_belongs_to_the_task(self) -> AuthzRequest:

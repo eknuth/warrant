@@ -20,7 +20,8 @@ import sys
 import uvicorn
 
 from warrant import graph as graph_module
-from warrant.engine import CedarEngine
+from warrant.config import Mode, current_mode
+from warrant.engine import CedarEngine, JevOnlyEngine
 from warrant.gateway import Gateway, GatewaySettings, build_app, load_servers
 from warrant.log import DecisionLog
 from warrant.provenance import Ledger
@@ -38,11 +39,16 @@ def serve(host: str | None = None, port: int | None = None) -> int:
     # fresh checkout can serve without a separate seeding step.
     graph = graph_module.load(settings.warrant_graph_seed, settings.warrant_graph_db)
     decision_log = DecisionLog(settings.warrant_runs_dir)
-    engine = CedarEngine(
-        policies_dir=settings.warrant_policies_dir,
-        graph=graph,
-        decision_log=decision_log,
-    )
+    # `jev-only` replaces the whole engine: Cedar never runs, and the Jev choice
+    # the gateway already asked for is the verdict.
+    if current_mode() is Mode.jev_only:
+        engine: CedarEngine | JevOnlyEngine = JevOnlyEngine(decision_log=decision_log)
+    else:
+        engine = CedarEngine(
+            policies_dir=settings.warrant_policies_dir,
+            graph=graph,
+            decision_log=decision_log,
+        )
     ledger = Ledger(settings.warrant_runs_dir)
     gateway = Gateway(
         graph=graph,

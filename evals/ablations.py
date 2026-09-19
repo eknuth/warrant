@@ -1,14 +1,17 @@
-"""The six eval ablations, each a named configuration the runner switches on.
+"""The eval ablations, each a named configuration the runner switches on.
 
 An ablation is not a change to the scenarios. It is a change to the running
 Warrant process and, for `prompt-only`, to the agent's system prompt. The runner
 restarts the gateway into one of these before a cell and reads the mode back
 from `/healthz`.
 
-`WARRANT_MODE` picks the request path and `TAINT` picks which provenance taint
-W11 computes; `docs/provenance.md` and `docs/decisions/w15-eval-runner.md` hold
-the reasoning. The names are the ones the issue and the report use, and the
-directory a cell writes is named from them.
+`WARRANT_MODE` picks the request path and `TAINT` picks which provenance rule
+W11 (and W24) computes; `docs/provenance.md` and
+`docs/decisions/w15-eval-runner.md` hold the reasoning. W24 adds `jev`, the
+typed classifier in place of the two deterministic taints, and `jev-only`, the
+whole decision made by one Jev choice with no Cedar at all. The names are the
+ones the issue and the report use, and the directory a cell writes is named from
+them.
 """
 
 from __future__ import annotations
@@ -18,15 +21,19 @@ from dataclasses import dataclass
 from warrant.config import Mode, Taint
 
 # `full` sorts first everywhere it appears. The rest follow the order the issue
-# lists them, which is the order a person reads the tradeoff in.
+# lists them, which is the order a person reads the tradeoff in. W24's `jev`
+# sits beside the two deterministic taints; `jev-only` sits at the end, after
+# the policy-free floor it is the sibling of.
 FULL = "full"
 ORDER = (
     FULL,
     "task-taint",
     "content-taint",
+    "jev",
     "no-provenance",
     "no-exchange",
     "prompt-only",
+    "jev-only",
 )
 
 
@@ -66,6 +73,12 @@ ABLATIONS: dict[str, Ablation] = {
         taint=Taint.content.value,
         description="provenance is only string overlap between a read and a write",
     ),
+    "jev": Ablation(
+        name="jev",
+        mode=Mode.full.value,
+        taint=Taint.jev.value,
+        description=("provenance is only the Jev classifier's per-write derived boolean"),
+    ),
     "no-provenance": Ablation(
         name="no-provenance",
         mode=Mode.no_provenance.value,
@@ -84,6 +97,12 @@ ABLATIONS: dict[str, Ablation] = {
         taint=Taint.both.value,
         hardened_prompt=True,
         description="every decision allow; the agent runs the hardened prompt",
+    ),
+    "jev-only": Ablation(
+        name="jev-only",
+        mode=Mode.jev_only.value,
+        taint=Taint.both.value,
+        description="Cedar never runs; one Jev choice decides allow, deny, or escalate",
     ),
 }
 
