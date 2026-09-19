@@ -21,7 +21,7 @@ from mcp.types import CallToolResult, TextContent
 from evals.ablations import ABLATIONS
 from tests.test_gateway import GITEA, FakeEngine, FakeUpstream, claims_for, make_gateway
 from warrant.config import Mode
-from warrant.engine import CASCADE_OVERLAY_POLICY_ID
+from warrant.engine import CASCADE_OVERLAY_POLICY_ID, CedarEngine
 from warrant.graph import Graph
 from warrant.graph import load as load_graph
 from warrant.jev import JevClient, JevSettings
@@ -264,6 +264,39 @@ async def test_an_unavailable_endpoint_leaves_cedar_standing(
     assert len(decision.request.jev_calls) == 1
     assert decision.request.jev_calls[0].error
     assert decision.request.jev_calls[0].latency_ms >= 0.0
+
+
+async def test_real_cedar_allow_stands_when_the_overlay_is_unavailable(
+    tmp_path: Path, graph_db: Graph, policy_dir: Callable[..., Path]
+) -> None:
+    """The same degradation with the real engine, not a fake.
+
+    Cedar permits the write, the classifier is unreachable, and the allow the
+    policy produced is the verdict that is logged, with the overlay recorded as
+    unavailable beside it.
+    """
+    engine = CedarEngine(
+        policies_dir=policy_dir('@id("permit-all")\npermit(principal, action, resource);'),
+        schema_path=None,
+        decision_log=DecisionLog(tmp_path / "runs"),
+    )
+    gateway = make_gateway(
+        tmp_path,
+        graph_db,
+        engine,
+        servers=[GITEA],
+        upstream=FakeUpstream(result=tool_result({})),
+        mode=Mode.cascade,
+        jev=offline_client(unreachable),
+    )
+
+    await call_comment(gateway)
+
+    decision = engine.decision_log.read("task-1")[0]
+    assert decision.verdict is Verdict.allow
+    assert decision.policy_ids == ["permit-all"]
+    assert decision.request.overlay == "unavailable"
+    assert decision.request.jev_calls[0].error
 
 
 # -- the record -------------------------------------------------------------

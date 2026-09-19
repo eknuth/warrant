@@ -56,10 +56,10 @@ The ordering is the security property. A model may subtract permission and may n
 deny still has a rule behind it and the probability is evidence beside that rule rather than a
 substitute for one. Every allow still passed the policy, so a prompt that convinces Jev to say allow
 buys an attacker nothing. Running Jev first loses that: its allow would be the verdict, its deny
-would be final, and a probabilistic answer would stand where a policy is supposed to. The reverse
-arrangement is rejected on audit grounds, and the cost is that the classifier's latency is paid only
-on the allow path, which is the one the request path would run anyway. An endpoint that does not
-answer leaves Cedar's answer standing and says `overlay: unavailable`; a timeout is not a deny.
+would be final, and a probabilistic answer would stand where a policy is supposed to. That is why
+the reverse arrangement is rejected. The ordering also means the classifier's latency is paid only
+on the allow path, and a call Cedar denies costs no network round trip at all. An endpoint that does
+not answer leaves Cedar's answer standing and says `overlay: unavailable`; a timeout is not a deny.
 
 The column checks writes, because a write is where content leaves the task. A read that an injection
 asked for is not a candidate, so the cascade does not close the read-side gap W24 found, and the
