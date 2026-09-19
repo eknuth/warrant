@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import random
+import re
 import string
 import subprocess
 import sys
@@ -25,6 +26,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 HOOKS = REPO / ".dsh" / "hooks"
+PROFILE = REPO / "infra" / "dsh" / "core.patch.yml"
 
 SECRETS = HOOKS / "block_secrets.py"
 DOUBLE = HOOKS / "block_double_emit.py"
@@ -1033,8 +1035,32 @@ def test_hook_config_fails_closed_when_the_script_is_missing(tmp_path: Path) -> 
 
 
 def test_hook_config_sets_a_timeout_inside_the_bridge_cap() -> None:
+    """Every per-hook timeout fits the bridge default the profile installs.
+
+    The cap is read from `infra/dsh/core.patch.yml` rather than written here, so
+    a longer suite raises one number in the profile and the hooks that name a
+    per-hook timeout are checked against the new value. The old hardcoded 90
+    seconds was the cap the merge guard outgrew: the suite now runs past it, so
+    the profile raises the default and `.dsh/hooks.json` raises the guard with
+    it.
+    """
+    cap_s = bridge_timeout_ms() // 1000
     config = load_hook_config()
     hooks = [h for groups in config.values() for group in groups for h in group["hooks"]]
 
+    assert cap_s > 0
     for hook in hooks:
-        assert 0 < int(hook["timeout"]) <= 90
+        assert 0 < int(hook["timeout"]) <= cap_s
+
+
+def bridge_timeout_ms() -> int:
+    """The bridge's default hook timeout in milliseconds, from the profile.
+
+    A regex rather than a YAML load: the profile carries a `!!js` tag the
+    standard loader refuses, and the one scalar this needs is on a line of its
+    own.
+    """
+    match = re.search(r"^\s*defaultTimeoutMs:\s*(\d+)", PROFILE.read_text(encoding="utf-8"), re.M)
+    if match is None:
+        raise AssertionError(f"{PROFILE} names no defaultTimeoutMs")
+    return int(match.group(1))

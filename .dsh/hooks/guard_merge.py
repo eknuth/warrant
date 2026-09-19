@@ -38,9 +38,15 @@ from pathlib import Path
 
 SEPARATORS = set("&|;\n()")
 GH_FLAG_WITH_VALUE = {"-R", "--repo", "--hostname"}
-# The bridge caps a hook's timeout at 90 seconds, so each command gets less.
+# The bridge's default is `defaultTimeoutMs` in `infra/dsh/core.patch.yml`, and
+# `.dsh/hooks.json` names a matching per-hook timeout. Both were 90 seconds and
+# the test suite grew past that: the make budget is the number that has to cover
+# the whole suite, so raising only this one would still let the bridge kill the
+# hook after `make test` finished and before `make lint` ran. The two checks run
+# one after the other inside one hook, so the budget has to hold both, with room
+# for a cold `uv` and a slower machine.
 GIT_TIMEOUT_S = 10
-MAKE_TIMEOUT_S = 75
+MAKE_TIMEOUT_S = 300
 TAIL_LINES = 12
 # The Makefile the `test` and `lint` targets come from. The guard is the only
 # thing that runs a full suite before an action, so pointing it at a stand-in

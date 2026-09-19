@@ -73,6 +73,7 @@ def test_parse_mode_defaults_to_full_and_rejects_typos() -> None:
     assert config.parse_mode("") is Mode.full
     assert config.parse_mode("no-provenance") is Mode.no_provenance
     assert config.parse_mode("jev-only") is Mode.jev_only
+    assert config.parse_mode("cascade") is Mode.cascade
     with pytest.raises(ValueError, match="WARRANT_MODE"):
         config.parse_mode("no-provenence")
 

@@ -8,12 +8,13 @@ What it enforces: a parked column goes to
 `evals/results/<park>/<ablation>/<model>/<scenario>/<n>`, never to a layout the
 report reads as live. The report is pointed at one column directory and globs
 `<ablation>/<model>/<scenario>/<repeat>/grade.json`; a column renamed to a name
-that is not one of the six ablations, with cells at the same depth, is the shape
-the report would read as a live ablation named after the parking directory.
+that is not one of the runner's ablations, with cells at the same depth, is the
+shape the report would read as a live ablation named after the parking
+directory.
 
 The config and provider names mirror `evals.ablations.ABLATION_NAMES` and the
-runner's model routes; `tests/test_evals_ablations.py` keeps the ablation list
-equal to this one.
+runner's model routes; `tests/test_evals_run.py` keeps the ablation list equal
+to this one.
 
 Blocks only when the final layout leaves cells at three levels under
 `evals/results/` beneath a directory name that no runner writes. Simulates the
@@ -40,6 +41,7 @@ CONFIGS = (
     "task-taint",
     "content-taint",
     "jev",
+    "cascade",
     "no-provenance",
     "no-exchange",
     "prompt-only",

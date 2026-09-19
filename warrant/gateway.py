@@ -80,7 +80,7 @@ from warrant.adjudicator import (
     record_verdict,
 )
 from warrant.config import RUNS_DIR, Mode, Taint, bad_task_id, task_dir
-from warrant.engine import PolicyEngine
+from warrant.engine import CASCADE_OVERLAY_POLICY_ID, PolicyEngine
 from warrant.grants import SOURCE_ADJUDICATOR, Grant, GrantStore, grant_policy_id
 from warrant.graph import Graph
 from warrant.jev import JevClient
@@ -132,6 +132,15 @@ ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
 # reads it as a block rather than a failure: the call did not run, and a person
 # still has to answer it.
 PENDING_TEXT = "escalated: pending human review"
+
+# W27. The cascade overlay's outcomes, written to `AuthzRequest.overlay`. The
+# overlay runs only on a write or send Cedar allowed: `denied` when Jev subtracts
+# the allow, `cleared` when Jev leaves it, and `unavailable` when the classifier
+# could not answer and the Cedar allow stands. An unset value means the overlay
+# did not run at all.
+OVERLAY_DENIED = "denied"
+OVERLAY_CLEARED = "cleared"
+OVERLAY_UNAVAILABLE = "unavailable"
 
 
 class GatewayError(RuntimeError):
@@ -377,6 +386,16 @@ class StreamableHTTPUpstream:
 def describe_failure(error: Exception) -> str:
     """One line naming what an upstream failure was, for a log or a reason."""
     return f"{type(error).__name__}: {error}"
+
+
+def _probability_text(probability: float | None) -> str:
+    """The Jev probability for a reason line, or a phrase when there is none.
+
+    The derived answer normally carries a probability, but a call built outside
+    `JevClient` need not, and a reason string should not raise out of the
+    request path.
+    """
+    return f"{probability:.2f}" if probability is not None else "no probability"
 
 
 class Gateway:
@@ -714,6 +733,11 @@ class Gateway:
         # answer is recorded on the request, so the decision line carries the
         # latency and token cost of every call. A failed call fails closed in
         # `JevClient`, so a classifier that did not answer never allows a call.
+        #
+        # W27's cascade is excluded from the `taint=jev` arm on purpose. The
+        # cascade ordering is Cedar first and Jev only on an allowed write, so
+        # even a `WARRANT_MODE=cascade TAINT=jev` combination must not ask before
+        # the engine and let a deny reach the network.
         if self.mode is Mode.jev_only:
             agent_row = self.graph.agent(chain.act)
             resource_row = self.graph.resource(request.resource)
@@ -733,9 +757,10 @@ class Gateway:
             )
             request.jev_choice = choice
             request.jev_calls.append(call)
-        elif self.taint is Taint.jev and request.action_kind in (
-            ActionKind.write,
-            ActionKind.send,
+        elif (
+            self.mode is not Mode.cascade
+            and self.taint is Taint.jev
+            and request.action_kind in (ActionKind.write, ActionKind.send)
         ):
             derived, call = await self.jev.derived(
                 state=state,
@@ -757,6 +782,19 @@ class Gateway:
             self._append_decision(decision)
         else:
             decision = self.engine.evaluate(request)
+            # W27. The cascade overlay runs on the Cedar allow path only: a
+            # write or send Cedar already allowed is the one call Jev may
+            # subtract. A deny or an escalate never reaches the classifier, and
+            # no branch here turns a Jev answer into an allow, so the model can
+            # only take a permission away.
+            if self.mode is Mode.cascade:
+                await self._cascade_overlay(
+                    request,
+                    decision,
+                    state=state,
+                    arguments=arguments,
+                    resolved=resolved,
+                )
             if decision.verdict is Verdict.escalate:
                 adjudication = await self._review(request, decision)
                 decision.adjudication = adjudication.verdict
@@ -948,6 +986,67 @@ class Gateway:
         )
         self.decision_log.append(decision)
         return self._denied(request.tool, decision)
+
+    # W27: the cascade overlay ----------------------------------------------
+
+    async def _cascade_overlay(
+        self,
+        request: AuthzRequest,
+        decision: Decision,
+        *,
+        state: TaskState,
+        arguments: Mapping[str, Any],
+        resolved: str,
+    ) -> None:
+        """Ask Jev about a write Cedar allowed, and let a yes subtract the allow.
+
+        This mutates `decision` in place and is the whole ordering of the
+        `cascade` column. The deterministic engine has already run, and only an
+        allow reaches this method, so a read is never a candidate and a Jev
+        allow can never rescue a Cedar deny or an escalation. A classifier that
+        cannot answer leaves the Cedar decision exactly as it stood and records
+        `overlay: unavailable`: an unreachable endpoint is not a deny. The
+        method returns None and the caller logs the decision, so the line is
+        written once whichever way the overlay went.
+        """
+        if decision.verdict is not Verdict.allow:
+            return
+        if request.action_kind not in (ActionKind.write, ActionKind.send):
+            return
+        derived, call = await self.jev.derived(
+            state=state,
+            request=request,
+            arguments=arguments,
+            resolved_resource=resolved,
+        )
+        request.jev_calls.append(call)
+        if call.error:
+            # The classifier did not answer, so there is nothing to subtract
+            # and `derived` stays false: the error is a failure, not a claim
+            # that the write derives from anything. Cedar's allow stands and the
+            # line says the overlay was unavailable rather than leaving the
+            # reader to infer a deny from silence.
+            request.overlay = OVERLAY_UNAVAILABLE
+            decision.reasons = [*decision.reasons, f"overlay: unavailable: {call.error}"]
+            return
+        request.derived = derived
+        if derived:
+            request.overlay = OVERLAY_DENIED
+            decision.verdict = Verdict.deny
+            decision.policy_ids = [*decision.policy_ids, CASCADE_OVERLAY_POLICY_ID]
+            decision.reasons = [
+                *decision.reasons,
+                (
+                    "overlay: Jev answered derived at probability "
+                    f"{_probability_text(call.probability)}; the Cedar allow is subtracted"
+                ),
+            ]
+            return
+        request.overlay = OVERLAY_CLEARED
+        decision.reasons = [
+            *decision.reasons,
+            f"overlay: Jev cleared the write at probability {_probability_text(call.probability)}",
+        ]
 
     # Escalation: the adjudicator, the queue, and grants ---------------------
 

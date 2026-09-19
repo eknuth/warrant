@@ -9,9 +9,11 @@ from `/healthz`.
 W11 (and W24) computes; `docs/provenance.md` and
 `docs/decisions/w15-eval-runner.md` hold the reasoning. W24 adds `jev`, the
 typed classifier in place of the two deterministic taints, and `jev-only`, the
-whole decision made by one Jev choice with no Cedar at all. The names are the
-ones the issue and the report use, and the directory a cell writes is named from
-them.
+whole decision made by one Jev choice with no Cedar at all. W27 adds `cascade`,
+the Cedar engine as in `full` plus the same derived-write question asked only
+about a write or send Cedar already allowed, where a Jev yes subtracts the
+allow. The names are the ones the issue and the report use, and the directory a
+cell writes is named from them.
 """
 
 from __future__ import annotations
@@ -22,14 +24,16 @@ from warrant.config import Mode, Taint
 
 # `full` sorts first everywhere it appears. The rest follow the order the issue
 # lists them, which is the order a person reads the tradeoff in. W24's `jev`
-# sits beside the two deterministic taints; `jev-only` sits at the end, after
-# the policy-free floor it is the sibling of.
+# sits beside the two deterministic taints; W27's `cascade` sits beside `jev` as
+# the same classifier behind Cedar rather than in place of it; `jev-only` sits at
+# the end, after the policy-free floor it is the sibling of.
 FULL = "full"
 ORDER = (
     FULL,
     "task-taint",
     "content-taint",
     "jev",
+    "cascade",
     "no-provenance",
     "no-exchange",
     "prompt-only",
@@ -78,6 +82,12 @@ ABLATIONS: dict[str, Ablation] = {
         mode=Mode.full.value,
         taint=Taint.jev.value,
         description=("provenance is only the Jev classifier's per-write derived boolean"),
+    ),
+    "cascade": Ablation(
+        name="cascade",
+        mode=Mode.cascade.value,
+        taint=Taint.both.value,
+        description=("Cedar first, then Jev on an allowed write; a Jev yes subtracts the allow"),
     ),
     "no-provenance": Ablation(
         name="no-provenance",

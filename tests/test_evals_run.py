@@ -135,6 +135,7 @@ def test_each_ablation_names_its_mode_and_taint() -> None:
         "content",
     )
     assert (ABLATIONS["jev"].mode, ABLATIONS["jev"].taint) == ("full", "jev")
+    assert (ABLATIONS["cascade"].mode, ABLATIONS["cascade"].taint) == ("cascade", "both")
     assert (ABLATIONS["jev-only"].mode, ABLATIONS["jev-only"].taint) == ("jev-only", "both")
     assert ABLATIONS["no-provenance"].mode == "no-provenance"
     assert ABLATIONS["no-exchange"].mode == "no-exchange"

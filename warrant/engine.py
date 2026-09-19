@@ -106,6 +106,12 @@ ESCALATE_ACTION = "escalate"
 DERIVED_POLICY_ID = "derived-write"
 JEV_ONLY_POLICY_PREFIX = "jev-only:"
 
+# W27. The policy id the cascade overlay stamps when a Jev answer subtracts a
+# Cedar allow. It is separate from `DERIVED_POLICY_ID` so a decision line says
+# which arrangement refused the write: the engine rule the `jev` column runs, or
+# the post-allow overlay the `cascade` column runs.
+CASCADE_OVERLAY_POLICY_ID = "overlay:derived-write"
+
 # The action kinds, which are also the membership groups the tool actions
 # belong to. A rule about a kind reads `action in Action::"write"`.
 ACTION_KINDS = ("read", "write", "send")
