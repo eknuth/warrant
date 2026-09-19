@@ -13,8 +13,8 @@ shape the report would read as a live ablation named after the parking
 directory.
 
 The config and provider names mirror `evals.ablations.ABLATION_NAMES` and the
-runner's model routes; `tests/test_evals_ablations.py` keeps the ablation list
-equal to this one.
+runner's model routes; `tests/test_evals_run.py` keeps the ablation list equal
+to this one.
 
 Blocks only when the final layout leaves cells at three levels under
 `evals/results/` beneath a directory name that no runner writes. Simulates the
