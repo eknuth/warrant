@@ -76,6 +76,7 @@ from gen.schema import (
     shipped_human_ids,
 )
 from gen.seed import SeedError, seed
+from warrant.adjudicator import ADJUDICATOR_DEEPSEEK, ADJUDICATOR_KINDS
 from warrant.graph import Graph
 from warrant.models import ActionKind, AuthzRequest, Chain, Decision, Provenance, Verdict
 
@@ -88,6 +89,11 @@ RESULTS_DIR = Path(__file__).resolve().parent / "results"
 # second family through the same route table; the default stays the cloud model
 # so a bare `--column` run is unchanged.
 DEFAULT_MODEL = "deepseek:deepseek-flash@off"
+
+# W26. The adjudicator a run selects. It is written into the compose override
+# the same way the ablation is, so two columns on the same escalations differ
+# only in which adjudicator answered.
+DEFAULT_ADJUDICATOR = ADJUDICATOR_DEEPSEEK
 
 # The gateway's published health endpoint. The runner polls it after a restart
 # and records the mode and taint the process reports.
@@ -121,13 +127,19 @@ class HealthError(RunnerError):
 
 @dataclass(frozen=True)
 class Cell:
-    """One graded run: an ablation, a model, a scenario, and a repeat."""
+    """One graded run: an ablation, a model, a scenario, and a repeat.
+
+    `adjudicator` is W26's per-run selection. It is not part of the directory
+    layout because two adjudicators are compared in two columns; it is recorded
+    in the metadata so a run's records say which adjudicator answered.
+    """
 
     column: str
     ablation: Ablation
     model: str
     scenario_id: str
     repeat: int
+    adjudicator: str = "deepseek"
 
     def relative(self, model_dir: str | None = None) -> Path:
         return (
@@ -183,6 +195,20 @@ def parse_models(value: str | None) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
+def parse_adjudicator(value: str | None) -> str:
+    """The adjudicator one `--adjudicator` value names, or an error.
+
+    The names are the ones `warrant.adjudicator` builds, so the runner cannot
+    ask for an adjudicator the gateway does not have.
+    """
+    if value is None or not value.strip():
+        return DEFAULT_ADJUDICATOR
+    name = value.strip().lower()
+    if name not in ADJUDICATOR_KINDS:
+        raise RunnerError(f"unknown adjudicator {value!r}; have: {', '.join(ADJUDICATOR_KINDS)}")
+    return name
+
+
 def validate_column(name: str | None, *, dry_run: bool) -> str:
     """The column directory name, checked as one path component."""
     if name is None or not name.strip():
@@ -230,6 +256,7 @@ class ComposeSwitcher:
     compose_file: Path = field(default_factory=lambda: REPO_ROOT / "compose.yml")
     health_url: str = HEALTH_URL
     timeout_s: float = HEALTH_TIMEOUT_S
+    adjudicator: str = DEFAULT_ADJUDICATOR
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
     client_factory: Callable[[], httpx.Client] = httpx.Client
 
@@ -248,6 +275,7 @@ class ComposeSwitcher:
                     "environment": {
                         "WARRANT_MODE": ablation.mode,
                         "TAINT": ablation.taint,
+                        "ADJUDICATOR": self.adjudicator,
                         "WARRANT_OIDC_ISSUER": "http://localhost:8080/realms/warrant",
                         "WARRANT_OIDC_DISCOVERY_ISSUER": "http://keycloak:8080/realms/warrant",
                         "WARRANT_RUNS_DIR": container_runs_dir,
@@ -318,7 +346,11 @@ class ComposeSwitcher:
         return self.wait_for(ablation)
 
     def wait_for(self, ablation: Ablation) -> Mapping[str, str]:
-        """Poll `/healthz` until the process reports the mode asked for."""
+        """Poll `/healthz` until the process reports the mode and adjudicator.
+
+        `adjudicator` is W26's per-run selection. A payload without the key is
+        an older gateway, which is accepted only for the default selection.
+        """
         deadline = time.monotonic() + self.timeout_s
         last = ""
         with self.client_factory() as client:
@@ -329,19 +361,34 @@ class ComposeSwitcher:
                     last = f"{type(error).__name__}: {error}"
                     time.sleep(1.0)
                     continue
-                if payload.get("mode") == ablation.mode and payload.get("taint") == ablation.taint:
+                reported = payload.get("adjudicator")
+                adjudicator_ok = (
+                    self.adjudicator == DEFAULT_ADJUDICATOR
+                    if reported is None
+                    else reported == self.adjudicator
+                )
+                if (
+                    payload.get("mode") == ablation.mode
+                    and payload.get("taint") == ablation.taint
+                    and adjudicator_ok
+                ):
                     logger.info(
-                        "confirmed ablation %s: mode=%s taint=%s",
+                        "confirmed ablation %s: mode=%s taint=%s adjudicator=%s",
                         ablation.name,
                         payload.get("mode"),
                         payload.get("taint"),
+                        reported,
                     )
                     return payload
-                last = f"reported mode={payload.get('mode')} taint={payload.get('taint')}"
+                last = (
+                    f"reported mode={payload.get('mode')} taint={payload.get('taint')} "
+                    f"adjudicator={reported}"
+                )
                 time.sleep(1.0)
         raise HealthError(
             f"the gateway never confirmed {ablation.name} "
-            f"(mode={ablation.mode} taint={ablation.taint}); last: {last}"
+            f"(mode={ablation.mode} taint={ablation.taint} adjudicator={self.adjudicator}); "
+            f"last: {last}"
         )
 
     def close(self) -> None:
@@ -497,11 +544,14 @@ def token_totals(run_dir: Path) -> dict[str, int]:
 def jev_totals(run_dir: Path) -> dict[str, Any]:
     """The Jev classifier's calls in one run, with their latency and cost.
 
-    Every call the gateway made is on a decision line in `request.jev_calls`,
-    so the per-action record and this per-run sum come from the same evidence.
-    `cost_usd` is the sum of the per-call cost the client computed from the
-    input tokens; output tokens are recorded but free. The rule counts let a
-    reader tell a `jev` run's derived calls from a `jev-only` run's choices.
+    A taint or overlay call is on the decision line in `request.jev_calls`, and
+    the adjudicator's own call is on the escalate line in
+    `decision.adjudicator_calls`. Both are summed here, and each appears once:
+    the adjudicator call is not on the shared request, so the grant allow line
+    does not repeat it. `cost_usd` is the sum of the per-call cost the client
+    computed from the input tokens; output tokens are recorded but free. The
+    rule counts let a reader tell a `jev` run's derived calls from a `jev-only`
+    run's choices or an escalation's adjudication.
     """
     calls = 0
     input_tokens = 0
@@ -518,7 +568,7 @@ def jev_totals(run_dir: Path) -> dict[str, Any]:
                 decision = Decision.model_validate_json(line)
             except ValueError:
                 continue
-            for call in decision.request.jev_calls:
+            for call in [*decision.request.jev_calls, *decision.adjudicator_calls]:
                 calls += 1
                 input_tokens += call.input_tokens
                 output_tokens += call.output_tokens
@@ -575,6 +625,7 @@ def write_run_metadata(run_dir: Path, cell: Cell, scenario: Scenario) -> Path:
                 "ablation": cell.ablation.name,
                 "warrant_mode": cell.ablation.mode,
                 "taint": cell.ablation.taint,
+                "adjudicator": cell.adjudicator,
                 "model": cell.model,
                 "repeat": cell.repeat,
             },
@@ -668,6 +719,7 @@ def _cell_meta(
         "ablation": cell.ablation.name,
         "ablation_mode": cell.ablation.mode,
         "ablation_taint": cell.ablation.taint,
+        "adjudicator": cell.adjudicator,
         "model": cell.model,
         "scenario_id": cell.scenario_id,
         "repeat": cell.repeat,
@@ -681,6 +733,7 @@ def _cell_meta(
     if confirmed:
         meta["confirmed_mode"] = confirmed.get("mode")
         meta["confirmed_taint"] = confirmed.get("taint")
+        meta["confirmed_adjudicator"] = confirmed.get("adjudicator")
     if seed_s is not None:
         meta["seed_s"] = round(seed_s, 3)
     if grade is not None:
@@ -855,12 +908,14 @@ def run_matrix(
     dry_run: bool = False,
     force: bool = False,
     build: bool = True,
+    adjudicator: str = DEFAULT_ADJUDICATOR,
 ) -> list[CellResult]:
     """Run every cell in order and return the results.
 
     The scenario seed resets the graph, so the runner seeds before the
     ablation switch. The switch recreates the gateway and waits for `/healthz`;
-    the mode and taint it reports are recorded in the cell's `meta.json`.
+    the mode, taint, and W26 adjudicator it reports are recorded in the cell's
+    `meta.json`.
 
     A cell that already holds a `grade.json` is skipped, so the same command
     continues an interrupted column. `force=True` reruns every cell instead.
@@ -872,7 +927,7 @@ def run_matrix(
     if not dry_run:
         resolved_providers = {model: provider_factory(model) for model in models}
         if switcher is None:
-            switcher = ComposeSwitcher(results_dir=results_dir)
+            switcher = ComposeSwitcher(results_dir=results_dir, adjudicator=adjudicator)
         if build:
             switcher.build()
 
@@ -887,6 +942,7 @@ def run_matrix(
                         model=model,
                         scenario_id=scenario_id,
                         repeat=repeat,
+                        adjudicator=adjudicator,
                     )
                     root = cell.root(results_dir)
                     if not force and (root / GRADE_NAME).exists():
@@ -966,6 +1022,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ablations", default="all", help="all, or full,no-provenance")
     parser.add_argument("--repeats", type=int, default=3, help="repeats per cell")
     parser.add_argument("--models", default=DEFAULT_MODEL, help="comma-separated model specs")
+    parser.add_argument(
+        "--adjudicator",
+        default=DEFAULT_ADJUDICATOR,
+        help=f"which adjudicator answers escalations: {', '.join(ADJUDICATOR_KINDS)}",
+    )
     parser.add_argument("--column", default=None, help="the results column to write")
     parser.add_argument(
         "--dry-run",
@@ -1006,6 +1067,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         scenarios = parse_scenarios(args.scenarios)
         ablations = parse_ablations(args.ablations)
         models = parse_models(args.models)
+        adjudicator = parse_adjudicator(args.adjudicator)
         column = validate_column(args.column, dry_run=args.dry_run)
     except (RunnerError, AblationError) as error:
         parser.error(str(error))
@@ -1024,6 +1086,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             dry_run=args.dry_run,
             force=args.force,
             build=not args.no_build,
+            adjudicator=adjudicator,
         )
     except (RunnerError, HealthError, GraderInconsistency) as error:
         print(f"error: {error}", file=sys.stderr)

@@ -14,20 +14,25 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from agents.providers import ToolSchema, ToolUse, Turn, Usage
 from evals.state import Adjudication as RecordedAdjudication
 from tests.test_gateway import GITEA, FakeEngine, FakeUpstream, claims_for, make_gateway
+from warrant import jev
 from warrant.adjudicator import (
+    ADJUDICATOR_JEV,
     VERDICT_TOOL_NAME,
     Adjudication,
+    AdjudicatorSettings,
     EscalationAdjudicator,
 )
 from warrant.gateway import Gateway, UpstreamServer
 from warrant.grants import SOURCE_ADJUDICATOR, GrantStore
 from warrant.graph import Graph
 from warrant.graph import load as load_graph
+from warrant.jev import JevClient, JevSettings
 from warrant.log import DecisionLog
 from warrant.models import (
     AdjudicationDecision,
@@ -538,3 +543,101 @@ async def test_a_queue_approval_allows_the_retry_until_the_box_expires(
     assert after.content[0].text == "escalated: pending human review"
     assert len(engine.requests) == requests_before + 1, "past the box the call escalates again"
     assert len(adjudicator.calls) == adjudications_before + 1
+
+
+# -- W26: the gateway selects the Jev adjudicator ---------------------------
+
+
+def jev_response() -> dict[str, Any]:
+    """One typed answer whose evidence and subject are the ticket's ledger ids."""
+    return {
+        "model": "jev-1.13.0",
+        "answers": {
+            jev.ADJUDICATE_QUESTION: {
+                "type": "choice",
+                "choice": "approve",
+                "confidence": 0.9,
+                "probabilities": {"approve": 0.9},
+            },
+            jev.TIME_BOX_QUESTION: {
+                "type": "score",
+                "score": 2.0,
+                "confidence": 0.8,
+                "legend": {str(i): text for i, text in enumerate(jev.TIME_BOX_CRITERIA)},
+                "probabilities": {"2": 1.0},
+            },
+            jev.EVIDENCE_QUESTION: {
+                "type": "choice",
+                "choice": "42",
+                "confidence": 0.9,
+                "probabilities": {"42": 0.9},
+            },
+            jev.SUBJECT_QUESTION: {
+                "type": "choice",
+                "choice": "42",
+                "confidence": 0.9,
+                "probabilities": {"42": 0.9},
+            },
+            jev.INCIDENT_QUESTION: {
+                "type": "choice",
+                "choice": "INC-42",
+                "confidence": 0.9,
+                "probabilities": {"INC-42": 0.9},
+            },
+        },
+        "usage": {"input_tokens": 500, "output_tokens": 5},
+    }
+
+
+async def test_a_selected_jev_adjudicator_approves_and_the_call_proceeds(
+    tmp_path: Path, graph_db: Graph
+) -> None:
+    """The end of the escalation path: select Jev, approve, grant, forward.
+
+    The adjudicator is built from `ADJUDICATOR=jev`, not injected, so this test
+    pins the gateway's own selection and not just the class in isolation.
+    """
+    log = DecisionLog(tmp_path / "runs")
+    client = JevClient(
+        settings=JevSettings(
+            jev_api_key="test-key-not-a-real-credential",
+            jev_url="https://jev.test/v1/systemone",
+            jev_model="jev-latest",
+        ),
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=jev_response())),
+    )
+    upstream = FakeUpstream()
+    gateway = make_gateway(
+        tmp_path,
+        graph_db,
+        escalating_engine(log),
+        servers=[POSTGRES],
+        upstream=upstream,
+        now=lambda: NOW,
+        adjudicator_settings=AdjudicatorSettings(adjudicator=ADJUDICATOR_JEV),
+        subject_fetcher=FakeSubjects(ticket_subject()),
+        jev=client,
+    )
+    gateway.ledger.record("task-1", "triage-agent", ticket_source())
+
+    result = await call(gateway)
+
+    assert result.is_error is False
+    assert len(upstream.calls) == 1
+    decisions = gateway.decision_log.read("task-1")
+    assert [decision.verdict for decision in decisions] == [Verdict.escalate, Verdict.allow]
+    escalation = decisions[0]
+    assert escalation.adjudication is not None
+    assert escalation.adjudication.time_box_minutes == 15
+    assert escalation.adjudication.cited_sources == ["42"]
+    assert escalation.adjudication.cited_subject == "42"
+    assert len(escalation.adjudicator_calls) == 1
+    assert escalation.adjudicator_calls[0].rule == "adjudicate"
+    assert escalation.adjudicator_calls[0].cost_usd > 0
+    assert escalation.request.jev_calls == []
+    # The grant allow line carries the same request but not the adjudicator's
+    # call, so a per-run sum counts it once.
+    assert decisions[1].adjudicator_calls == []
+    grants = GrantStore(gateway.runs_dir).read()
+    assert len(grants) == 1
+    assert grants[0].source == SOURCE_ADJUDICATOR

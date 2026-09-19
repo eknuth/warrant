@@ -184,6 +184,7 @@ def make_gateway(
     taint: Taint | None = None,
     now: Any = None,
     adjudicator: Any = None,
+    adjudicator_settings: Any = None,
     subject_fetcher: Any = None,
     grants: Any = None,
     queue: Any = None,
@@ -205,6 +206,7 @@ def make_gateway(
         taint=taint,
         now=now,
         adjudicator=adjudicator,
+        adjudicator_settings=adjudicator_settings,
         subject_fetcher=subject_fetcher,
         grants=grants,
         queue=queue,
@@ -835,6 +837,7 @@ def test_healthz_answers_without_a_bearer_and_reports_the_process_mode(
         "status": "ok",
         "mode": warrant_config.current_mode().value,
         "taint": warrant_config.current_taint().value,
+        "adjudicator": "deepseek",
     }
 
 
