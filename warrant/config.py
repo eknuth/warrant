@@ -4,7 +4,7 @@
 engine and the ledger accept an explicit `mode` too, so a test can exercise a
 mode without touching the environment. W15 explains the modes to a reader.
 
-The five modes:
+The six modes:
 
 * `full` is the real configuration: the chain comes from the verified token
   exchange and the ledger records what was read.
@@ -21,6 +21,12 @@ The five modes:
   with the whole picture, and the one choice it answers is the verdict. It is
   the ablation that asks whether a model with full context staffing the
   enforcement point is enough on its own.
+* `cascade` (W27) runs the Cedar engine as in `full`, then asks the Jev
+  derived-write question about a call Cedar allowed and that is a write or a
+  send. A Jev yes turns the allow into a deny, a Jev no leaves it, and a Jev
+  that cannot answer leaves it too. Cedar runs first so the network cost is paid
+  only on the allow path, and the model can only subtract permission, never add
+  it.
 
 `TAINT` is read the same way, at import, into `DEFAULT_TAINT`. It selects which
 provenance rule the gateway computes for a call. `task` fills
@@ -132,6 +138,8 @@ class Mode(StrEnum):
     prompt_only = "prompt-only"
     # W24: Cedar never runs; one Jev choice is the verdict.
     jev_only = "jev-only"
+    # W27: Cedar runs first; a Jev yes on an allowed write subtracts the allow.
+    cascade = "cascade"
 
 
 class ChainSourceError(RuntimeError):

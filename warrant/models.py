@@ -309,6 +309,14 @@ class AuthzRequest(BaseModel):
     # W24: one record per classifier call, with its latency and token cost. The
     # runner sums these per cell; the raw evidence stays on the decision line.
     jev_calls: list[JevCall] = Field(default_factory=list)
+    # W27: the cascade overlay's outcome for this call. Empty when the overlay
+    # did not run, which is every read, every call Cedar denied or escalated,
+    # and every ablation that is not `cascade`. `cleared` means Jev answered that
+    # the write is not derived, `denied` means it subtracted a Cedar allow, and
+    # `unavailable` means the classifier could not answer and Cedar's allow
+    # stands. The value is on the decision line so an unavailable overlay is
+    # recorded as that rather than read back as a deny.
+    overlay: str = ""
 
     @model_validator(mode="after")
     def _provenance_belongs_to_the_task(self) -> AuthzRequest:

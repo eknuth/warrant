@@ -42,3 +42,25 @@ that runs Cedar runs the model instead, with no policy set behind it. A prompt-o
 agent the rules and enforces nothing, and a `jev-only` row lets a model enforce them. If `jev-only`
 scores well, that is the finding, and the case for the policy engine is still audit: a probability
 cannot be reviewed, diffed, or edited, and a Cedar policy can.
+
+## The cascade column
+
+W27 adds `cascade`. Cedar decides first, as it does in `full`. Only a call Cedar already allowed and
+that is a write or a send goes to Jev, which answers the same derived question the `jev` column asks.
+A yes turns the allow into a deny and records the Cedar permit beside the probability that overrode
+it. A no leaves the allow alone. A deny and an escalation never reach the network, so scope
+collapse, an orphan agent, and a wrong-subject refusal cost nothing and cannot be talked out of the
+answer by a model.
+
+The ordering is the security property. A model may subtract permission and may never add it. Every
+deny still has a rule behind it and the probability is evidence beside that rule rather than a
+substitute for one. Every allow still passed the policy, so a prompt that convinces Jev to say allow
+buys an attacker nothing. Running Jev first loses that: its allow would be the verdict, its deny
+would be final, and a probabilistic answer would stand where a policy is supposed to. The reverse
+arrangement is rejected on audit grounds, and the cost is that the classifier's latency is paid only
+on the allow path, which is the one the request path would run anyway. An endpoint that does not
+answer leaves Cedar's answer standing and says `overlay: unavailable`; a timeout is not a deny.
+
+The column checks writes, because a write is where content leaves the task. A read that an injection
+asked for is not a candidate, so the cascade does not close the read-side gap W24 found, and the
+decision record says so plainly.
