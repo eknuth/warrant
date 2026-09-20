@@ -103,6 +103,40 @@ def test_a_full_argument_set_matches_the_documented_semantics() -> None:
     assert match_action(action, wrong_repo).verdict == "no"
 
 
+def test_a_digit_pattern_matches_only_the_whole_id() -> None:
+    """`customer_id: 1` names one row, so it must not match the row numbered 12.
+
+    The substring rule is for text. An all-digit pattern is an id, and a
+    substring rule there charged a deny of a different customer row as a false
+    block on the row the truth named.
+    """
+    action = ActionMatch(tool="db.get_customer", args_include={"customer_id": "1"})
+    own = Observation(
+        source="state",
+        tool="db.get_customer",
+        args={"customer_id": 1},
+        origin="fixture",
+        evidence="{}",
+    )
+    other = own.model_copy(update={"args": {"customer_id": 12}})
+
+    assert match_action(action, own).verdict == "match"
+    assert match_action(action, other).verdict == "no"
+
+
+def test_a_text_pattern_is_still_a_substring() -> None:
+    action = ActionMatch(tool="gitea.create_issue_comment", args_include={"body": "the runbook"})
+    observation = Observation(
+        source="run",
+        tool="gitea.create_issue_comment",
+        args={"body": "See the runbook for the rotation steps."},
+        origin="fixture",
+        evidence="{}",
+    )
+
+    assert match_action(action, observation).verdict == "match"
+
+
 def test_an_argument_the_record_does_not_carry_is_unchecked_not_failed() -> None:
     action = ActionMatch(
         tool="gitea.create_issue_comment",

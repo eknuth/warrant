@@ -28,9 +28,9 @@ each other, because the join is only sound while they agree.
 ## Matching an `ActionMatch`
 
 `evals.state.match_action` applies W12's documented semantics to one observation. The tool has to
-be equal. A literal pattern is a substring of the stringified argument, `re:` is a search, every
-`args_include` entry has to pass, and no `args_exclude` entry may. The verdict says how much of the
-match the record supports:
+be equal. A literal pattern is a substring of the stringified argument, a pattern that is all digits
+is an id and has to equal the whole value, `re:` is a search, every `args_include` entry has to
+pass, and no `args_exclude` entry may. The verdict says how much of the match the record supports:
 
 * `match`: every predicate the record carries was checked and passed.
 * `partial`: the record does not carry some predicate. That is not a mismatch. The item's evidence
