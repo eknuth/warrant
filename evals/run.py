@@ -73,9 +73,11 @@ from gen.schema import (
     available_scenarios,
     graph_seed_data,
     load_scenario,
+    rebase_scenario,
     shipped_human_ids,
 )
 from gen.seed import SeedError, seed
+from scripts.seed_smoke import SeedSettings
 from warrant.adjudicator import ADJUDICATOR_DEEPSEEK, ADJUDICATOR_KINDS
 from warrant.graph import Graph
 from warrant.models import ActionKind, AuthzRequest, Chain, Decision, Provenance, Verdict
@@ -115,6 +117,11 @@ RUN_SUBDIR = "run"
 # A tool no scenario's truth names, and not a tool the graph holds. A dry-run
 # decision that names it can never be charged as an injected action that ran.
 DRY_RUN_TOOL = "dry-run.noop"
+
+# W21. The scenarios the GitHub seeder authors. The spec scopes the real-org
+# path to these three, and the runner refuses the rest rather than resetting the
+# org and seeding a scenario whose seed block was never written for GitHub.
+GITHUB_SCENARIOS = frozenset({"01-issue-injection", "02-scope-collapse", "04-persistence"})
 
 
 class RunnerError(RuntimeError):
@@ -186,6 +193,23 @@ def parse_scenarios(value: str | None) -> list[str]:
             if match not in requested:
                 requested.append(match)
     return requested
+
+
+def refuse_unsupported_forge(scenarios: Sequence[str], forge: str) -> None:
+    """Refuse a scenario the named forge's seeder does not author.
+
+    The GitHub path is scoped to the three scenarios whose seed block was
+    written for a real org. Any other scenario would reset the org and then seed
+    nothing it declares, so the runner stops by name instead of producing a
+    grade against the wrong world.
+    """
+    if forge != "github":
+        return
+    unsupported = sorted(name for name in scenarios if name not in GITHUB_SCENARIOS)
+    if unsupported:
+        raise RunnerError(
+            f"FORGE=github seeds only {sorted(GITHUB_SCENARIOS)}; it cannot seed {unsupported}"
+        )
 
 
 def parse_models(value: str | None) -> list[str]:
@@ -646,7 +670,13 @@ def write_cell_meta(cell_root: Path, meta: dict[str, Any]) -> Path:
     return path
 
 
-def dry_cell(cell: Cell, scenario: Scenario, *, results_dir: Path) -> CellResult:
+def dry_cell(
+    cell: Cell,
+    scenario: Scenario,
+    *,
+    results_dir: Path,
+    seed_settings: SeedSettings | None = None,
+) -> CellResult:
     """Seed a scenario and grade a synthetic no-op run, with no model at all.
 
     The synthetic decision names a tool no truth block holds, so the grade has
@@ -660,7 +690,7 @@ def dry_cell(cell: Cell, scenario: Scenario, *, results_dir: Path) -> CellResult
     run_dir.mkdir(parents=True, exist_ok=True)
     started = datetime.now(UTC)
     try:
-        seed(scenario)
+        seed(scenario, settings=seed_settings)
     except SeedError as error:
         return _error_result(cell, root, started, f"seed failed: {error}", traceback.format_exc())
 
@@ -778,6 +808,7 @@ def run_cell(
     settings: DevSettings,
     mcp_url: str | None,
     attempts: int = 2,
+    seed_settings: SeedSettings | None = None,
 ) -> CellResult:
     """Seed, switch, run, snapshot, grade one cell.
 
@@ -799,7 +830,7 @@ def run_cell(
                 shutil.rmtree(run_dir)
             run_dir.mkdir(parents=True, exist_ok=True)
             seed_started = time.monotonic()
-            seed(scenario)
+            seed(scenario, settings=seed_settings)
             seed_s = time.monotonic() - seed_started
             # Seed first, then recreate: a restarted gateway reads the graph
             # the seed just wrote, which is the settle step the W14 note asked
@@ -826,7 +857,7 @@ def run_cell(
                 return _error_result(cell, root, started, last_error, last_traceback)
 
     try:
-        state = live_state(scenario)
+        state = live_state(scenario, settings=seed_settings)
     except Exception as error:  # noqa: BLE001 - a state read that fails is a cell error
         return _error_result(
             cell,
@@ -909,6 +940,7 @@ def run_matrix(
     force: bool = False,
     build: bool = True,
     adjudicator: str = DEFAULT_ADJUDICATOR,
+    seed_settings: SeedSettings | None = None,
 ) -> list[CellResult]:
     """Run every cell in order and return the results.
 
@@ -920,9 +952,23 @@ def run_matrix(
     A cell that already holds a `grade.json` is skipped, so the same command
     continues an interrupted column. `force=True` reruns every cell instead.
     An error cell has no `grade.json`, so it is retried on the next run.
+
+    One `SeedSettings` drives the seed, the state readback, and the forge
+    choice, so a GitHub run cannot seed one forge and read another.
     """
     settings = settings or DevSettings()
+    seed_settings = seed_settings or SeedSettings()
+    forge = seed_settings.forge
+    refuse_unsupported_forge(list(scenarios), forge)
     loaded = {scenario_id: load_scenario(scenario_id) for scenario_id in scenarios}
+    if forge == "github":
+        # The scenario files and the graph name the local org `acme`. The
+        # recording runs on the org in `.env`, so every `acme/` becomes that
+        # org before the seed or the task runs.
+        loaded = {
+            scenario_id: rebase_scenario(scenario, seed_settings.github_org)
+            for scenario_id, scenario in loaded.items()
+        }
     resolved_providers: dict[str, Provider] = {}
     if not dry_run:
         resolved_providers = {model: provider_factory(model) for model in models}
@@ -949,7 +995,14 @@ def run_matrix(
                         logger.info("skip %s: already graded", root)
                         continue
                     if dry_run:
-                        results.append(dry_cell(cell, loaded[scenario_id], results_dir=results_dir))
+                        results.append(
+                            dry_cell(
+                                cell,
+                                loaded[scenario_id],
+                                results_dir=results_dir,
+                                seed_settings=seed_settings,
+                            )
+                        )
                         continue
                     assert switcher is not None
                     results.append(
@@ -961,6 +1014,7 @@ def run_matrix(
                             results_dir=results_dir,
                             settings=settings,
                             mcp_url=mcp_url,
+                            seed_settings=seed_settings,
                         )
                     )
     if switcher is not None:

@@ -33,6 +33,7 @@ from evals.run import (
     parse_adjudicator,
     parse_models,
     parse_scenarios,
+    refuse_unsupported_forge,
     regrade_column,
     run_cell,
     run_matrix,
@@ -62,6 +63,47 @@ def test_parse_scenarios_accepts_all_numbers_and_full_ids() -> None:
 def test_parse_scenarios_refuses_an_unknown_name() -> None:
     with pytest.raises(RunnerError):
         parse_scenarios("99")
+
+
+def test_github_forge_refuses_the_scenarios_it_does_not_seed() -> None:
+    refuse_unsupported_forge(["01-issue-injection"], "github")
+    refuse_unsupported_forge(["01-issue-injection", "02-scope-collapse"], "github")
+    refuse_unsupported_forge(["04-persistence"], "github")
+
+    with pytest.raises(RunnerError, match="FORGE=github seeds only"):
+        refuse_unsupported_forge(["01-issue-injection", "08-quiet-control"], "github")
+
+
+def test_the_gitea_forge_refuses_nothing() -> None:
+    """The full matrix stays unchanged when FORGE is the default."""
+    refuse_unsupported_forge(["08-quiet-control", "03-exfiltration"], "gitea")
+
+
+def test_a_github_run_rebases_the_scenario_org(tmp_path: Path, monkeypatch: Any) -> None:
+    """The task has to name the org the recording's repositories live in."""
+    captured: list[Any] = []
+
+    def fake_dry_cell(
+        cell: Cell, scenario: Any, *, results_dir: Path, seed_settings: Any = None
+    ) -> Any:
+        captured.append(scenario)
+        return run_module.CellResult(cell=cell, status="ok")
+
+    monkeypatch.setattr(run_module, "dry_cell", fake_dry_cell)
+
+    run_matrix(
+        scenarios=["01-issue-injection"],
+        ablations=parse_ablations("full"),
+        models=["m"],
+        repeats=1,
+        column="github",
+        results_dir=tmp_path,
+        dry_run=True,
+        seed_settings=run_module.SeedSettings(forge="github", github_org="warrant-demo-org"),
+    )
+
+    assert captured[0].tasks[0].subject == "warrant-demo-org/widgets#2"
+    assert captured[0].tasks[0].params["repo"] == "warrant-demo-org/widgets"
 
 
 def test_parse_models_defaults_and_splits() -> None:
@@ -221,7 +263,7 @@ def test_task_groups_put_a_concurrent_group_together_and_the_rest_alone() -> Non
 def test_dry_run_writes_the_layout_and_a_grade(tmp_path: Path, monkeypatch: Any) -> None:
     """The acceptance layout, with a synthetic no-op and no model at all."""
     seeded: list[str] = []
-    monkeypatch.setattr(run_module, "seed", lambda scenario: seeded.append(scenario.id))
+    monkeypatch.setattr(run_module, "seed", lambda scenario, **_: seeded.append(scenario.id))
     scenario = load_scenario("08-quiet-control")
     cell = Cell(
         column="dry-run",
@@ -248,7 +290,7 @@ def test_dry_run_writes_the_layout_and_a_grade(tmp_path: Path, monkeypatch: Any)
 
 def test_regrade_rescores_a_stored_cell_without_a_model(tmp_path: Path, monkeypatch: Any) -> None:
     """A grader change rescoring from the stored run spends nothing."""
-    monkeypatch.setattr(run_module, "seed", lambda scenario: None)
+    monkeypatch.setattr(run_module, "seed", lambda scenario, **_: None)
     scenario = load_scenario("08-quiet-control")
     cell = Cell(
         column="dry-run",
@@ -475,7 +517,7 @@ def test_a_provider_error_retries_once_then_records_an_error(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     seeds: list[str] = []
-    monkeypatch.setattr(run_module, "seed", lambda scenario: seeds.append(scenario.id))
+    monkeypatch.setattr(run_module, "seed", lambda scenario, **_: seeds.append(scenario.id))
 
     def explode(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("provider exploded")
@@ -530,6 +572,7 @@ def test_the_matrix_continues_after_an_error_cell(tmp_path: Path, monkeypatch: A
         switcher=switcher,
         provider_factory=lambda spec: object(),  # type: ignore[arg-type,return-value]
         build=False,
+        seed_settings=run_module.SeedSettings(forge="gitea"),
     )
 
     assert calls == ["08-quiet-control", "01-issue-injection"]
@@ -577,6 +620,7 @@ def test_a_graded_cell_is_skipped_unless_forced(tmp_path: Path, monkeypatch: Any
             provider_factory=lambda spec: object(),  # type: ignore[arg-type,return-value]
             force=force,
             build=False,
+            seed_settings=run_module.SeedSettings(forge="gitea"),
         )
 
     assert run(force=False) == []
@@ -586,9 +630,9 @@ def test_a_graded_cell_is_skipped_unless_forced(tmp_path: Path, monkeypatch: Any
 
 
 def test_meta_json_records_the_confirmed_mode(tmp_path: Path, monkeypatch: Any) -> None:
-    monkeypatch.setattr(run_module, "seed", lambda scenario: None)
+    monkeypatch.setattr(run_module, "seed", lambda scenario, **_: None)
     monkeypatch.setattr(run_module, "run_tasks_sync", lambda *a, **k: [])
-    monkeypatch.setattr(run_module, "live_state", lambda scenario: run_module.State())
+    monkeypatch.setattr(run_module, "live_state", lambda scenario, **_: run_module.State())
     monkeypatch.setattr(
         run_module,
         "grade",

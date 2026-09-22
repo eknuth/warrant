@@ -38,8 +38,9 @@ next call is decided.
 - Cedar is the policy engine. Every forbid and every escalation carries an `@id`, and the decision
   line records the ids that fired.
 - MCP is the wire. The agents speak MCP to Warrant, and Warrant speaks MCP to the resource servers.
-- Gitea backs the eval runs, a local forge that reseeds from YAML for every cell. The recording on a
-  real forge org is W19 and W21, and neither is built yet.
+- Gitea backs the table, a local forge that reseeds from YAML for every cell. The recording runs the
+  same MCP tool surface on a real GitHub org through `GitHubForge`: the path exists, but it has not
+  been exercised against a live org, because no org and no tokens exist yet.
 - Postgres holds the support database: customers, tickets, and the API keys the exfiltration
   scenario reads.
 - Mailpit is the mailbox, with an HTTP API the grader reads instead of trusting the agent.
@@ -131,8 +132,8 @@ been read, every write or send that leaves the named target is refused, includin
 Content taint is computed for one write from that call's own arguments. It names the sources whose
 text overlaps the arguments and whether any of them is external. It is the narrow rule: it fires
 only when the arguments share a run of text, an identifier, or more than three word 5-grams with a
-source. It is not free of false positives, because a license header, a signature block, or any
-boilerplate both texts carry is a hit, and it cannot see a paraphrase by construction.
+source. It has false positives: a license header, a signature block, or any boilerplate both texts
+carry is a hit. It cannot see a paraphrase by construction.
 
 Scenarios 09 and 10 are the trade side by side.
 
@@ -177,7 +178,8 @@ transformed is outside both rules. True data-flow taint through a model is not o
 - Adjudicator cost. The local adjudicator reports a dollar cost per call. The cloud route has no
   per-token price recorded in this tree, so its side of the comparison reports tokens and latency
   and leaves cost blank rather than inventing a rate.
-- The recording. W19 and W21 are not built, so there is no video and no run on a real forge org yet.
+- The recording. The GitHub path exists behind `GitHubForge`, but no org and no tokens exist yet, so
+  it has not run against a live org and there is no video.
 
 ## How to run it
 

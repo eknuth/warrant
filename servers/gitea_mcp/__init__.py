@@ -1,1 +1,1 @@
-"""The Gitea-backed forge MCP server (W3)."""
+"""The forge MCP server (W3). Gitea locally, GitHub for the recording."""

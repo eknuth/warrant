@@ -17,16 +17,24 @@ staying `external` in `author_tier`.
 
 The API keys are generated here and never written into a scenario file, a test,
 or a commit. Only the label and the revoked flag are part of the scenario.
+
+With `FORGE=github` the same shape runs against `api.github.com`: the reset
+deletes every repository in the org, and the seed authors each file, issue, and
+comment with the member's or the external's own token so `author_tier` is real.
+GitHub creates users and orgs only through its web UI, so those two throwaway
+accounts and the org exist before the seeder runs.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import secrets
 import shutil
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -38,11 +46,25 @@ import psycopg
 
 from scripts.gitea_bootstrap import ADMIN_USERNAME, wait_for_gitea
 from scripts.seed_smoke import ORG, SeedSettings, advance_sequences, ensure_membership, ensure_user
+from servers.gitea_mcp.forge_github import is_rate_limited, rate_limit_delay
 from servers.mail_mcp.mail import MailSettings
 from warrant.config import default_runs_dir, main_checkout
 from warrant.graph import Graph
 
-from .schema import DbSeed, GiteaSeed, RepoSeed, Scenario, graph_seed_data
+from .schema import (
+    DbSeed,
+    GiteaSeed,
+    RepoSeed,
+    Scenario,
+    rebase_graph_seed,
+    rebase_scenario,
+)
+
+logger = logging.getLogger("gen.seed")
+
+# The page size on a GitHub list read. GitHub caps at 100, the same as Gitea's
+# reset uses 50; the two resets each page their own way.
+GITHUB_PER_PAGE = 100
 
 # The paths under `runs/` a scenario owns. The eval runner and the ledger write
 # under the same root, so the reset drops one scenario's directory and nothing
@@ -154,6 +176,99 @@ def gitea_client(settings: SeedSettings) -> httpx.Client:
     )
 
 
+# -- github ----------------------------------------------------------------
+
+
+def github_client(
+    settings: SeedSettings, token: str, *, base_url: str | None = None
+) -> httpx.Client:
+    """A GitHub client carrying one credential.
+
+    The seeder acts as a scenario's own member or external by handing their
+    token in, the same way it acts as a Gitea user through their password. The
+    token is never written or printed.
+    """
+    if not token:
+        raise SeedError("a GitHub token is required to seed the org")
+    return httpx.Client(
+        base_url=(base_url or settings.github_api_url).rstrip("/"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout=20.0,
+    )
+
+
+def github_admin_client(settings: SeedSettings) -> httpx.Client:
+    """An admin-authenticated client for the seeding API."""
+    if not settings.github_admin_token:
+        raise SeedError("GITHUB_ADMIN_TOKEN is not set")
+    return github_client(settings, settings.github_admin_token)
+
+
+def github_call(
+    client: httpx.Client,
+    method: str,
+    path: str,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    **kwargs: Any,
+) -> httpx.Response:
+    """One GitHub request, sleeping through a spent primary rate limit.
+
+    A 403 whose `X-RateLimit-Remaining` is 0 is not an error a caller can act
+    on: the only move is to wait for the reset and retry, which is what this
+    does. Every other answer comes back for the caller to judge.
+    """
+    while True:
+        response = client.request(method, path, **kwargs)
+        if not is_rate_limited(response):
+            return response
+        delay = rate_limit_delay(response)
+        logger.warning(
+            "github rate limit spent on %s %s; sleeping %.1fs until reset", method, path, delay
+        )
+        sleep(delay)
+
+
+def _list_all_github(client: httpx.Client, path: str) -> list[dict[str, Any]]:
+    """Every page of a GitHub list endpoint, on the way to a total reset."""
+    items: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        response = require_ok(
+            github_call(client, "GET", path, params={"page": page, "per_page": GITHUB_PER_PAGE}),
+            f"GET {path} page {page}",
+        )
+        batch = response.json()
+        if not isinstance(batch, list):
+            raise SeedError(f"GET {path} did not answer a list")
+        items.extend(batch)
+        if len(batch) < GITHUB_PER_PAGE:
+            return items
+        page += 1
+
+
+def reset_github(client: httpx.Client, org: str) -> None:
+    """Delete every repository in the org.
+
+    GitHub creates users and orgs through its web UI, not this API, so the
+    reset deletes repos and nothing else. The two throwaway accounts and the
+    org are Ed's to create and keep.
+    """
+    if not org:
+        raise SeedError("GITHUB_ORG is not set; the GitHub reset needs the org")
+    for repo in _list_all_github(client, f"/orgs/{org}/repos"):
+        full_name = str(repo.get("full_name", ""))
+        if full_name:
+            require_ok(
+                github_call(client, "DELETE", f"/repos/{full_name}"),
+                f"DELETE /repos/{full_name}",
+            )
+
+
 @contextmanager
 def _as(settings: SeedSettings, login: str) -> Iterator[httpx.Client]:
     """A client acting as one Gitea user, through their own password.
@@ -209,17 +324,23 @@ def reset_mail(mail_settings: MailSettings) -> None:
     require_ok(response, f"DELETE {url}")
 
 
-def reset_graph(scenario: Scenario | None, graph_db: Path | str = DEFAULT_GRAPH_DB) -> Graph:
+def reset_graph(
+    scenario: Scenario | None,
+    graph_db: Path | str = DEFAULT_GRAPH_DB,
+    *,
+    org: str | None = None,
+) -> Graph:
     """Reload the graph from `infra/graph.yml`, then the scenario's own rows.
 
     The clear comes first, so a scenario that adds an agent leaves no trace of
     it for the next scenario. The shipped seed goes back in whole: the tools and
     the resources are the authority every policy and every tool call needs, and
-    a scenario file seeds agents only.
+    a scenario file seeds agents only. `org` renames the shipped repo rows from
+    the logical `acme` to the GitHub org the recording runs on.
     """
     graph = Graph(graph_db)
     graph.clear()
-    graph.seed(graph_seed_data())
+    graph.seed(rebase_graph_seed(org))
     if scenario is not None:
         graph.seed(scenario_graph_rows(scenario, graph))
     return graph
@@ -360,29 +481,14 @@ def write_seed_manifest(report: SeedReport) -> Path:
     return target
 
 
-def preflight(settings: SeedSettings, mail_settings: MailSettings) -> None:
-    """Check every system is reachable and ready before the reset deletes anything.
+def _preflight_data(settings: SeedSettings, mail_settings: MailSettings) -> None:
+    """Check Postgres and Mailpit are reachable and ready.
 
-    A partial reset is worse than a refused one: the org comes back empty while
-    the database still holds the previous scenario, and the caller sees a
-    traceback rather than the name of the system that was down. Every check runs
-    first, and each failure names the system.
-
-    Postgres is checked for the four support tables and not only for a socket.
-    A database that answers and has no schema would otherwise pass this point,
-    the org would be deleted, and the seeder would fail on its first insert.
+    Shared by the two forge preflights. Postgres is checked for the four
+    support tables and not only for a socket: a database that answers and has
+    no schema would otherwise pass this point, the org would be deleted, and
+    the seeder would fail on its first insert.
     """
-    with gitea_client(settings) as client:
-        try:
-            wait_for_gitea(client, settings.gitea_url.rstrip("/"))
-            response = client.get(f"/api/v1/orgs/{ORG}")
-        except (SystemExit, Exception) as exc:
-            raise SeedError(f"gitea preflight failed at {settings.gitea_url}: {exc}") from exc
-        if response.status_code != 200:
-            raise SeedError(
-                f"gitea preflight: org {ORG} is missing (HTTP {response.status_code}); "
-                "run scripts/gitea_bootstrap.py"
-            )
     try:
         with psycopg.connect(settings.dsn(), connect_timeout=5) as conn:
             conn.execute("select 1")
@@ -409,6 +515,54 @@ def preflight(settings: SeedSettings, mail_settings: MailSettings) -> None:
         raise SeedError(f"mailpit preflight GET {url} -> HTTP {response.status_code}")
 
 
+def preflight(settings: SeedSettings, mail_settings: MailSettings) -> None:
+    """Check every system is reachable and ready before the reset deletes anything.
+
+    A partial reset is worse than a refused one: the org comes back empty while
+    the database still holds the previous scenario, and the caller sees a
+    traceback rather than the name of the system that was down. Every check runs
+    first, and each failure names the system.
+    """
+    with gitea_client(settings) as client:
+        try:
+            wait_for_gitea(client, settings.gitea_url.rstrip("/"))
+            response = client.get(f"/api/v1/orgs/{ORG}")
+        except (SystemExit, Exception) as exc:
+            raise SeedError(f"gitea preflight failed at {settings.gitea_url}: {exc}") from exc
+        if response.status_code != 200:
+            raise SeedError(
+                f"gitea preflight: org {ORG} is missing (HTTP {response.status_code}); "
+                "run scripts/gitea_bootstrap.py"
+            )
+    _preflight_data(settings, mail_settings)
+
+
+def preflight_github(settings: SeedSettings, mail_settings: MailSettings) -> None:
+    """The GitHub reset's preflight: the org answers, then Postgres and Mailpit.
+
+    The org is checked with the admin token, so a wrong token fails before the
+    reset deletes a repository. The database and mailbox checks are the same
+    ones the Gitea path makes.
+    """
+    if not settings.github_org:
+        raise SeedError("GITHUB_ORG is not set; the GitHub preflight needs the org")
+    with github_admin_client(settings) as client:
+        try:
+            response = github_call(client, "GET", f"/orgs/{settings.github_org}")
+        except httpx.HTTPError as exc:
+            raise SeedError(f"github preflight failed: {exc}") from exc
+        if response.status_code in (401, 403):
+            raise SeedError(
+                f"github preflight: GITHUB_ADMIN_TOKEN refused with HTTP {response.status_code}"
+            )
+        if response.status_code != 200:
+            raise SeedError(
+                f"github preflight: org {settings.github_org} is missing "
+                f"(HTTP {response.status_code})"
+            )
+    _preflight_data(settings, mail_settings)
+
+
 def reset(
     scenario: Scenario | None = None,
     *,
@@ -426,14 +580,24 @@ def reset(
     """
     settings = settings or SeedSettings()
     mail_settings = mail_settings or MailSettings()
-    preflight(settings, mail_settings)
-    with gitea_client(settings) as client:
+    if settings.forge == "github":
+        preflight_github(settings, mail_settings)
         try:
-            reset_gitea(client)
+            with github_admin_client(settings) as client:
+                reset_github(client, settings.github_org)
         except SeedError:
             raise
         except Exception as exc:
-            raise SeedError(f"gitea reset failed: {exc}") from exc
+            raise SeedError(f"github reset failed: {exc}") from exc
+    else:
+        preflight(settings, mail_settings)
+        with gitea_client(settings) as client:
+            try:
+                reset_gitea(client)
+            except SeedError:
+                raise
+            except Exception as exc:
+                raise SeedError(f"gitea reset failed: {exc}") from exc
     try:
         reset_postgres(settings)
     except SeedError:
@@ -447,7 +611,8 @@ def reset(
     except httpx.HTTPError as exc:
         raise SeedError(f"mailpit reset failed: {exc}") from exc
     try:
-        with reset_graph(scenario, graph_db):
+        org = settings.github_org if settings.forge == "github" else None
+        with reset_graph(scenario, graph_db, org=org):
             pass
     except SeedError:
         raise
@@ -559,6 +724,181 @@ def seed_gitea(client: httpx.Client, settings: SeedSettings, gitea: GiteaSeed) -
     return full_names
 
 
+def ensure_github_repo(client: httpx.Client, org: str, repo: RepoSeed) -> str:
+    """Create one repository in the org, at the visibility the scenario names."""
+    full_name = f"{org}/{repo.name}"
+    existing = github_call(client, "GET", f"/repos/{full_name}")
+    if existing.status_code == 200:
+        return full_name
+    if existing.status_code != 404:
+        raise SeedError(
+            f"GET /repos/{full_name} -> HTTP {existing.status_code}: {existing.text[:200]}"
+        )
+    require_ok(
+        github_call(
+            client,
+            "POST",
+            f"/orgs/{org}/repos",
+            json={
+                "name": repo.name,
+                "auto_init": True,
+                "default_branch": "main",
+                "private": repo.visibility == "private",
+            },
+        ),
+        f"POST /orgs/{org}/repos ({repo.name})",
+    )
+    return full_name
+
+
+def ensure_github_collaborator(client: httpx.Client, full_name: str, login: str) -> None:
+    """Give an author write access, so their content is authored as them.
+
+    An org member usually already has access, and the call is then a no-op. An
+    outside collaborator gets an invitation, which `accept_github_invitations`
+    takes up before that author writes.
+    """
+    response = github_call(
+        client,
+        "PUT",
+        f"/repos/{full_name}/collaborators/{login}",
+        json={"permission": "push"},
+    )
+    if response.status_code not in (200, 201, 204):
+        raise SeedError(
+            f"could not add {login} to {full_name}: "
+            f"HTTP {response.status_code} {response.text[:200]}"
+        )
+
+
+def accept_github_invitations(client: httpx.Client) -> int:
+    """Accept every pending repo invitation for the credential's own account.
+
+    An outside collaborator has to accept before their token can write. GitHub
+    sends the invitation when the admin adds them; this is the account taking
+    it up. Returns how many were accepted.
+    """
+    accepted = 0
+    for invitation in _list_all_github(client, "/user/repository_invitations"):
+        invitation_id = invitation.get("id")
+        if invitation_id is None:
+            continue
+        response = github_call(client, "PATCH", f"/user/repository_invitations/{invitation_id}")
+        if response.status_code in (200, 204):
+            accepted += 1
+    return accepted
+
+
+def write_github_file(client: httpx.Client, full_name: str, path: str, content: str) -> None:
+    """Create or replace one file through the client that authored it."""
+    url = f"/repos/{full_name}/contents/{path}"
+    existing = github_call(client, "GET", url, params={"ref": "main"})
+    body: dict[str, Any] = {
+        "branch": "main",
+        "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+        "message": FILE_MESSAGE.format(path=path),
+    }
+    if existing.status_code == 200:
+        body["sha"] = existing.json()["sha"]
+    elif existing.status_code != 404:
+        raise SeedError(f"GET {url} -> HTTP {existing.status_code}: {existing.text[:200]}")
+    require_ok(github_call(client, "PUT", url, json=body), f"write {full_name}:{path}")
+
+
+def create_github_issue(client: httpx.Client, full_name: str, title: str, body: str) -> int:
+    response = require_ok(
+        github_call(
+            client, "POST", f"/repos/{full_name}/issues", json={"title": title, "body": body}
+        ),
+        f"file an issue in {full_name}",
+    )
+    return int(response.json()["number"])
+
+
+def create_github_comment(client: httpx.Client, full_name: str, number: int, body: str) -> None:
+    require_ok(
+        github_call(
+            client,
+            "POST",
+            f"/repos/{full_name}/issues/{number}/comments",
+            json={"body": body},
+        ),
+        f"comment on {full_name}#{number}",
+    )
+
+
+def _github_author_client(
+    login: str,
+    members: set[str],
+    member_client: httpx.Client,
+    external_client: httpx.Client,
+) -> httpx.Client:
+    """The client whose token authors one login's content.
+
+    The scenario names one member set and one external set, and the two tokens
+    are the two roles, so the login's side of that line picks the credential.
+    The schema refuses a login in neither set before this runs.
+    """
+    return member_client if login in members else external_client
+
+
+def seed_github(settings: SeedSettings, gitea: GiteaSeed) -> list[str]:
+    """Author the org's repositories, files, issues, and comments on GitHub.
+
+    The two throwaway accounts and the org already exist: GitHub creates them
+    through its web UI, not this API. What the seeder does is create the repos
+    and then write each issue, comment, and file through the token of the login
+    the scenario names, so `author_tier` is real rather than the admin's.
+    """
+    org = settings.github_org
+    if not org:
+        raise SeedError("GITHUB_ORG is not set; the GitHub seeder needs the org")
+    members = set(gitea.members)
+    externals = set(gitea.externals)
+    if members and not settings.github_member_token:
+        raise SeedError("GITHUB_MEMBER_TOKEN is not set; a member's content cannot be authored")
+    if externals and not settings.github_external_token:
+        raise SeedError(
+            "GITHUB_EXTERNAL_TOKEN is not set; an external's content cannot be authored"
+        )
+    member_client = github_client(settings, settings.github_member_token)
+    external_client = github_client(settings, settings.github_external_token)
+    admin = github_admin_client(settings)
+    full_names: list[str] = []
+    try:
+        for repo in gitea.repos:
+            full_name = ensure_github_repo(admin, org, repo)
+            full_names.append(full_name)
+            for login in sorted(members | externals):
+                ensure_github_collaborator(admin, full_name, login)
+            if externals:
+                accept_github_invitations(external_client)
+            for path, file in sorted(repo.file_entries().items()):
+                assert file.author is not None  # the schema refuses a file with no author
+                author = _github_author_client(file.author, members, member_client, external_client)
+                write_github_file(author, full_name, path, file.content)
+            for issue in sorted(repo.issues, key=lambda item: item.number):
+                author = _github_author_client(
+                    issue.author, members, member_client, external_client
+                )
+                number = create_github_issue(author, full_name, issue.title, issue.body)
+                if number != issue.number:
+                    raise SeedError(
+                        f"{full_name} assigned issue number {number}, "
+                        f"but the scenario declares {issue.number}; the numbers have to match"
+                    )
+                for comment in issue.comments:
+                    author = _github_author_client(
+                        comment.author, members, member_client, external_client
+                    )
+                    create_github_comment(author, full_name, number, comment.body)
+    finally:
+        member_client.close()
+        external_client.close()
+        admin.close()
+    return full_names
+
+
 def seed_postgres(settings: SeedSettings, db: DbSeed) -> None:
     """Insert the customers, tickets, notes, and keys the scenario declares."""
     with psycopg.connect(settings.dsn()) as conn:
@@ -635,6 +975,8 @@ def seed(
     """Reset, then write the scenario's graph, org, database, and inbox."""
     settings = settings or SeedSettings()
     mail_settings = mail_settings or MailSettings()
+    if settings.forge == "github":
+        scenario = rebase_scenario(scenario, settings.github_org)
     started = datetime.now(UTC)
     reset(
         scenario,
@@ -643,12 +985,15 @@ def seed(
         graph_db=graph_db,
     )
     try:
-        with gitea_client(settings) as client:
-            repos = seed_gitea(client, settings, scenario.seed.gitea)
+        if settings.forge == "github":
+            repos = seed_github(settings, scenario.seed.gitea)
+        else:
+            with gitea_client(settings) as client:
+                repos = seed_gitea(client, settings, scenario.seed.gitea)
     except SeedError:
         raise
     except Exception as exc:
-        raise SeedError(f"gitea seed failed: {exc}") from exc
+        raise SeedError(f"{settings.forge} seed failed: {exc}") from exc
     try:
         seed_postgres(settings, scenario.seed.db)
     except SeedError:
