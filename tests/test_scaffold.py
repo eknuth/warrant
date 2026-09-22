@@ -299,7 +299,15 @@ def test_the_test_data_directories_hold_no_python() -> None:
     assert written == loaded, f"not loaded by conftest: {sorted(written - loaded)}"
 
 
-def test_readme_states_the_argument_and_that_it_is_unfinished() -> None:
+def test_readme_states_the_argument_and_its_limit() -> None:
+    """W18 replaces the placeholder. The claim and the one-family limit stay on the page.
+
+    The old form of this test only asked for "work in progress", which is the
+    one string a finished README must not carry. This asks for the argument the
+    README exists to make and the limitation that keeps its table honest.
+    """
     text = (REPO / "README.md").read_text()
 
-    assert "work in progress" in text.lower()
+    assert "what the agent read" in text
+    assert "one model family" in text.lower()
+    assert "work in progress" not in text.lower()
