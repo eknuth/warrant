@@ -1,0 +1,6 @@
+# One "name type" line per diagram under docs/diagrams/. `make diagrams`
+# reads this to know each <name>.json's archify type, since the JSON
+# schemas put `diagram_type` at the top level, not under `meta`, so archify
+# itself has no meta field to read it from.
+architecture architecture
+decision-path sequence

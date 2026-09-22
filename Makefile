@@ -18,7 +18,19 @@ REPO_ROOT := $(shell bash scripts/repo_root.sh)
 WARRANT_RUNS_HOST_DIR ?= $(REPO_ROOT)/runs
 export WARRANT_RUNS_HOST_DIR
 
-.PHONY: install lint test up down reset gitea-mcp postgres-mcp mail-mcp dsh-profile worktree worktree-clean evals smoke qwen-smoke jev-smoke cascade-smoke matrix throughput queue adjudicator-compare w26-smoke
+.PHONY: install lint test up down reset gitea-mcp postgres-mcp mail-mcp dsh-profile worktree worktree-clean evals smoke qwen-smoke jev-smoke cascade-smoke matrix throughput queue adjudicator-compare w26-smoke diagrams build-cost
+
+# The archify skill's install root. Override on the command line
+# (`make diagrams ARCHIFY=/path/to/archify`) rather than editing this file,
+# so the default stays Ed's machine without hardcoding it for everyone else.
+ARCHIFY ?= $(HOME)/.claude/skills/archify
+
+# Chrome's own sandbox wants a writable crash directory outside the checkout,
+# which the session's write sandbox denies, and the render then dies before it
+# loads the page. The opt-out renders the local JSON in a throwaway profile
+# under $TMPDIR; set it to 0 to keep Chrome's sandbox on.
+ARCHIFY_CHROME_NO_SANDBOX ?= 1
+export ARCHIFY_CHROME_NO_SANDBOX
 
 # Create or refresh .venv from pyproject.toml and uv.lock. `uv sync` is also
 # what a clean clone runs first; there is no other install step.
@@ -27,9 +39,12 @@ install:
 
 # `ruff check` reports the errors, `ruff format --check` the drift. Neither
 # rewrites a file: the post-commit hook and Ed both read this as a verdict.
+# The README numbers check is here because the README is the argument: every
+# figure in it has to be one a generated file or the allowlist carries.
 lint:
 	uv run ruff check .
 	uv run ruff format --check .
+	uv run python scripts/check_readme_numbers.py
 
 test:
 	uv run pytest
@@ -181,3 +196,32 @@ throughput:
 # --minutes 10"` approves one with a time box and mints its grant.
 queue:
 	uv run python -m warrant queue $(or $(ARGS),list)
+
+# W18. Regenerate docs/build-cost.md from the harness records under runs/dsh/.
+# The records are gitignored, so a fresh clone has the committed table, and
+# running this after a session lands refreshes it.
+build-cost:
+	uv run python scripts/build_cost.py --write docs/build-cost.md
+
+# W18. Validates every docs/diagrams/*.json at --quality showcase and renders its
+# .html, .svg, and .png. docs/diagrams/diagrams.txt lists each diagram's archify
+# type ("name type" per line): the JSON schemas put `diagram_type` at the top
+# level, not under `meta`, so there is no meta field for archify to read a type
+# from. tools/export_diagram.mjs drives archify's own bundled headless Chrome to
+# produce the .svg and .png (see that file for why: archify's CLI has no `export`
+# subcommand, only the delivered page's own viewer buttons).
+diagrams:
+	@grep -v '^#' docs/diagrams/diagrams.txt | grep -v '^$$' | while read -r name type; do \
+		json="docs/diagrams/$$name.json"; \
+		html="docs/diagrams/$$name.html"; \
+		svg="docs/diagrams/$$name.svg"; \
+		png="docs/diagrams/$$name.png"; \
+		echo "validating $$json ($$type)"; \
+		node "$(ARCHIFY)/bin/archify.mjs" validate "$$type" "$$json" --quality showcase --json || exit 1; \
+		echo "rendering $$html"; \
+		node "$(ARCHIFY)/bin/archify.mjs" deliver "$$type" "$$json" "$$html" --quality showcase --json || exit 1; \
+		echo "exporting $$svg"; \
+		node tools/export_diagram.mjs "$(ARCHIFY)" "$$html" "$$svg" svg || exit 1; \
+		echo "exporting $$png"; \
+		node tools/export_diagram.mjs "$(ARCHIFY)" "$$html" "$$png" png || exit 1; \
+	done

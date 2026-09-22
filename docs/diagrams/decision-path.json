@@ -1,0 +1,241 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "One Call Through Warrant",
+    "output": "docs/diagrams/decision-path.html",
+    "quality_profile": "showcase"
+  },
+  "participants": [
+    {
+      "id": "agent",
+      "type": "backend",
+      "label": "Agent",
+      "sublabel": "MCP client"
+    },
+    {
+      "id": "warrant",
+      "type": "backend",
+      "label": "Warrant",
+      "sublabel": "MCP gateway"
+    },
+    {
+      "id": "keycloak",
+      "type": "security",
+      "label": "Keycloak",
+      "sublabel": "RFC 8693"
+    },
+    {
+      "id": "ledger",
+      "type": "database",
+      "label": "Ledger",
+      "sublabel": "provenance sources"
+    },
+    {
+      "id": "cedar",
+      "type": "security",
+      "label": "Cedar",
+      "sublabel": "policy set"
+    },
+    {
+      "id": "adj",
+      "type": "backend",
+      "label": "Adjudicator",
+      "sublabel": "or the human queue"
+    },
+    {
+      "id": "resource",
+      "type": "cloud",
+      "label": "Resource",
+      "sublabel": "Gitea, Postgres, mail"
+    }
+  ],
+  "segments": [
+    {
+      "from": 170,
+      "to": 345,
+      "label": "Verify + gather"
+    },
+    {
+      "from": 360,
+      "to": 432,
+      "label": "Decide"
+    },
+    {
+      "from": 445,
+      "to": 677,
+      "label": "One of three endings"
+    }
+  ],
+  "messages": [
+    {
+      "id": "call",
+      "from": "agent",
+      "to": "warrant",
+      "y": 200,
+      "label": "tools/call + OBO token",
+      "variant": "emphasis"
+    },
+    {
+      "id": "verify",
+      "from": "warrant",
+      "to": "keycloak",
+      "y": 236,
+      "label": "verify token, build chain",
+      "variant": "security"
+    },
+    {
+      "id": "claims",
+      "from": "keycloak",
+      "to": "warrant",
+      "y": 266,
+      "label": "claims verified",
+      "variant": "return"
+    },
+    {
+      "id": "sources",
+      "from": "warrant",
+      "to": "ledger",
+      "y": 300,
+      "label": "read the task's sources"
+    },
+    {
+      "id": "readings",
+      "from": "ledger",
+      "to": "warrant",
+      "y": 330,
+      "label": "sources + tiers + taint",
+      "variant": "return"
+    },
+    {
+      "id": "authorize",
+      "from": "warrant",
+      "to": "cedar",
+      "y": 368,
+      "label": "AuthzRequest: chain + provenance",
+      "variant": "emphasis"
+    },
+    {
+      "id": "verdict",
+      "from": "cedar",
+      "to": "warrant",
+      "y": 400,
+      "label": "allow, deny, or escalate + rule @id",
+      "variant": "return"
+    },
+    {
+      "id": "deny",
+      "from": "warrant",
+      "to": "agent",
+      "y": 455,
+      "label": "deny path: return the rule id",
+      "variant": "security"
+    },
+    {
+      "id": "forward",
+      "from": "warrant",
+      "to": "resource",
+      "y": 500,
+      "label": "allow path: forward with token",
+      "variant": "emphasis"
+    },
+    {
+      "id": "result",
+      "from": "resource",
+      "to": "warrant",
+      "y": 530,
+      "label": "result + source block",
+      "variant": "return"
+    },
+    {
+      "id": "escalate",
+      "from": "warrant",
+      "to": "adj",
+      "y": 575,
+      "label": "escalate path: ledger is evidence",
+      "variant": "security"
+    },
+    {
+      "id": "approve",
+      "from": "adj",
+      "to": "warrant",
+      "y": 607,
+      "label": "approve with citation + time box, or defer",
+      "variant": "return"
+    },
+    {
+      "id": "granted",
+      "from": "warrant",
+      "to": "resource",
+      "y": 640,
+      "label": "on a grant: forward the call",
+      "variant": "emphasis"
+    },
+    {
+      "id": "record",
+      "from": "warrant",
+      "to": "ledger",
+      "y": 670,
+      "label": "one decision line per call",
+      "variant": "dashed"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "warrant",
+      "from": 195,
+      "to": 675,
+      "type": "backend"
+    },
+    {
+      "participant": "keycloak",
+      "from": 231,
+      "to": 271,
+      "type": "security"
+    },
+    {
+      "participant": "ledger",
+      "from": 295,
+      "to": 335,
+      "type": "database"
+    },
+    {
+      "participant": "cedar",
+      "from": 363,
+      "to": 405,
+      "type": "security"
+    },
+    {
+      "participant": "resource",
+      "from": 495,
+      "to": 535,
+      "type": "cloud"
+    },
+    {
+      "participant": "adj",
+      "from": 570,
+      "to": 612,
+      "type": "backend"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Order",
+      "items": [
+        "The token is verified before any provenance is read",
+        "The policy runs before any upstream call is forwarded",
+        "Every call ends in one decision line"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Endings",
+      "items": [
+        "Exactly one of deny, allow, or escalate comes back",
+        "An escalation needs a cited approval in a time box",
+        "No verdict waits for a person instead of proceeding"
+      ]
+    }
+  ]
+}

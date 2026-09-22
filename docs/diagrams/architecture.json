@@ -1,0 +1,259 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Warrant Architecture",
+    "output": "docs/diagrams/architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "human",
+      "type": "external",
+      "label": "Human",
+      "sublabel": "alice, bob, or carol",
+      "pos": [
+        20,
+        280
+      ],
+      "size": [
+        130,
+        80
+      ]
+    },
+    {
+      "id": "keycloak",
+      "type": "security",
+      "label": "Keycloak",
+      "sublabel": "realm warrant",
+      "tag": "RFC 8693 exchange",
+      "pos": [
+        190,
+        70
+      ],
+      "size": [
+        170,
+        72
+      ]
+    },
+    {
+      "id": "agent",
+      "type": "backend",
+      "label": "Agent",
+      "sublabel": "triage or support",
+      "tag": "MCP client",
+      "pos": [
+        210,
+        280
+      ],
+      "size": [
+        150,
+        80
+      ]
+    },
+    {
+      "id": "chain",
+      "type": "security",
+      "label": "Delegation chain",
+      "sublabel": "sub, act.sub, task_id",
+      "pos": [
+        480,
+        70
+      ],
+      "size": [
+        170,
+        72
+      ]
+    },
+    {
+      "id": "cedar",
+      "type": "security",
+      "label": "Cedar policies",
+      "sublabel": "policies/*.cedar",
+      "pos": [
+        710,
+        70
+      ],
+      "size": [
+        170,
+        72
+      ]
+    },
+    {
+      "id": "warrant",
+      "type": "backend",
+      "label": "Warrant",
+      "sublabel": "MCP gateway :9100",
+      "tag": "verify, decide, record",
+      "pos": [
+        480,
+        270
+      ],
+      "size": [
+        190,
+        100
+      ]
+    },
+    {
+      "id": "gitea_mcp",
+      "type": "backend",
+      "label": "Gitea MCP",
+      "sublabel": "Gitea: repos, issues",
+      "pos": [
+        950,
+        130
+      ],
+      "size": [
+        180,
+        72
+      ]
+    },
+    {
+      "id": "postgres_mcp",
+      "type": "backend",
+      "label": "Postgres MCP",
+      "sublabel": "customers, tickets, keys",
+      "pos": [
+        950,
+        280
+      ],
+      "size": [
+        180,
+        72
+      ]
+    },
+    {
+      "id": "mail_mcp",
+      "type": "backend",
+      "label": "Mail MCP",
+      "sublabel": "Mailpit: send, inbox",
+      "pos": [
+        950,
+        430
+      ],
+      "size": [
+        180,
+        72
+      ]
+    },
+    {
+      "id": "ledger",
+      "type": "database",
+      "label": "Provenance ledger",
+      "sublabel": "runs/<task>/provenance",
+      "pos": [
+        480,
+        520
+      ],
+      "size": [
+        190,
+        72
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "compose stack, one machine",
+      "wraps": [
+        "keycloak",
+        "agent",
+        "chain",
+        "cedar",
+        "warrant",
+        "gitea_mcp",
+        "postgres_mcp",
+        "mail_mcp",
+        "ledger"
+      ],
+      "pad": 28
+    }
+  ],
+  "connections": [
+    {
+      "from": "human",
+      "to": "agent",
+      "label": "task",
+      "variant": "emphasis"
+    },
+    {
+      "from": "keycloak",
+      "to": "agent",
+      "label": "OBO token",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "agent",
+      "to": "warrant",
+      "label": "MCP tool call",
+      "variant": "emphasis",
+      "labelDy": 26
+    },
+    {
+      "from": "warrant",
+      "to": "chain",
+      "label": "build chain",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelDx": -70,
+      "labelDy": -36
+    },
+    {
+      "from": "warrant",
+      "to": "cedar",
+      "label": "request",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelDy": -30
+    },
+    {
+      "from": "cedar",
+      "to": "warrant",
+      "label": "decision",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 30
+    },
+    {
+      "from": "warrant",
+      "to": "ledger",
+      "label": "each read recorded",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 30
+    },
+    {
+      "from": "warrant",
+      "to": "gitea_mcp",
+      "label": "forward allowed call, upstream token",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "from": "warrant",
+      "to": "postgres_mcp",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "from": "warrant",
+      "to": "mail_mcp",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "from": "warrant",
+      "to": "keycloak",
+      "label": "upstream exchange",
+      "variant": "security",
+      "fromSide": "left",
+      "toSide": "right"
+    }
+  ]
+}
