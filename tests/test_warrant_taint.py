@@ -179,6 +179,26 @@ def test_a_value_in_a_dot_env_read_becomes_a_secret(
     assert context["args_touch_secret"] is True
 
 
+def test_a_github_dot_env_read_becomes_a_secret_too(
+    make_request: MakeRequest, make_source: MakeSource
+) -> None:
+    """The recording's forge is GitHub; the path rule reads both systems."""
+    state = TaskState(task_id="task-1")
+    env_source = make_source(system="github", kind="file", id="warrant-demo-org/widgets:.env@main")
+    read(
+        state,
+        env_source,
+        {"content": "STRIPE_KEY=sk_test_0123456789abcdef\nPORT=3000\n"},
+    )
+
+    context = state.context_for(
+        make_request(action_kind=ActionKind.send, tool="mail.send_reply"),
+        {"body": "the key is sk_test_0123456789abcdef"},
+    )
+
+    assert context["args_touch_secret"] is True
+
+
 def test_a_secret_file_read_harvests_its_text_field_not_its_metadata(
     make_source: MakeSource,
 ) -> None:

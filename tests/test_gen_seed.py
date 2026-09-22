@@ -16,7 +16,14 @@ import pytest
 import yaml
 
 import gen.__main__ as cli
-from gen.schema import SCENARIO_DIR, Scenario, load_scenario
+from gen.schema import (
+    SCENARIO_DIR,
+    Scenario,
+    graph_seed_data,
+    load_scenario,
+    rebase_graph_seed,
+    rebase_scenario,
+)
 from gen.seed import (
     SeedError,
     SeedReport,
@@ -109,6 +116,56 @@ def test_a_scenario_agent_carries_its_owner_expiry_and_authority() -> None:
     assert agent["owner_human_id"] == "h-carol"
     assert agent["justification_expires_at"] == "2027-01-01T00:00:00Z"
     assert agent["allowed_tools"] == ["gitea.get_issue"]
+
+
+def test_rebase_scenario_rewrites_the_org_the_agent_sees() -> None:
+    scenario = load_scenario("01-issue-injection")
+
+    rebased = rebase_scenario(scenario, "warrant-demo-org")
+
+    assert rebased.tasks[0].subject == "warrant-demo-org/widgets#2"
+    assert rebased.tasks[0].params["repo"] == "warrant-demo-org/widgets"
+    injected = {action.args_include["repo"] for action in rebased.truth.injected_actions}
+    assert "warrant-demo-org/vault" in injected
+    body = rebased.seed.gitea.repos[0].issues[1].body
+    assert "warrant-demo-org/vault" in body
+    assert "acme/vault" not in body
+    # The loaded scenario is not touched; a Gitea run still sees `acme`.
+    assert scenario.tasks[0].subject == "acme/widgets#2"
+    assert "acme/vault" in scenario.seed.gitea.repos[0].issues[1].body
+
+
+def test_rebase_scenario_is_a_noop_for_the_logical_org() -> None:
+    scenario = load_scenario("01-issue-injection")
+
+    assert rebase_scenario(scenario, "acme") is scenario
+    assert rebase_scenario(scenario, "") is scenario
+
+
+def test_rebase_graph_seed_renames_repo_rows_only() -> None:
+    data = rebase_graph_seed("warrant-demo-org")
+
+    repos = {row["name"]: row["id"] for row in data["resources"] if row["kind"] == "repo"}
+    assert "warrant-demo-org/widgets" in repos
+    assert repos["warrant-demo-org/widgets"] == "repo-warrant-demo-org-widgets"
+    assert "acme/widgets" not in repos
+    mailboxes = {row["name"] for row in data["resources"] if row["kind"] == "mailbox"}
+    assert "support@acme.test" in mailboxes
+
+
+def test_reset_graph_with_an_org_seeds_the_renamed_rows(tmp_path: Path) -> None:
+    database = tmp_path / "warrant.db"
+
+    with reset_graph(None, database, org="warrant-demo-org") as graph:
+        assert graph.resource_named("warrant-demo-org/widgets", "repo") is not None
+        assert graph.resource_named("acme/widgets", "repo") is None
+
+    # The cached shipped seed is not rewritten in place.
+    assert any(
+        row["name"] == "acme/widgets"
+        for row in graph_seed_data()["resources"]
+        if row["kind"] == "repo"
+    )
 
 
 def test_reset_graph_leaves_no_agent_from_the_previous_scenario(tmp_path: Path) -> None:

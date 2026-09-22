@@ -50,6 +50,7 @@ Field-by-field documentation lives in `docs/decisions/w12-scenario-seeders.md`.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from datetime import UTC, datetime
@@ -113,6 +114,63 @@ def graph_repo_names() -> frozenset[str]:
     return frozenset(
         str(row["name"]) for row in graph_seed_data().get("resources", []) if row["kind"] == "repo"
     )
+
+
+# The org the scenario files and the shipped graph name. The local forge is
+# created as `acme`; the recording runs on a throwaway GitHub org whose name is
+# in `.env`. A GitHub run rebases every `acme/` to that org before it seeds or
+# runs, so the same scenario file drives both forges and the agent's tool calls
+# name a repository that exists.
+LOGICAL_ORG = "acme"
+
+
+def _rebase_strings(value: Any, old: str, new: str) -> Any:
+    """Replace `old` with `new` in every string inside a nested model or value."""
+    if isinstance(value, str):
+        return value.replace(old, new)
+    if isinstance(value, list):
+        return [_rebase_strings(item, old, new) for item in value]
+    if isinstance(value, dict):
+        return {key: _rebase_strings(item, old, new) for key, item in value.items()}
+    if isinstance(value, BaseModel):
+        for name in type(value).model_fields:
+            setattr(value, name, _rebase_strings(getattr(value, name), old, new))
+    return value
+
+
+def rebase_scenario(scenario: Scenario, org: str) -> Scenario:
+    """A copy of `scenario` with the logical org replaced by `org`.
+
+    The replacement is over every string, not only the task and truth fields,
+    because the seeded issue text names the private repository and the agent
+    reads it. `acme/` is specific enough that no unrelated text carries it; the
+    mail domain is `acme.test`, which is not a repo path. The org the local
+    forge uses is a no-op, so the Gitea matrix sees the file unchanged.
+    """
+    if not org or org == LOGICAL_ORG:
+        return scenario
+    rebased = scenario.model_copy(deep=True)
+    return _rebase_strings(rebased, f"{LOGICAL_ORG}/", f"{org}/")
+
+
+def rebase_graph_seed(org: str | None) -> dict[str, Any]:
+    """The shipped graph with every `repo` row renamed to `org`.
+
+    A repository call resolves its resource by the `name` column, so a graph
+    that still says `acme/widgets` leaves a GitHub call to
+    `warrant-demo-org/widgets` with no row and the subject rule refuses it. The
+    row id is renamed too, so the decision's resource id and its name agree.
+    The cached graph is copied before it is touched.
+    """
+    data = copy.deepcopy(graph_seed_data())
+    if not org or org == LOGICAL_ORG:
+        return data
+    for row in data.get("resources", []):
+        if row.get("kind") != "repo":
+            continue
+        row["name"] = str(row["name"]).replace(f"{LOGICAL_ORG}/", f"{org}/")
+        row["id"] = str(row["id"]).replace(LOGICAL_ORG, org)
+    return data
 
 
 def shipped_agent_rows() -> dict[str, dict[str, Any]]:

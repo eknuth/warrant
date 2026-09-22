@@ -131,6 +131,21 @@ def test_an_instruction_file_from_a_non_member_is_external(
     assert classify(instructions) is Tier.external
 
 
+def test_a_github_instruction_file_is_external_too(
+    make_source: Callable[..., Source],
+) -> None:
+    """The recording runs on GitHub; the rules-file check has to fire there."""
+    instructions = make_source(
+        system="github",
+        kind="file",
+        id="warrant-demo-org/widgets:.github/copilot-instructions.md@main",
+        author="drifter",
+        author_tier=Tier.external,
+    )
+
+    assert classify(instructions) is Tier.external
+
+
 def test_an_instruction_file_from_a_member_keeps_the_member_tier(
     make_source: Callable[..., Source],
 ) -> None:

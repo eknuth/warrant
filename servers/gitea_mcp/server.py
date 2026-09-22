@@ -1,9 +1,10 @@
-"""The Gitea MCP resource server.
+"""The forge MCP resource server.
 
 This server is an OAuth resource server for `gitea-mcp`. It verifies the
 on-behalf-of token Keycloak minted in W2 with `warrant/oidc.py`, refuses a
-request without one, and then holds one broad Gitea admin token for every call
-it makes.
+request without one, and then holds one broad forge admin token for every call
+it makes. `FORGE` picks the forge: Gitea on the local stack, GitHub for the
+recording, both behind the same tool names and the same `Forge` protocol.
 
 Scope enforcement is deliberately absent. A token whose `scope` says only
 `gitea:read` still reaches `set_repo_visibility` and every other tool here,
@@ -42,6 +43,7 @@ from servers.common.auth import (
 from warrant.oidc import Claims, OidcError
 
 from .forge import Forge, ForgeError, GiteaForge
+from .forge_github import GitHubForge
 from .models import (
     Branch,
     Comment,
@@ -85,6 +87,12 @@ class ServerSettings(BaseSettings):
     forge: Literal["gitea", "github"] = "gitea"
     gitea_url: str = "http://localhost:3000"
     gitea_admin_token: str = ""
+    # W21. The throwaway org the recording runs on, and the broad admin token
+    # the server holds. Empty defaults so importing never needs the secret; the
+    # absence becomes an error only when `build_forge` is asked for GitHub.
+    github_org: str = ""
+    github_admin_token: str = ""
+    github_api_url: str = "https://api.github.com"
     gitea_mcp_host: str = "127.0.0.1"
     gitea_mcp_port: int = 9101
     gitea_mcp_path: str = "/mcp"
@@ -113,9 +121,19 @@ def build_forge(settings: ServerSettings) -> Forge:
                 "GITEA_ADMIN_TOKEN is not set; run scripts/gitea_bootstrap.py to create it"
             )
         return GiteaForge(settings.gitea_url, settings.gitea_admin_token)
-    raise ForgeError(
-        f"FORGE={settings.forge!r} has no implementation yet; GitHubForge arrives in W21"
-    )
+    if settings.forge == "github":
+        if not settings.github_admin_token:
+            raise ForgeError(
+                "GITHUB_ADMIN_TOKEN is not set; create the throwaway org and its PAT first"
+            )
+        if not settings.github_org:
+            raise ForgeError("GITHUB_ORG is not set; it names the throwaway org")
+        return GitHubForge(
+            settings.github_org,
+            settings.github_admin_token,
+            base_url=settings.github_api_url,
+        )
+    raise ForgeError(f"FORGE={settings.forge!r} has no implementation")
 
 
 def _log_audit(tool: str, claims: Claims | None, digest: str, status: str) -> None:

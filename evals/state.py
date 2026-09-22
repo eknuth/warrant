@@ -63,6 +63,7 @@ from gen.schema import (
 )
 from gen.seed import scenario_graph_rows
 from scripts.seed_smoke import ORG, SeedSettings
+from servers.gitea_mcp.forge_github import is_rate_limited, rate_limit_delay
 from servers.mail_mcp.inspect import MailError, sent_messages
 from servers.mail_mcp.mail import MailSettings
 from servers.mail_mcp.models import SentMessage
@@ -81,6 +82,9 @@ from warrant.resources import (
 # The Gitea REST prefix. Every admin read goes through it, the same way
 # `gen.verify` and the seeder spell their own reads.
 API = "/api/v1"
+
+# The GitHub admin read's page size. GitHub caps at 100.
+GITHUB_PER_PAGE = 100
 
 DECISIONS_NAME = "decisions.jsonl"
 OUTCOME_NAME = "outcome.json"
@@ -669,6 +673,100 @@ class GiteaAdmin:
         return await self._get_all(f"{API}/repos/{repo}/pulls", state="all")
 
 
+class GitHubAdmin:
+    """The read-only GitHub reads the grader needs.
+
+    Same `ForgeReader` shape as `GiteaAdmin`, over `api.github.com`. The branch
+    rows are normalized to Gitea's `commit.id`, which is the key
+    `read_forge_effects` reads; GitHub spells that sha under `commit.sha`.
+    """
+
+    def __init__(self, settings: SeedSettings) -> None:
+        if not settings.github_admin_token:
+            raise StateError("GITHUB_ADMIN_TOKEN is not set; the grader cannot read the forge")
+        self._client = httpx.AsyncClient(
+            base_url=(settings.github_api_url or "https://api.github.com").rstrip("/"),
+            headers={
+                "Authorization": f"Bearer {settings.github_admin_token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            timeout=20.0,
+        )
+
+    async def __aenter__(self) -> GitHubAdmin:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def _get(self, path: str, **params: Any) -> Any:
+        while True:
+            try:
+                response = await self._client.get(path, params=params or None)
+            except httpx.HTTPError as error:
+                raise StateError(f"github is unreachable: {error}") from error
+            if is_rate_limited(response):
+                await asyncio.sleep(rate_limit_delay(response))
+                continue
+            if response.status_code >= 400:
+                raise StateError(f"github GET {path} -> HTTP {response.status_code}")
+            return response.json()
+
+    async def _get_all(self, path: str, **params: Any) -> list[dict[str, Any]]:
+        """Every page of one list endpoint, so a read is not silently capped."""
+        items: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            batch = await self._get(path, page=page, per_page=GITHUB_PER_PAGE, **params)
+            if not isinstance(batch, list):
+                raise StateError(f"github GET {path} did not answer a list")
+            items.extend(batch)
+            if len(batch) < GITHUB_PER_PAGE:
+                return items
+            page += 1
+
+    async def repos(self, org: str) -> list[dict[str, Any]]:
+        return await self._get_all(f"/orgs/{org}/repos")
+
+    async def branches(self, repo: str) -> list[dict[str, Any]]:
+        rows = await self._get_all(f"/repos/{repo}/branches")
+        return [
+            {
+                "name": str(row.get("name", "")),
+                "commit": {"id": str((row.get("commit") or {}).get("sha", ""))},
+            }
+            for row in rows
+        ]
+
+    async def tree(self, repo: str, ref: str) -> list[dict[str, Any]]:
+        data = await self._get(f"/repos/{repo}/git/trees/{ref}", recursive="1")
+        if data.get("truncated"):
+            raise StateError(
+                f"the tree of {repo}@{ref} was truncated; the state readback would be partial"
+            )
+        return [entry for entry in data.get("tree") or [] if entry.get("type") == "blob"]
+
+    async def blob(self, repo: str, sha: str) -> str:
+        data = await self._get(f"/repos/{repo}/git/blobs/{sha}")
+        if data.get("encoding") != "base64":
+            raise StateError(f"blob {sha} in {repo} is not base64")
+        raw = base64.b64decode(data.get("content") or "")
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise StateError(f"blob {sha} in {repo} is not text: {error}") from error
+
+    async def comments(self, repo: str, number: int) -> list[dict[str, Any]]:
+        return await self._get_all(f"/repos/{repo}/issues/{number}/comments")
+
+    async def pulls(self, repo: str) -> list[dict[str, Any]]:
+        return await self._get_all(f"/repos/{repo}/pulls", state="all")
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, default=str)
 
@@ -681,15 +779,19 @@ def _comment_author(comment: Mapping[str, Any]) -> str:
     return str((comment.get("user") or {}).get("login", ""))
 
 
-async def read_forge_effects(scenario: Scenario, reader: ForgeReader) -> list[Observation]:
+async def read_forge_effects(
+    scenario: Scenario, reader: ForgeReader, *, org: str = ORG
+) -> list[Observation]:
     """Every effect the org shows that the scenario's seed does not.
 
     The comparison is against the seed in both directions: a seeded comment or
-    file is not an effect, and a repository the scenario never named is.
+    file is not an effect, and a repository the scenario never named is. `org`
+    is the org the seed names, `acme` on the local forge and `GITHUB_ORG` on a
+    GitHub run.
     """
     effects: list[Observation] = []
-    seed_repos = {f"{ORG}/{repo.name}": repo for repo in scenario.seed.gitea.repos}
-    listed = {str(row.get("full_name", "")): row for row in await reader.repos(ORG)}
+    seed_repos = {f"{org}/{repo.name}": repo for repo in scenario.seed.gitea.repos}
+    listed = {str(row.get("full_name", "")): row for row in await reader.repos(org)}
 
     for full_name, row in listed.items():
         repo = seed_repos.get(full_name)
@@ -1053,9 +1155,14 @@ async def read_state(
     settings = settings or SeedSettings()
     mail_settings = mail_settings or MailSettings()
     owns_forge = forge is None
-    reader = forge or GiteaAdmin(settings)
+    if forge is None and settings.forge == "github":
+        reader: ForgeReader = GitHubAdmin(settings)
+        org = settings.github_org
+    else:
+        reader = forge or GiteaAdmin(settings)
+        org = ORG
     try:
-        effects = await read_forge_effects(scenario, reader)
+        effects = await read_forge_effects(scenario, reader, org=org)
     finally:
         if owns_forge:
             await reader.aclose()

@@ -119,6 +119,15 @@ class SeedSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
+    # W21. Which forge the seeder writes. `gitea` is the local compose forge;
+    # `github` is the throwaway org. The GitHub fields default to empty so
+    # constructing the settings never needs a secret.
+    forge: str = "gitea"
+    github_org: str = ""
+    github_admin_token: str = ""
+    github_member_token: str = ""
+    github_external_token: str = ""
+    github_api_url: str = "https://api.github.com"
     gitea_url: str = "http://localhost:3000"
     gitea_admin_token: str = ""
     warrant_user_password: str = ""

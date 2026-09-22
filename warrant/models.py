@@ -175,6 +175,14 @@ class Source(BaseModel):
     digest: str
 
 
+# The systems a forge-backed MCP tool returns a source under. `gitea` is the
+# local compose forge and `github` the real org the recording runs on. The rules
+# that read a repo path or an instruction-file path recognize both, because the
+# path shape is the same and a rule that fired only on the local forge would go
+# quiet on the recording.
+FORGE_SYSTEMS = frozenset({"gitea", "github"})
+
+
 class Provenance(BaseModel):
     """Every source read so far in one task.
 

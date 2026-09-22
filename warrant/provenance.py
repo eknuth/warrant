@@ -24,7 +24,7 @@ from pathlib import Path
 
 from warrant import config
 from warrant.config import RUNS_DIR, Mode, task_dir
-from warrant.models import Provenance, Source, Tier
+from warrant.models import FORGE_SYSTEMS, Provenance, Source, Tier
 
 LEDGER_NAME = "provenance.jsonl"
 LEDGER_DIR = "provenance"
@@ -67,13 +67,14 @@ def classify(source: Source) -> Tier:
     sender tier is added upstream, and it makes `mail.list_inbox`'s outside
     sender explicit at the one place the tiers are decided.
 
-    A Gitea file read whose path is an instruction file is `external` when the
+    A forge file read whose path is an instruction file is `external` when the
     last commit author is not a member or an owner. A commit with no resolvable
     forge account is `unknown`, which is not a member either, so an
     unaccountable `.github/` or `AGENTS.md` edit is treated the same as one from
     outside the org. A member's or owner's own instruction file keeps the
     upstream tier, which is what makes the same path committed by a member
-    classify as `member`.
+    classify as `member`. Both the local forge and GitHub use the same path
+    shape, so the rule reads `FORGE_SYSTEMS` rather than one system's name.
     """
     if source.system == "db" and source.kind == QUERY_KIND:
         return Tier.unknown
@@ -94,17 +95,17 @@ def _is_member_address(address: str) -> bool:
 
 
 def _is_instruction_file(source: Source) -> bool:
-    """Whether a gitea read is one of the paths an agent takes instructions from."""
-    if source.system != "gitea" or source.kind != "file":
+    """Whether a forge read is one of the paths an agent takes instructions from."""
+    if source.system not in FORGE_SYSTEMS or source.kind != "file":
         return False
     return bool(_INSTRUCTION_PATH.search(_gitea_path(source.id)))
 
 
 def _gitea_path(source_id: str) -> str:
-    """The file path inside a gitea source id, `<repo>:<path>@<ref>`.
+    """The file path inside a forge source id, `<repo>:<path>@<ref>`.
 
     A search-code match names the same shape, so a path from either read is
-    graded the same way.
+    graded the same way. The name is historical: both forges spell it this way.
     """
     _, _, rest = source_id.partition(":")
     path, separator, _ = rest.rpartition("@")

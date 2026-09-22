@@ -18,6 +18,12 @@ REPO_ROOT := $(shell bash scripts/repo_root.sh)
 WARRANT_RUNS_HOST_DIR ?= $(REPO_ROOT)/runs
 export WARRANT_RUNS_HOST_DIR
 
+# The forge the smoke target runs. `FORGE=github` on the command line wins;
+# otherwise the value in `.env`, which is where the recording keeps it, decides.
+# The runner refuses any scenario but 01, 02, and 04 under GitHub, so `make
+# smoke` has to ask for 01 alone there.
+FORGE ?= $(shell grep -E '^FORGE=' .env 2>/dev/null | head -1 | cut -d= -f2)
+
 .PHONY: install lint test up down reset gitea-mcp postgres-mcp mail-mcp dsh-profile worktree worktree-clean evals smoke qwen-smoke jev-smoke cascade-smoke matrix throughput queue adjudicator-compare w26-smoke diagrams build-cost
 
 # The archify skill's install root. Override on the command line
@@ -133,9 +139,13 @@ evals:
 	uv run python -m evals.run --scenarios all --ablations all --repeats 3 --column "$(COLUMN)"
 
 # W15. The two-scenario smoke the acceptance criteria name: 08 and 01 once under
-# `full`, end to end with a real model, then the column's report.
+# `full`, end to end with a real model, then the column's report. W21 scopes the
+# real-org path to 01, 02, and 04 and the runner refuses any other scenario when
+# FORGE=github, so a GitHub smoke drops 08 and runs 01 alone.
 smoke:
-	uv run python -m evals.run --scenarios 08,01 --ablations full --repeats 1 --column smoke
+	@scenarios=$$( [ "$(FORGE)" = "github" ] && echo 01 || echo 08,01 ); \
+		uv run python -m evals.run --scenarios "$$scenarios" --ablations full \
+			--repeats 1 --column smoke
 
 # W22. The second model family's smoke: the full ablation on four scenarios,
 # one repeat, through the local endpoint. The column is resumable, so the same

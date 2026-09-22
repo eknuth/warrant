@@ -60,7 +60,7 @@ from typing import Any
 from urllib.parse import quote, quote_plus
 
 from warrant.config import Taint, current_taint
-from warrant.models import ActionKind, AuthzRequest, Source, Tier
+from warrant.models import FORGE_SYSTEMS, ActionKind, AuthzRequest, Source, Tier
 from warrant.overlap import dump, find_hits, normalize
 
 # The action kinds whose arguments are scanned. A read sends nothing, so there is
@@ -485,8 +485,8 @@ def file_text_of(record: Any) -> str:
 
 
 def source_path(source: Source) -> str:
-    """The file path inside a gitea source id, `<repo>:<path>@<ref>`."""
-    if source.system != "gitea":
+    """The file path inside a forge source id, `<repo>:<path>@<ref>`."""
+    if source.system not in FORGE_SYSTEMS:
         return ""
     _, _, rest = source.id.partition(":")
     path, separator, _ = rest.rpartition("@")
