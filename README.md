@@ -39,10 +39,9 @@ next call is decided.
   line records the ids that fired.
 - MCP is the wire. The agents speak MCP to Warrant, and Warrant speaks MCP to the resource servers.
 - Gitea backs the table, a local forge that reseeds from YAML for every cell. The recording runs the
-  same MCP tool surface on a real GitHub org through `GitHubForge`: scenario 01 seeds the org and the
-  grader reads the repositories, comments, and pull requests back from `api.github.com`. Scenarios 02
-  and 04 need the external account to accept an invitation to a private repository, which a token
-  scoped `public_repo` cannot do.
+  same MCP tool surface on a real GitHub org through `GitHubForge`: scenarios 01, 02, and 04 seed the
+  org, with the `repo`-scoped external account accepting a private-repository invitation, and the
+  grader reads repositories, files, comments, and pull requests back from `api.github.com`.
 - Postgres holds the support database: customers, tickets, and the API keys the exfiltration
   scenario reads.
 - Mailpit is the mailbox, with an HTTP API the grader reads instead of trusting the agent.
@@ -180,8 +179,9 @@ transformed is outside both rules. True data-flow taint through a model is not o
 - Adjudicator cost. The local adjudicator reports a dollar cost per call. The cloud route has no
   per-token price recorded in this tree, so its side of the comparison reports tokens and latency
   and leaves cost blank rather than inventing a rate.
-- The recording. Scenario 01 runs on a real GitHub org through `GitHubForge` and the grader reads the
-  state back from `api.github.com`. W19's video is not recorded yet.
+- The recording. Scenarios 01, 02, and 04 seed and run on a real GitHub org through `GitHubForge`; in
+  the live 02 and 04 runs the agent passed the repository's short name, so every content read failed
+  and the injected call was never attempted. W19's video is not recorded yet.
 
 ## How to run it
 

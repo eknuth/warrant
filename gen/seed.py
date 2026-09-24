@@ -778,10 +778,9 @@ def accept_github_invitations(client: httpx.Client) -> int:
     sends the invitation when the admin adds them; this is the account taking
     it up. Returns how many were accepted.
 
-    A token that carries only `public_repo` scope cannot see or accept an
-    invitation to a private repository, so this accepts what the account's
-    scope reaches and reports the count rather than pretending the rest were
-    taken up.
+    The external credential carries `repo` scope in this setup, so it sees and
+    accepts an invitation to a private repository. This accepts every pending
+    invitation and returns the count.
     """
     accepted = 0
     for invitation in _list_all_github(client, "/user/repository_invitations"):
