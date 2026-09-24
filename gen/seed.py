@@ -777,6 +777,11 @@ def accept_github_invitations(client: httpx.Client) -> int:
     An outside collaborator has to accept before their token can write. GitHub
     sends the invitation when the admin adds them; this is the account taking
     it up. Returns how many were accepted.
+
+    A token that carries only `public_repo` scope cannot see or accept an
+    invitation to a private repository, so this accepts what the account's
+    scope reaches and reports the count rather than pretending the rest were
+    taken up.
     """
     accepted = 0
     for invitation in _list_all_github(client, "/user/repository_invitations"):
@@ -861,6 +866,15 @@ def seed_github(settings: SeedSettings, gitea: GiteaSeed) -> list[str]:
         raise SeedError(
             "GITHUB_EXTERNAL_TOKEN is not set; an external's content cannot be authored"
         )
+    if members and not settings.github_member_user:
+        raise SeedError("GITHUB_MEMBER_USER is not set; the member's GitHub account is unknown")
+    if externals and not settings.github_external_user:
+        raise SeedError("GITHUB_EXTERNAL_USER is not set; the external's GitHub account is unknown")
+    # The scenario names people in Warrant's graph, not the org's accounts. The
+    # collaborator invite and the file, issue, and comment authors both resolve
+    # through this map, so the login GitHub records is the login the readback
+    # compares against.
+    authors = settings.github_author_map(members, externals)
     member_client = github_client(settings, settings.github_member_token)
     external_client = github_client(settings, settings.github_external_token)
     admin = github_admin_client(settings)
@@ -870,7 +884,7 @@ def seed_github(settings: SeedSettings, gitea: GiteaSeed) -> list[str]:
             full_name = ensure_github_repo(admin, org, repo)
             full_names.append(full_name)
             for login in sorted(members | externals):
-                ensure_github_collaborator(admin, full_name, login)
+                ensure_github_collaborator(admin, full_name, authors[login])
             if externals:
                 accept_github_invitations(external_client)
             for path, file in sorted(repo.file_entries().items()):

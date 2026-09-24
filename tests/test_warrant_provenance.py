@@ -160,6 +160,26 @@ def test_an_instruction_file_from_a_member_keeps_the_member_tier(
     assert classify(instructions) is Tier.member
 
 
+def test_an_instruction_file_from_an_owner_keeps_the_owner_tier(
+    make_source: Callable[..., Source],
+) -> None:
+    """The GitHub honest account owns the org, so its instruction file is owner.
+
+    The instruction-file rule trusts `member` and `owner`; a run against the
+    throwaway org authors the honest commits as the owner, so the rule has to
+    keep that tier rather than demote it to external.
+    """
+    instructions = make_source(
+        system="github",
+        kind="file",
+        id="warrant-demo-org/widgets:.github/copilot-instructions.md@main",
+        author="eknuth",
+        author_tier=Tier.owner,
+    )
+
+    assert classify(instructions) is Tier.owner
+
+
 def test_an_instruction_file_with_no_resolvable_author_is_external(
     make_source: Callable[..., Source],
 ) -> None:
