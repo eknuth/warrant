@@ -42,6 +42,7 @@ import argparse
 import base64
 import secrets
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 
 import httpx
@@ -125,7 +126,9 @@ class SeedSettings(BaseSettings):
     forge: str = "gitea"
     github_org: str = ""
     github_admin_token: str = ""
+    github_member_user: str = ""
     github_member_token: str = ""
+    github_external_user: str = ""
     github_external_token: str = ""
     github_api_url: str = "https://api.github.com"
     gitea_url: str = "http://localhost:3000"
@@ -152,6 +155,32 @@ class SeedSettings(BaseSettings):
             password=self.postgres_password,
             dbname=dbname or self.postgres_db,
         )
+
+    def github_author(self, login: str, *, member: bool) -> str:
+        """The GitHub account that authors one scenario login's content.
+
+        The scenario files name people in Warrant's own access graph (`bob`,
+        `drifter`), not the accounts on a throwaway GitHub org. The two roles
+        are two accounts, and `GITHUB_MEMBER_USER` and `GITHUB_EXTERNAL_USER`
+        name them. The Gitea path leaves both unset and keeps the logical login,
+        which is the account the local seeder creates. A GitHub run that leaves
+        one unset falls back to the logical login too, so the missing setting
+        shows up as the forge refusing a login it does not know rather than as
+        a tier nothing granted.
+        """
+        if member:
+            return self.github_member_user or login
+        return self.github_external_user or login
+
+    def github_author_map(self, members: Iterable[str], externals: Iterable[str]) -> dict[str, str]:
+        """Scenario login to the GitHub account that authors as it.
+
+        Both roles are keyed, so a seed author, a collaborator invite, and a
+        readback that compares an author all resolve the same account.
+        """
+        mapping = {login: self.github_author(login, member=True) for login in members}
+        mapping.update({login: self.github_author(login, member=False) for login in externals})
+        return mapping
 
 
 def ensure_user(

@@ -780,7 +780,11 @@ def _comment_author(comment: Mapping[str, Any]) -> str:
 
 
 async def read_forge_effects(
-    scenario: Scenario, reader: ForgeReader, *, org: str = ORG
+    scenario: Scenario,
+    reader: ForgeReader,
+    *,
+    org: str = ORG,
+    author_map: Mapping[str, str] | None = None,
 ) -> list[Observation]:
     """Every effect the org shows that the scenario's seed does not.
 
@@ -788,7 +792,14 @@ async def read_forge_effects(
     file is not an effect, and a repository the scenario never named is. `org`
     is the org the seed names, `acme` on the local forge and `GITHUB_ORG` on a
     GitHub run.
+
+    `author_map` maps a scenario login to the forge account that authored as it.
+    It is empty on Gitea, where the seeder creates the scenario's own logins. On
+    GitHub the two roles are two throwaway accounts, so a seeded comment by
+    `drifter` comes back authored by the external account and has to be matched
+    under that login or it reads as a comment the run wrote.
     """
+    authored = (lambda login: author_map.get(login, login)) if author_map else (lambda login: login)
     effects: list[Observation] = []
     seed_repos = {f"{org}/{repo.name}": repo for repo in scenario.seed.gitea.repos}
     listed = {str(row.get("full_name", "")): row for row in await reader.repos(org)}
@@ -885,7 +896,9 @@ async def read_forge_effects(
                     )
                 )
         for issue in sorted(repo.issues, key=lambda item: item.number):
-            remaining = Counter((comment.author, comment.body) for comment in issue.comments)
+            remaining = Counter(
+                (authored(comment.author), comment.body) for comment in issue.comments
+            )
             for comment in await reader.comments(full_name, issue.number):
                 pair = (_comment_author(comment), _comment_body(comment))
                 if remaining[pair] > 0:
@@ -1155,14 +1168,21 @@ async def read_state(
     settings = settings or SeedSettings()
     mail_settings = mail_settings or MailSettings()
     owns_forge = forge is None
+    author_map: Mapping[str, str] | None = None
     if forge is None and settings.forge == "github":
         reader: ForgeReader = GitHubAdmin(settings)
         org = settings.github_org
+        # The scenario names Warrant's own logins; the GitHub seed authored the
+        # content as the two throwaway accounts, so the readback has to compare
+        # under the account each login was seeded as.
+        author_map = settings.github_author_map(
+            scenario.seed.gitea.members, scenario.seed.gitea.externals
+        )
     else:
         reader = forge or GiteaAdmin(settings)
         org = ORG
     try:
-        effects = await read_forge_effects(scenario, reader, org=org)
+        effects = await read_forge_effects(scenario, reader, org=org, author_map=author_map)
     finally:
         if owns_forge:
             await reader.aclose()

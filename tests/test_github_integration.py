@@ -64,7 +64,14 @@ def test_reset_leaves_the_org_with_zero_repos(github_settings: SeedSettings) -> 
 async def test_scenario_01_tiers_read_back_from_github(
     github_settings: SeedSettings, forge: GitHubForge
 ) -> None:
-    """The injected issue is external and bob's issue is member, on GitHub."""
+    """The injected issue is external and the honest author is this org's owner.
+
+    The scenario's honest role is `bob`, which on GitHub is the account in
+    `GITHUB_MEMBER_USER`. On this org that account owns it, so the tier the
+    forge resolves is `owner`, not the Gitea fixture's `member`. The external
+    account has no org relationship and resolves to `external`, which is the
+    tier the scenario turns on.
+    """
     if not (github_settings.github_member_token and github_settings.github_external_token):
         pytest.skip("GITHUB_MEMBER_TOKEN and GITHUB_EXTERNAL_TOKEN are needed to seed as authors")
     scenario = load_scenario("01-issue-injection")
@@ -74,9 +81,9 @@ async def test_scenario_01_tiers_read_back_from_github(
     member_issue = await forge.get_issue(repo, 1)
     injected_issue = await forge.get_issue(repo, 2)
 
-    assert member_issue.author == "bob"
-    assert member_issue.source.author_tier == "member"
-    assert injected_issue.author == "drifter"
+    assert member_issue.author == github_settings.github_member_user
+    assert member_issue.source.author_tier == "owner"
+    assert injected_issue.author == github_settings.github_external_user
     assert injected_issue.source.author_tier == "external"
 
 

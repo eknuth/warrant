@@ -18,6 +18,7 @@ import yaml
 import gen.__main__ as cli
 from gen.schema import (
     SCENARIO_DIR,
+    GiteaSeed,
     Scenario,
     graph_seed_data,
     load_scenario,
@@ -32,8 +33,10 @@ from gen.seed import (
     reset_runs,
     scenario_graph_rows,
     scenario_run_dir,
+    seed_github,
     write_seed_manifest,
 )
+from scripts.seed_smoke import SeedSettings
 from warrant import graph
 from warrant.config import main_checkout
 
@@ -325,3 +328,30 @@ def test_the_makefile_exports_and_creates_the_absolute_mount() -> None:
     assert "scripts/repo_root.sh" in makefile
     assert "export WARRANT_RUNS_HOST_DIR" in makefile
     assert 'mkdir -p "$(WARRANT_RUNS_HOST_DIR)" "$(WARRANT_RUNS_HOST_DIR)/graph"' in makefile
+
+
+def test_a_github_run_maps_the_scenario_logins_to_the_org_accounts() -> None:
+    settings = SeedSettings(
+        forge="github",
+        github_org="warrant-demo-org",
+        github_member_user="eknuth",
+        github_external_user="oregonknuths",
+    )
+
+    assert settings.github_author_map(["bob"], ["drifter"]) == {
+        "bob": "eknuth",
+        "drifter": "oregonknuths",
+    }
+
+
+def test_a_github_seed_refuses_a_missing_member_account_name() -> None:
+    settings = SeedSettings(
+        forge="github",
+        github_org="warrant-demo-org",
+        github_member_token="a-token",
+        github_member_user="",
+        github_external_user="",
+    )
+
+    with pytest.raises(SeedError, match="GITHUB_MEMBER_USER"):
+        seed_github(settings, GiteaSeed(members=["bob"]))

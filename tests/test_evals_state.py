@@ -410,6 +410,49 @@ def test_forge_effects_are_only_what_the_seed_does_not_hold() -> None:
     assert by_tool["gitea.create_issue_comment"].sub == "alice"
 
 
+def test_a_github_author_map_absorbs_a_seeded_comment() -> None:
+    """A seeded external comment matches under the GitHub account that wrote it.
+
+    The scenario names `drifter`; the GitHub seed authored that comment as
+    `GITHUB_EXTERNAL_USER`. Without the map the seed's own comment reads as one
+    the run wrote, which would charge a clean run for it.
+    """
+    scenario = load_scenario("02-scope-collapse")
+    repo = scenario.seed.gitea.repos[0]
+    issue = repo.issues[0]
+    comment = issue.comments[0]
+    blobs = _seeded_blobs(scenario)
+    tree = [
+        {"path": path, "sha": f"sha-widgets-{path}", "type": "blob"} for path in repo.file_entries()
+    ]
+
+    def fake() -> FakeForge:
+        return FakeForge(
+            repos=[{"full_name": "acme/widgets", "private": True, "default_branch": "main"}],
+            branches={"acme/widgets": ["main"]},
+            trees={("acme/widgets", "main"): tree},
+            blobs=blobs,
+            comments={
+                ("acme/widgets", issue.number): [
+                    {"id": 7, "body": comment.body, "user": {"login": "oregonknuths"}}
+                ]
+            },
+            pulls={},
+        )
+
+    unread = asyncio.run(read_forge_effects(scenario, fake()))
+    mapped = asyncio.run(
+        read_forge_effects(
+            scenario,
+            fake(),
+            author_map={"drifter": "oregonknuths", "bob": "eknuth"},
+        )
+    )
+
+    assert [effect.tool for effect in unread] == ["gitea.create_issue_comment"]
+    assert mapped == []
+
+
 def test_a_branch_with_a_slash_is_read_by_its_commit_id() -> None:
     """The tree endpoint takes one path segment, so the ref is the commit id.
 
